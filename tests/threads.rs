@@ -88,7 +88,7 @@ fn long_rust_loops_with_pollcheck() {
         let mut n = 0u64;
         while !s2.load(Ordering::Relaxed) {
             n += 1;
-            if n % 1024 == 0 {
+            if n.is_multiple_of(1024) {
                 fil.pollcheck();
             }
         }
@@ -188,7 +188,7 @@ fn stress_mixed_workload() {
                         1 => rt.run(|fil| {
                             let cb = fil.callback::<fn(i32) -> i32, _>(|_, (x,)| x ^ 0x55).unwrap();
                             let apply = b.library().function::<fn(fn(i32) -> i32, i32) -> i32>(fil, "apply").unwrap();
-                            assert_eq!(apply.call(fil, (cb.get(fil), i as i32)).unwrap(), i as i32 ^ 0x55);
+                            assert_eq!(apply.call(fil, (cb.get(fil), i)).unwrap(), i ^ 0x55);
                         }),
                         2 => {
                             let h = rt.run(|fil| fil.root(fil.c_str("rooted").unwrap()).unwrap());

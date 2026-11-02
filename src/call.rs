@@ -406,8 +406,11 @@ impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12);
 /// A Fil-C function pointer with signature `Sig`, valid within scope `'f`.
 pub struct FilFn<'f, Sig> {
     raw: RawPtr,
-    _marker: PhantomData<(&'f (), fn() -> Sig, *const ())>,
+    _marker: FnMarker<'f, Sig>,
 }
+
+/// Scope `'f`, covariant in `Sig`, `!Send`/`!Sync` (like `FilPtr`).
+type FnMarker<'f, Sig> = PhantomData<(&'f (), fn() -> Sig, *const ())>;
 
 impl<Sig> Clone for FilFn<'_, Sig> {
     fn clone(&self) -> Self {

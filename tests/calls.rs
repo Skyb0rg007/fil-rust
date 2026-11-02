@@ -43,7 +43,8 @@ fn twelve_mixed_arguments() {
     let r = runtime()
         .run(|fil| b.sum12(fil, -1, -2, 3, 4, 5.9, 6.9, 7, 8, 9, 10, 11, 12))
         .unwrap();
-    assert_eq!(r, -1 - 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12);
+    // The C side truncates the floats.
+    assert_eq!(r, [-1i64, -2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].iter().sum::<i64>());
 }
 
 #[test]
@@ -269,11 +270,11 @@ fn variadic_functions() {
             .arg(fil.c_str("%s=%d (%.2f) %c").unwrap())
             .arg(fil.c_str("x").unwrap())
             .arg(-17i32)
-            .arg(3.14159f64)
+            .arg(2.5051f64)
             .arg(b'!' as i32)
             .call::<i32>()
             .unwrap();
-        assert_eq!(buf.cast::<c_char>().read_string(fil).unwrap(), "x=-17 (3.14) !");
+        assert_eq!(buf.cast::<c_char>().read_string(fil).unwrap(), "x=-17 (2.51) !");
         assert_eq!(n, 14);
 
         // libc's own printf family works the same way.

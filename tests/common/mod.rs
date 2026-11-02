@@ -112,5 +112,5 @@ pub fn runtime() -> Runtime {
 /// the garbage collector (see "Threads and blocking" in the crate docs).
 pub fn basic() -> &'static basic::Basic {
     static BASIC: std::sync::OnceLock<basic::Basic> = std::sync::OnceLock::new();
-    BASIC.get_or_init(|| runtime().run(|fil| basic::load(fil)))
+    BASIC.get_or_init(|| runtime().run(basic::load))
 }

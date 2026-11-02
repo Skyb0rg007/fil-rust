@@ -228,6 +228,8 @@ impl<'f, T: ?Sized> FilPtr<'f, T> {
 
 impl<'f, T: FilType + ?Sized> FilPtr<'f, T> {
     /// Moves the address forward by `count` elements of `T`.
+    // Named after `<*const T>::add`, not `std::ops::Add`.
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, count: usize) -> Self {
         self.byte_add(count * T::SIZE)
     }

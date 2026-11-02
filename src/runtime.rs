@@ -676,8 +676,11 @@ unsafe fn boot(config: Config) -> Result<&'static Inner> {
 pub struct Fil<'f> {
     pub(crate) inner: &'static Inner,
     pub(crate) thread: *mut FilcThread,
-    _brand: PhantomData<(fn(&'f ()) -> &'f (), *mut ())>,
+    _brand: Brand<'f>,
 }
+
+/// Makes `'f` invariant and `Fil` `!Send + !Sync`.
+type Brand<'f> = PhantomData<(fn(&'f ()) -> &'f (), *mut ())>;
 
 /// Chunk size for copies between Rust and Fil-C memory; the runtime gets a
 /// chance to reach a safepoint between chunks.
