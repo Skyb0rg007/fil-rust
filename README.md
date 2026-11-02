@@ -62,7 +62,7 @@ fn main() -> fil_rust::Result<()> {
   escape to Rust become `Error::Exception`.
 - **Bindings from headers.** `fil-rust-bindgen` turns a C header into
   `FilType` structs and a `foreign!` interface, from a build script or the
-  command line (see `examples/bindgen-demo`).
+  command line (see `crates/bindgen-demo`).
 - **Both flavors, two architectures.** Libraries built with the musl ("pizfix") or the glibc
   ("optfil") Fil-C distribution can be loaded. Enable the `glibc` feature for
   the latter. The Rust program always stays linked to the system glibc.
@@ -86,7 +86,7 @@ Run them from the dev shell:
 
     FILC_FLAVOR=glibc cargo run --features glibc --example hello
 
-`examples/bindgen-demo` is a separate crate whose build script generates its
+`crates/bindgen-demo` is a separate crate whose build script generates its
 bindings from a header with `fil-rust-bindgen`:
 
     cargo run -p bindgen-demo
@@ -106,6 +106,12 @@ generated module's docs.
 
 ## Development
 
+The repository is a Cargo workspace; the crates live under `crates/`
+(`fil-rust`, `fil-rust-sys`, `fil-rust-macros`, `fil-rust-bindgen` and
+`bindgen-demo`), and every dependency is declared once, in the top-level
+`Cargo.toml`. `cargo` commands at the top level act on `fil-rust` unless told
+otherwise (`--workspace`, `-p`).
+
 The dev shell (`nix-shell`, or `direnv allow` with the provided `.envrc`)
 provides a Rust toolchain, both Fil-C distributions, and everything the build
 script needs:
@@ -115,8 +121,8 @@ script needs:
 - `FILC_GLIBC_ROOT`, `FILC_GLIBC_CC`, `FILC_GLIBC_CXX`: the glibc
   distribution (`nix/optfil.nix`). Its compilers expect to live at
   `/opt/fil`, so they run inside `bwrap` with the distribution mounted there.
-- `FILC_RUNTIME_SRC` and the header paths that `fil-rust-sys/build.rs` uses
-  to compile the runtime shim.
+- `FILC_RUNTIME_SRC` and the header paths that `crates/fil-rust-sys/build.rs`
+  uses to compile the runtime shim.
 - `LIBCLANG_PATH`, for `fil-rust-bindgen`.
 
 Tests compile their fixtures with the compiler of the selected flavor:
@@ -124,17 +130,34 @@ Tests compile their fixtures with the compiler of the selected flavor:
     cargo test                                       # musl
     FILC_FLAVOR=glibc cargo test --features glibc    # glibc
     FUGC_MIN_THRESHOLD=0 cargo test                  # with constant garbage collection
-    cargo test -p fil-rust-bindgen                   # the generator (FIL_RUST_BLESS=1 updates tests/generated)
+    cargo test --workspace                           # every crate, including the generator
+                                                     # (FIL_RUST_BLESS=1 updates tests/generated)
+
+`nix-build` builds the workspace, runs its tests against the musl
+distribution, and installs the `fil-rust-bindgen` command. The pinned
+nixpkgs and rust-overlay live only in `nix/pkgs.nix`; `default.nix` and
+`shell.nix` share the rest through `nix/fil-rust.nix`.
+
+### Cross-compiling
 
 fil-rust supports x86-64 and aarch64 Linux (aarch64 with the musl flavor
-only; the glibc distribution is x86-64 only). `shell-aarch64.nix`
-cross-builds for aarch64 on an x86-64 host and runs the tests, the examples
-and the aarch64 Fil-C compiler under qemu-user. It needs `binfmt_misc` for
-aarch64 (on NixOS, `boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`):
+only; the glibc distribution is x86-64 only). Both `default.nix` and
+`shell.nix` take a `crossSystem` and then use the same pinned package set,
+cross-compiling to it: the Fil-C distribution, headers and C toolchain are
+the target's, and the Rust toolchain, clang and libclang run on the build
+machine.
 
-    nix-shell shell-aarch64.nix --run 'cargo test'
+    nix-shell --argstr crossSystem aarch64-unknown-linux-gnu --run 'cargo test'
+    nix-build --argstr crossSystem aarch64-unknown-linux-gnu
 
-To bump Fil-C, change `version` in `nix/filc.nix` (and `nix/optfil.nix`,
+In the shell, the tests, the examples and the target's Fil-C compiler run
+through qemu-user, which needs `binfmt_misc` for the target (on NixOS,
+`boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`). `nix-build` skips the
+tests when cross-compiling.
+
+### Bumping Fil-C
+
+Change `version` in `nix/filc.nix` (and `nix/optfil.nix`,
 `nix/filc-runtime-src.nix`) and update the hashes:
 
     nix-prefetch-url https://github.com/pizlonator/fil-c/releases/download/v<version>/filc-<version>-linux-x86_64.tar.xz

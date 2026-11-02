@@ -1,19 +1,24 @@
 [workspace]
-members = ["fil-rust-sys", "fil-rust-macros", "fil-rust-bindgen", "examples/bindgen-demo"]
+resolver = "3"
+members = ["crates/*"]
+# `cargo test`/`cargo run --example` at the top level mean fil-rust itself.
+default-members = ["crates/fil-rust"]
 
-[package]
-name = "fil-rust"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "A Rust FFI for Fil-C shared libraries"
 
-[features]
-default = ["musl", "derive"]
-musl = ["fil-rust-sys/musl"]
-glibc = ["fil-rust-sys/glibc"]
-derive = ["dep:fil-rust-macros"]
+[workspace.dependencies]
+# Workspace crates.
+fil-rust = { path = "crates/fil-rust" }
+fil-rust-bindgen = { path = "crates/fil-rust-bindgen" }
+fil-rust-macros = { path = "crates/fil-rust-macros" }
+fil-rust-sys = { path = "crates/fil-rust-sys", default-features = false }
 
-[dependencies]
-fil-rust-sys = { path = "fil-rust-sys", default-features = false }
-fil-rust-macros = { path = "fil-rust-macros", optional = true }
+# External crates.
+bindgen = "0.73.2"
 libc = "0.2"
+prettyplease = "0.3.0"
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = "3.0.9"

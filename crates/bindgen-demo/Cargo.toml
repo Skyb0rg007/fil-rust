@@ -1,7 +1,7 @@
 [package]
 name = "bindgen-demo"
 version = "0.0.0"
-edition = "2024"
+edition.workspace = true
 publish = false
 description = "Uses fil-rust-bindgen from a build script"
 
@@ -9,7 +9,7 @@ description = "Uses fil-rust-bindgen from a build script"
 glibc = ["fil-rust/glibc"]
 
 [dependencies]
-fil-rust = { path = "../.." }
+fil-rust = { workspace = true }
 
 [build-dependencies]
-fil-rust-bindgen = { path = "../../fil-rust-bindgen" }
+fil-rust-bindgen = { workspace = true }

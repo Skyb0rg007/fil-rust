@@ -1,0 +1,16 @@
+[package]
+name = "fil-rust"
+version.workspace = true
+edition.workspace = true
+description = "A Rust FFI for Fil-C shared libraries"
+
+[features]
+default = ["musl", "derive"]
+musl = ["fil-rust-sys/musl"]
+glibc = ["fil-rust-sys/glibc"]
+derive = ["dep:fil-rust-macros"]
+
+[dependencies]
+fil-rust-sys = { workspace = true }
+fil-rust-macros = { workspace = true, optional = true }
+libc = { workspace = true }

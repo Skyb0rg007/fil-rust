@@ -197,13 +197,16 @@ A Rust loader would end up reimplementing musl's `ldso` and still be fragile.
 ## Architecture
 
 ```
-fil-rust-sys     the C shims (runtime shim, yolo-libc stand-ins), built by build.rs and embedded in the crate
-fil-rust         safe API: runtime, executors, pointers, memory, calls, libraries, callbacks, handles
-fil-rust-macros  #[derive(FilType)]
-fil-rust-bindgen generates FilType structs and foreign! interfaces from C headers (library + CLI)
-nix/             the Fil-C distributions (pizfix for musl, optfil for glibc) and runtime source headers
-examples/        runnable programs, each with its C/C++ source in examples/c
-tests/           integration tests over C/C++ fixtures, run against either flavor
+crates/fil-rust-sys       the C shims (runtime shim, yolo-libc stand-ins), built by build.rs and embedded in the crate
+crates/fil-rust           safe API: runtime, executors, pointers, memory, calls, libraries, callbacks, handles
+  examples/               runnable programs, each with its C/C++ source in examples/c
+  tests/                  integration tests over C/C++ fixtures, run against either flavor
+crates/fil-rust-macros    #[derive(FilType)]
+crates/fil-rust-bindgen   generates FilType structs and foreign! interfaces from C headers (library + CLI)
+crates/bindgen-demo       uses fil-rust-bindgen from a build script
+nix/                      the pinned package set, the Fil-C distributions (pizfix for musl, optfil for glibc),
+                          the runtime source headers, the build environment and the workspace package
+default.nix, shell.nix    the Nix build and dev shell; both take `crossSystem`
 ```
 
 Nothing Fil-C is linked into the Rust binary. Every native object fil-rust
@@ -489,8 +492,8 @@ the boot layout of each flavor; the musl/glibc boundary audit; signal
 handling next to Rust's; and bindings generated from headers.
 
 aarch64 is cross-built on an x86-64 host and tested under qemu-user
-(`nix-shell shell-aarch64.nix --run 'cargo test'`, which needs
-`binfmt_misc` for aarch64). The whole suite, the examples and
+(`nix-shell --argstr crossSystem aarch64-unknown-linux-gnu --run 'cargo test'`,
+which needs `binfmt_misc` for aarch64). The whole suite, the examples and
 `bindgen-demo` pass there, with and without `FUGC_MIN_THRESHOLD=0`.
 
 ## Open questions and risks

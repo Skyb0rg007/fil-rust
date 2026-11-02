@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use fil_rust_bindgen::Builder;
 
+/// The fil-rust crate, whose tests own the fixtures and generated files.
 fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("fil-rust")
 }
 
 /// Generates bindings for `tests/fixtures/<name>.h` and checks them against

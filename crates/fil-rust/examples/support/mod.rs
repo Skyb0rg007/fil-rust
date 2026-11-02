@@ -32,7 +32,8 @@ pub fn build(file: &str) -> PathBuf {
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src = root.join("examples/c").join(file);
-    let out_dir = root.join("target/example-libs").join(format!("{flavor:?}").to_lowercase());
+    // In the workspace's target directory.
+    let out_dir = root.join("../../target/example-libs").join(format!("{flavor:?}").to_lowercase());
     std::fs::create_dir_all(&out_dir).unwrap();
     let stem = Path::new(file).file_stem().unwrap().to_str().unwrap();
     let out = out_dir.join(format!("lib{stem}.so"));
