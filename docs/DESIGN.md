@@ -464,6 +464,8 @@ that they are up to date.
 | the GC stalled by blocked Rust code | `exited`; internal locks never block while entered |
 | runtime ABI drift | shim ABI version and flavor checks at startup; pinned distribution versions |
 | the real yolo libc entering the process | fil-rust owns all loading; `dl_iterate_phdr` check after each load |
+| musl/glibc struct and constant differences | audited import list and layout probe; `sendmsg` padding fixed by redirect |
+| signals landing on threads the runtime doesn't know | `sigaction` redirect forwards them to a Fil-C thread |
 
 ## Status
 
@@ -474,23 +476,53 @@ function-pointer calls; checked memory access and its failure modes; handles
 and owned buffers under GC stress; callbacks from many Fil-C threads; C++
 containers, threads and exceptions; process-ending cases (Fil-C safety
 panics, signature mismatches, panicking callbacks, `exit`) in child processes;
-the boot layout of each flavor; and bindings generated from headers.
+the boot layout of each flavor; the musl/glibc boundary audit; signal
+handling next to Rust's; and bindings generated from headers.
 
 ## Open questions and risks
 
 - **Runtime internals aren't a stable API.** Mitigated by pinning versions,
   keeping the shim small, and checking its ABI version. Bumping Fil-C means
   rebuilding the shim and rerunning the tests on both flavors.
-- **Running libpizlo next to the host libc isn't supported upstream.** For
-  musl, libpizlo was compiled against musl headers; the structs it passes to
-  libc are almost all kernel-defined and identical on x86-64, but `msghdr`,
-  the SysV IPC structs, `statvfs` and `timex` differ and would need wrappers
-  in the stand-in if a library uses them. For glibc, the distribution's yolo
-  glibc is close to the host's, but the stand-ins rely on the host glibc
-  providing every versioned symbol the runtime imports.
-- **Signals.** The runtime defers signals for entered threads and installs
-  its own handlers; the stand-ins report glibc's internal signals (32 and 33)
-  so the runtime leaves them alone.
+- **Running libpizlo next to the host libc isn't supported upstream.**
+  This is audited by `tests/abi_audit.rs`:
+  - Every libc symbol libpizlo imports is on a reviewed list
+    (`tests/abi/{musl,glibc}_imports.txt`), so a Fil-C upgrade that adds an
+    import fails until it is reviewed.
+  - A probe (`tests/abi/layout_probe.c`) prints the size, alignment and field
+    layout of every libc struct libpizlo passes (about 60 structs) and the
+    value of about 400 constants it forwards unchanged. Built against musl's
+    and against glibc's headers, the two outputs may differ only in a
+    reviewed list. On x86-64 they differ in nine places: `rusage`, `sysinfo`
+    and `sched_param` are larger in musl (glibc writes less than the buffer);
+    `msghdr`'s length fields are `int` + padding in musl (libpizlo zeroes the
+    struct); `semid_ds.sem_nsems` is narrower (the low bytes hold the value);
+    musl's `O_LARGEFILE` is the real kernel bit (a no-op on 64-bit); two
+    compile-time stack minimums are unused.
+  - One difference was a real bug: `cmsghdr.cmsg_len` is `int` + padding in
+    musl, and libpizlo passes the program's control buffer through as is.
+    musl's `sendmsg` zeroes that padding; glibc's has none to zero, so file
+    descriptor passing with a dirty buffer failed with `EINVAL`. fil-rust
+    now redirects libpizlo's `sendmsg`/`sendmmsg` imports (by rewriting its
+    GOT entries after loading it) to stand-in wrappers that do what musl
+    does, and the audit tests the fix end to end.
+  - The glibc flavor's libpizlo was built against the same libc family, and
+    every versioned import is resolved at load time (`RTLD_NOW`).
+- **Signals.** Checked by `tests/signals.rs`:
+  - Rust's stack-overflow handler (SIGSEGV/SIGBUS on guard pages) keeps
+    working on Rust threads once the runtime is up, since Fil-C never
+    installs handlers for synchronous fault signals. A Rust overflow on an
+    executor thread (whose guard Rust doesn't know) still ends the process
+    with a fatal signal. A Fil-C stack overflow is a Fil-C panic.
+  - Fil-C signal handlers run (`raise`, interval timers).
+  - The runtime's native handler assumes it runs on a Fil-C thread, which
+    holds in a pure Fil-C process but not next to Rust threads: a signal
+    landing on one crashed the process. fil-rust redirects libpizlo's
+    `sigaction` import so the runtime's handler sits behind a trampoline
+    that forwards signals arriving on non-Fil-C threads to the Fil-C main
+    thread (with their siginfo where the kernel allows it).
+  - The stand-ins report glibc's internal signals (32 and 33) so the
+    runtime leaves them alone.
 - **Panics are process-fatal.** This is inherent to Fil-C. An out-of-process
   host (a Fil-C executable serving calls over shared memory) would let Rust
   survive them, at the cost of copying.

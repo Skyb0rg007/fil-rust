@@ -80,3 +80,5 @@ void yolo_futex_requeue(volatile int *addr, int priv, int wake, int requeue, vol
 {
     syscall(SYS_futex, addr, fop(priv, FUTEX_REQUEUE), wake, requeue, addr2);
 }
+
+#include "compat_signals.inc"

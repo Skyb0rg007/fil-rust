@@ -236,6 +236,33 @@ impl Flavor {
         }
     }
 
+    /// Imports of libpizlo to redirect from the host libc to a function of
+    /// a compat library: `(imported symbol, replacement)`, the replacement
+    /// living in the compat library at [`Flavor::stand_in_index`]. These are
+    /// the calls where running next to Rust, on the host libc, needs
+    /// different behavior.
+    pub fn import_redirects(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Flavor::Musl => &[
+                // musl zeroes the padding in 64-bit cmsghdrs; glibc has none.
+                ("sendmsg", "fil_rust_musl_sendmsg\0"),
+                ("sendmmsg", "fil_rust_musl_sendmmsg\0"),
+                // Signals that land on Rust threads (compat_signals.inc).
+                ("sigaction", "fil_rust_sigaction\0"),
+            ],
+            Flavor::Glibc => &[("sigaction", "fil_rust_sigaction\0")],
+        }
+    }
+
+    /// Index in [`Flavor::compat_libs`] of the stand-in for the yolo libc,
+    /// which holds the redirect targets and `fil_rust_signals_init`.
+    pub fn stand_in_index(self) -> usize {
+        match self {
+            Flavor::Musl => 0,
+            Flavor::Glibc => 1,
+        }
+    }
+
     /// Name of the yolo-libc soname(s) of the real distribution. If one of
     /// these is mapped from a file instead of our compat stand-in, the second
     /// libc would corrupt the process.
@@ -303,6 +330,108 @@ pub unsafe fn dlopen_bytes(label: &str, bytes: &[u8], flags: c_int) -> Result<*m
     // Keep the descriptor open: the loader maps the file by path.
     std::mem::forget(file);
     unsafe { dlopen_path(&path, flags) }
+}
+
+/// Points the GOT entries through which the loaded object `path` imports
+/// each `(symbol, address)` of `redirects` at `address` instead, so that just
+/// that object's calls go elsewhere. Returns the symbols that were found.
+///
+/// # Safety
+///
+/// Each address must be a function compatible with the symbol it replaces,
+/// and nothing may be calling through those entries concurrently.
+pub unsafe fn redirect_imports(
+    path: &std::path::Path,
+    redirects: &[(&str, *const c_void)],
+) -> Result<Vec<String>, String> {
+    struct Search<'a> {
+        path: &'a [u8],
+        found: Option<(usize, *const libc::Elf64_Phdr, usize)>,
+    }
+    unsafe extern "C" fn find(info: *mut libc::dl_phdr_info, _size: usize, data: *mut c_void) -> c_int {
+        unsafe {
+            let search = &mut *(data as *mut Search);
+            let info = &*info;
+            if !info.dlpi_name.is_null() && CStr::from_ptr(info.dlpi_name).to_bytes() == search.path {
+                search.found = Some((info.dlpi_addr as usize, info.dlpi_phdr, info.dlpi_phnum as usize));
+                return 1;
+            }
+            0
+        }
+    }
+    #[repr(C)]
+    struct Elf64Dyn {
+        d_tag: i64,
+        d_un: u64,
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let mut search = Search { path: path.as_os_str().as_bytes(), found: None };
+    unsafe { libc::dl_iterate_phdr(Some(find), (&mut search as *mut Search).cast()) };
+    let (base, phdr, phnum) = search.found.ok_or_else(|| format!("{} is not loaded", path.display()))?;
+    let phdrs = unsafe { std::slice::from_raw_parts(phdr, phnum) };
+
+    // glibc relocates the address-valued dynamic entries in place; be
+    // robust to loaders that don't.
+    let addr = |v: u64| -> usize { if (v as usize) < base { base + v as usize } else { v as usize } };
+    let dynamic = phdrs.iter().find(|p| p.p_type == libc::PT_DYNAMIC).ok_or("no PT_DYNAMIC")?;
+    let relro = phdrs.iter().find(|p| p.p_type == libc::PT_GNU_RELRO).map(|p| {
+        let start = base + p.p_vaddr as usize;
+        (start, start + p.p_memsz as usize)
+    });
+    let (mut strtab, mut symtab, mut rela, mut relasz, mut jmprel, mut pltrelsz) = (0, 0, 0, 0, 0, 0);
+    let mut d = (base + dynamic.p_vaddr as usize) as *const Elf64Dyn;
+    loop {
+        let entry = unsafe { &*d };
+        match entry.d_tag {
+            0 => break,
+            5 => strtab = addr(entry.d_un),  // DT_STRTAB
+            6 => symtab = addr(entry.d_un),  // DT_SYMTAB
+            7 => rela = addr(entry.d_un),    // DT_RELA
+            8 => relasz = entry.d_un as usize, // DT_RELASZ
+            23 => jmprel = addr(entry.d_un), // DT_JMPREL
+            2 => pltrelsz = entry.d_un as usize, // DT_PLTRELSZ
+            _ => {}
+        }
+        d = unsafe { d.add(1) };
+    }
+    if strtab == 0 || symtab == 0 {
+        return Err("no symbol table".into());
+    }
+
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let mut patched = Vec::new();
+    for (table, size) in [(rela, relasz), (jmprel, pltrelsz)] {
+        if table == 0 {
+            continue;
+        }
+        let relocs = unsafe { std::slice::from_raw_parts(table as *const libc::Elf64_Rela, size / 24) };
+        for r in relocs {
+            let kind = (r.r_info & 0xffff_ffff) as u32;
+            // R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT
+            if kind != 6 && kind != 7 {
+                continue;
+            }
+            let sym = unsafe { &*(symtab as *const libc::Elf64_Sym).add((r.r_info >> 32) as usize) };
+            let name = unsafe { CStr::from_ptr((strtab + sym.st_name as usize) as *const c_char) };
+            let Some((symbol, target)) = redirects.iter().find(|(n, _)| n.as_bytes() == name.to_bytes()) else {
+                continue;
+            };
+            let slot = base + r.r_offset as usize;
+            let in_relro = relro.is_some_and(|(s, e)| slot >= s && slot < e);
+            let page_start = slot & !(page - 1);
+            unsafe {
+                if in_relro && libc::mprotect(page_start as *mut c_void, page, libc::PROT_READ | libc::PROT_WRITE) != 0 {
+                    return Err(format!("mprotect: {}", std::io::Error::last_os_error()));
+                }
+                std::ptr::write_volatile(slot as *mut *const c_void, *target);
+                if in_relro {
+                    libc::mprotect(page_start as *mut c_void, page, libc::PROT_READ);
+                }
+            }
+            patched.push(symbol.to_string());
+        }
+    }
+    Ok(patched)
 }
 
 /// Paths of every object currently mapped by the dynamic loader.

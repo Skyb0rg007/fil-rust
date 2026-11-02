@@ -13,6 +13,8 @@ GLIBC_2.2.5 {
     yolo_futex_unlock_pi;
     yolo_futex_lock_pi;
     yolo_futex_requeue;
+    fil_rust_sigaction;
+    fil_rust_signals_init;
   local: *;
 };
 GLIBC_2.3 { };

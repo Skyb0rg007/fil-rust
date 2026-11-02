@@ -69,3 +69,69 @@ void yolo_futex_requeue(volatile int *addr, int priv, int wake, int requeue, vol
 {
     syscall(SYS_futex, addr, fop(priv, FUTEX_REQUEUE), wake, requeue, addr2);
 }
+
+/* ---- Ancillary data ----
+
+   musl's struct cmsghdr is { socklen_t cmsg_len; int __pad1; int level;
+   int type; } on 64-bit, where glibc's (and the kernel's) cmsg_len is a
+   size_t. libpizlo passes the Fil-C program's control buffer straight
+   through, so a program that leaves __pad1 dirty would hand the kernel a
+   huge length. musl's own sendmsg copies the control data and zeroes the
+   padding; these wrappers do the same. fil-rust points libpizlo's sendmsg
+   and sendmmsg imports here (glibc's definitions would otherwise win).
+   libpizlo zeroes the msghdr it builds, so only the control data needs it. */
+#include <stdint.h>
+#include <string.h>
+#include <sys/socket.h>
+
+#define FR_CONTROL_MAX 1024 /* musl's limit */
+
+static void fr_zero_cmsg_padding(unsigned char *buf, size_t len)
+{
+    size_t off = 0;
+    while (off + 16 <= len) {
+        uint32_t cmsg_len;
+        memcpy(&cmsg_len, buf + off, 4);
+        memset(buf + off + 4, 0, 4);
+        if (cmsg_len < 16)
+            break;
+        off += (cmsg_len + 7) & ~(size_t)7;
+    }
+}
+
+ssize_t fil_rust_musl_sendmsg(int fd, const struct msghdr *msg, int flags)
+{
+    struct msghdr h;
+    _Alignas(struct cmsghdr) unsigned char control[FR_CONTROL_MAX];
+    if (msg && msg->msg_controllen) {
+        if (msg->msg_controllen > sizeof control) {
+            errno = ENOMEM;
+            return -1;
+        }
+        h = *msg;
+        memcpy(control, h.msg_control, h.msg_controllen);
+        fr_zero_cmsg_padding(control, h.msg_controllen);
+        h.msg_control = control;
+        msg = &h;
+    }
+    return sendmsg(fd, msg, flags);
+}
+
+/* As in musl on 64-bit: one sendmsg per message. */
+int fil_rust_musl_sendmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, int flags)
+{
+    if (vlen > 1024)
+        vlen = 1024;
+    if (!vlen)
+        return 0;
+    unsigned i;
+    for (i = 0; i < vlen; i++) {
+        ssize_t r = fil_rust_musl_sendmsg(fd, &msgvec[i].msg_hdr, flags);
+        if (r < 0)
+            break;
+        msgvec[i].msg_len = r;
+    }
+    return i ? (int)i : -1;
+}
+
+#include "compat_signals.inc"

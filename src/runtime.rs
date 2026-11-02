@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -477,6 +478,9 @@ pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(inner: &Inner, thread: *mut F
     }
 }
 
+/// The Fil-C main thread, which takes signals that land on Rust threads.
+static MAIN_TID: AtomicI32 = AtomicI32::new(0);
+
 unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) {
     let inner = *INNER.get().expect("runtime initialized before executors start");
     // Name the thread for debuggers and `ps`. (On glibc, filc_start_program
@@ -484,6 +488,7 @@ unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) 
     let name: &CStr = if is_main != 0 { c"fil-c-main" } else { c"fil-c-worker" };
     unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
     if is_main != 0 {
+        MAIN_TID.store(unsafe { libc::gettid() }, Ordering::Release);
         // The main Fil-C thread starts the executors, then stays around to
         // start more on demand (only a Fil-C thread can create Fil-C threads).
         let mut spawned = {
@@ -575,11 +580,27 @@ unsafe fn boot(config: Config) -> Result<&'static Inner> {
     // the distribution, so that Fil-C objects bind to them by soname instead
     // of pulling in the real yolo libc through their RUNPATH.
     let global = libc::RTLD_NOW | libc::RTLD_GLOBAL;
+    let mut compat_handles = Vec::new();
     for lib in compat {
-        unsafe { dlopen_bytes(lib.soname, lib.bytes, global) }.map_err(Error::Load)?;
+        compat_handles.push(unsafe { dlopen_bytes(lib.soname, lib.bytes, global) }.map_err(Error::Load)?);
     }
-    let runtime_handle =
-        unsafe { dlopen_path(&lib_dir.join("libpizlo.so"), global) }.map_err(Error::Load)?;
+    let runtime_path = lib_dir.join("libpizlo.so");
+    let runtime_handle = unsafe { dlopen_path(&runtime_path, global) }.map_err(Error::Load)?;
+    // Where the host libc behaves differently from the yolo libc libpizlo
+    // was built for, send libpizlo's calls to the stand-in's version. Nothing
+    // has run Fil-C code yet, so nothing is calling through these entries.
+    let redirects = flavor
+        .import_redirects()
+        .iter()
+        .map(|(symbol, replacement)| {
+            unsafe { dlsym_checked(compat_handles[flavor.stand_in_index()], replacement) }
+                .map(|f| (*symbol, f as *const c_void))
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()
+        .map_err(Error::Load)?;
+    if !redirects.is_empty() {
+        unsafe { fil_rust_sys::redirect_imports(&runtime_path, &redirects) }.map_err(Error::Load)?;
+    }
     let mut user_handles = Vec::new();
     for path in config.user_libs() {
         user_handles.push(unsafe { dlopen_path(&path, global) }.map_err(Error::Load)?);
@@ -610,7 +631,7 @@ unsafe fn boot(config: Config) -> Result<&'static Inner> {
 
     let inner: &'static Inner = Box::leak(Box::new(Inner {
         libc: Library::from_handle(user_handles[0], config.user_libs()[0].clone()),
-        runtime_lib: Library::from_handle(runtime_handle, lib_dir.join("libpizlo.so")),
+        runtime_lib: Library::from_handle(runtime_handle, runtime_path.clone()),
         config,
         shim,
         queue: Mutex::new(Queue { jobs: VecDeque::new(), idle: 0, total: 0, starting: 0 }),
@@ -658,6 +679,21 @@ unsafe fn boot(config: Config) -> Result<&'static Inner> {
                 return Err(Error::Load("the Fil-C runtime did not start".into()));
             }
         }
+    }
+
+    // Route signals that Fil-C handles but that land on Rust threads to the
+    // Fil-C main thread (see compat_signals.inc).
+    unsafe {
+        type SignalsInit = unsafe extern "C" fn(*const c_void, libc::pid_t, *const c_void);
+        let init: SignalsInit = std::mem::transmute(
+            dlsym_checked(compat_handles[flavor.stand_in_index()], "fil_rust_signals_init\0").map_err(Error::Load)?,
+        );
+        let get_my_thread = dlsym_checked(runtime_handle, "filc_get_my_thread\0").map_err(Error::Load)?;
+        let mut info: libc::Dl_info = std::mem::zeroed();
+        if libc::dladdr(get_my_thread, &mut info) == 0 {
+            return Err(Error::Load("cannot find libpizlo's load address".into()));
+        }
+        init(get_my_thread, MAIN_TID.load(Ordering::Acquire), info.dli_fbase);
     }
 
     let rt = Runtime { inner };
