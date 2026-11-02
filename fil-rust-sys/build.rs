@@ -136,27 +136,25 @@ fn main() {
     }
 
     if glibc {
-        let script = Path::new("csrc/compat_glibc.map");
+        for (src, out, soname, map) in [
+            ("compat_glibc_c.c", "compat_glibc_libyolocimpl.so", "libyolocimpl.so", "compat_glibc_c.map"),
+            ("compat_glibc_m.c", "compat_glibc_libyolomimpl.so", "libyolomimpl.so", "compat_glibc_m.map"),
+            ("compat_glibc_ld.c", "compat_glibc_ld.so", "ld-fil1-x86_64.so", "compat_glibc_ld.map"),
+        ] {
+            build_compat(
+                &cc,
+                &Path::new("csrc").join(src),
+                &out_dir.join(out),
+                soname,
+                Some(&Path::new("csrc").join(map)),
+            );
+        }
         build_compat(
             &cc,
-            Path::new("csrc/compat_glibc_c.c"),
-            &out_dir.join("compat_glibc_libyolocimpl.so"),
-            "libyolocimpl.so",
-            Some(script),
-        );
-        build_compat(
-            &cc,
-            Path::new("csrc/compat_glibc_m.c"),
-            &out_dir.join("compat_glibc_libyolomimpl.so"),
-            "libyolomimpl.so",
-            Some(script),
-        );
-        build_compat(
-            &cc,
-            Path::new("csrc/compat_glibc_ld.c"),
-            &out_dir.join("compat_glibc_ld.so"),
-            "ld-fil1-x86_64.so",
-            Some(script),
+            Path::new("csrc/compat_glibc_pizlo.c"),
+            &out_dir.join("compat_glibc_pizlo.so"),
+            "libpizlo.so",
+            None,
         );
         // The glibc flavor of the runtime is built against (yolo) glibc headers,
         // which the host glibc's headers match. Ask the host compiler for them.

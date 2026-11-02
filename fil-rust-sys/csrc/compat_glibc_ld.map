@@ -1,0 +1,13 @@
+/* Version nodes of the yolo glibc's dynamic loader (ld-fil1-x86_64.so), so that Fil-C objects'
+   version requirements on it are satisfied: every version name that the
+   distribution's libraries list for it in their VERNEED entries. */
+
+GLIBC_2.2.5 {
+  local: *;
+};
+GLIBC_2.3 {
+  global:
+    fil_rust_ld_stand_in;
+};
+GLIBC_2.35 { };
+GLIBC_PRIVATE { };

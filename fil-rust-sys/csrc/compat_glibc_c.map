@@ -1,0 +1,50 @@
+/* Version nodes of the yolo glibc's libc (libyolocimpl.so), so that Fil-C objects'
+   version requirements on it are satisfied: every version name that the
+   distribution's libraries list for it in their VERNEED entries. */
+
+GLIBC_2.2.5 {
+  global:
+    libc_internal_signals;
+    num_libc_internal_signals;
+    sigdelsetyolo;
+    yolo_futex_wake;
+    yolo_futex_wait;
+    yolo_futex_timedwait;
+    yolo_futex_unlock_pi;
+    yolo_futex_lock_pi;
+    yolo_futex_requeue;
+  local: *;
+};
+GLIBC_2.3 { };
+GLIBC_2.3.2 { };
+GLIBC_2.3.3 { };
+GLIBC_2.3.4 { };
+GLIBC_2.4 { };
+GLIBC_2.5 { };
+GLIBC_2.6 { };
+GLIBC_2.7 { };
+GLIBC_2.8 { };
+GLIBC_2.9 { };
+GLIBC_2.10 { };
+GLIBC_2.12 { };
+GLIBC_2.13 { };
+GLIBC_2.14 { };
+GLIBC_2.15 { };
+GLIBC_2.16 { };
+GLIBC_2.17 { };
+GLIBC_2.25 { };
+GLIBC_2.27 { };
+GLIBC_2.28 { };
+GLIBC_2.29 { };
+GLIBC_2.30 { };
+GLIBC_2.32 { };
+GLIBC_2.33 { };
+GLIBC_2.34 { };
+GLIBC_2.35 { };
+GLIBC_2.36 { };
+GLIBC_2.38 { };
+GLIBC_2.39 { };
+GLIBC_2.44 { };
+GLIBC_PRIVATE { };
+GLIBC_ABI_DT_RELR { };
+GLIBC_ABI_DT_X86_64_PLT { };

@@ -12,6 +12,7 @@ let
   };
   filc = pkgs.callPackage ./nix/filc.nix { };
   filcRuntimeSrc = pkgs.callPackage ./nix/filc-runtime-src.nix { };
+  optfil = pkgs.callPackage ./nix/optfil.nix { };
 in
 pkgs.mkShell {
   nativeBuildInputs = [
@@ -24,9 +25,15 @@ pkgs.mkShell {
   FILC_CC = "${filc}/bin/filcc";
   FILC_CXX = "${filc}/bin/fil++";
 
+  # The glibc ("/opt/fil") distribution, for the `glibc` flavor.
+  FILC_GLIBC_ROOT = "${optfil}/fil";
+  FILC_GLIBC_CC = "${optfil}/bin/filcc";
+  FILC_GLIBC_CXX = "${optfil}/bin/fil++";
+
   # Inputs for building fil-rust-sys's C shims.
   FILC_RUNTIME_SRC = "${filcRuntimeSrc}/libpas/src/libpas";
   FILC_MUSL_INCLUDE = "${pkgs.musl.dev}/include";
+  FILC_GLIBC_INCLUDE = "${pkgs.glibc.dev}/include";
   FILC_LINUX_INCLUDE = "${pkgs.linuxHeaders}/include";
   FILC_HOST_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
 }

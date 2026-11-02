@@ -191,7 +191,7 @@ static MUSL_COMPAT: [SupportLib; 1] = [SupportLib {
 }];
 
 #[cfg(feature = "glibc")]
-static GLIBC_COMPAT: [SupportLib; 3] = [
+static GLIBC_COMPAT: [SupportLib; 4] = [
     SupportLib {
         soname: "ld-fil1-x86_64.so",
         bytes: include_bytes!(concat!(env!("OUT_DIR"), "/compat_glibc_ld.so")),
@@ -203,6 +203,10 @@ static GLIBC_COMPAT: [SupportLib; 3] = [
     SupportLib {
         soname: "libyolomimpl.so",
         bytes: include_bytes!(concat!(env!("OUT_DIR"), "/compat_glibc_libyolomimpl.so")),
+    },
+    SupportLib {
+        soname: "libpizlo.so",
+        bytes: include_bytes!(concat!(env!("OUT_DIR"), "/compat_glibc_pizlo.so")),
     },
 ];
 

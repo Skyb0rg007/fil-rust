@@ -1,0 +1,23 @@
+/* Version nodes of the yolo glibc's libm (libyolomimpl.so), so that Fil-C objects'
+   version requirements on it are satisfied: every version name that the
+   distribution's libraries list for it in their VERNEED entries. */
+
+GLIBC_2.2.5 {
+  local: *;
+};
+GLIBC_2.15 { };
+GLIBC_2.44 {
+  global:
+    __ieee754_exp10l;
+    __ieee754_exp2l;
+    __ieee754_expl;
+    __ieee754_fmodl;
+    __ieee754_ilogbl;
+    __ieee754_log10l;
+    __ieee754_log2l;
+    __ieee754_logl;
+    __ieee754_powl;
+    __ieee754_remainderl;
+    __ieee754_scalbl;
+    __log10l_finite;
+};
