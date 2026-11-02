@@ -199,6 +199,7 @@ A Rust loader would end up reimplementing musl's `ldso` and still be fragile.
 fil-rust-sys     the C shims (runtime shim, yolo-libc stand-ins), built by build.rs and embedded in the crate
 fil-rust         safe API: runtime, executors, pointers, memory, calls, libraries, callbacks, handles
 fil-rust-macros  #[derive(FilType)]
+fil-rust-bindgen generates FilType structs and foreign! interfaces from C headers (library + CLI)
 nix/             the Fil-C distributions (pizfix for musl, optfil for glibc) and runtime source headers
 examples/        runnable programs, each with its C/C++ source in examples/c
 tests/           integration tests over C/C++ fixtures, run against either flavor
@@ -423,6 +424,31 @@ encodes the return. A Rust panic in the closure, or a call after the
 `Callback` was dropped, becomes a Fil-C panic. Callbacks may be called from
 any Fil-C thread, including threads Fil-C code creates itself.
 
+### Bindings from headers: `fil-rust-bindgen`
+
+bindgen parses the header (allowlisted to the header's own declarations and
+what they use) and the generator rewrites its output with `syn`:
+
+- a struct becomes `#[derive(FilType)]`, with `#[fil(size, align)]` taken
+  from bindgen's layout (so the derive's layout is checked against clang's at
+  compile time); it gets a `'f` lifetime if it holds pointers, directly or
+  through other structs or typedefs (a fixed point)
+- `T*` becomes `Ptr<T>` in signatures and `FilPtr<'f, T>` in fields; `void*`
+  becomes untyped `Ptr`; a pointee struct with a lifetime is spelled
+  `S<'static>`
+- a function-pointer typedef becomes a plain `fn(..) -> R` type, so it works
+  with `Callback`; in fields, function pointers are `FilFn<'f, ..>`
+- opaque structs become uninhabited marker enums
+- functions and `extern` globals go into one `foreign!` struct
+
+What can't be represented is left out with a reason, which propagates:
+unions, bitfields and flexible arrays make a struct opaque (usable only
+behind a pointer); a typedef or function that uses such a type by value, a
+variadic function, or a `long double` is dropped. The output is formatted
+with prettyplease. `tests/generated/` holds bindings for two fixture headers;
+fil-rust's tests compile and run them, and fil-rust-bindgen's tests check
+that they are up to date.
+
 ## Safety argument (summary)
 
 | hazard | prevented by |
@@ -446,8 +472,9 @@ tests (`tests/`) run against either flavor (`FILC_FLAVOR=glibc cargo test
 --features glibc`) and cover scalar, string, struct, sret, varargs and
 function-pointer calls; checked memory access and its failure modes; handles
 and owned buffers under GC stress; callbacks from many Fil-C threads; C++
-containers, threads and exceptions; and process-ending cases (Fil-C safety
-panics, signature mismatches, panicking callbacks, `exit`) in child processes.
+containers, threads and exceptions; process-ending cases (Fil-C safety
+panics, signature mismatches, panicking callbacks, `exit`) in child processes;
+the boot layout of each flavor; and bindings generated from headers.
 
 ## Open questions and risks
 

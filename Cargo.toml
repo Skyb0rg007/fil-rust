@@ -1,5 +1,5 @@
 [workspace]
-members = ["fil-rust-sys", "fil-rust-macros"]
+members = ["fil-rust-sys", "fil-rust-macros", "fil-rust-bindgen", "examples/bindgen-demo"]
 
 [package]
 name = "fil-rust"

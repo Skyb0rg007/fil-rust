@@ -60,6 +60,9 @@ fn main() -> fil_rust::Result<()> {
   its own threads too.
 - **C++.** C++ libraries work, including `std::thread`, and exceptions that
   escape to Rust become `Error::Exception`.
+- **Bindings from headers.** `fil-rust-bindgen` turns a C header into
+  `FilType` structs and a `foreign!` interface, from a build script or the
+  command line (see `examples/bindgen-demo`).
 - **Both flavors.** Libraries built with the musl ("pizfix") or the glibc
   ("optfil") Fil-C distribution can be loaded. Enable the `glibc` feature for
   the latter. The Rust program always stays linked to the system glibc.
@@ -82,6 +85,24 @@ Run them from the dev shell:
 
     FILC_FLAVOR=glibc cargo run --features glibc --example hello
 
+`examples/bindgen-demo` is a separate crate whose build script generates its
+bindings from a header with `fil-rust-bindgen`:
+
+    cargo run -p bindgen-demo
+
+## Generating bindings
+
+    cargo run -p fil-rust-bindgen -- include/api.h --interface Api -o src/api.rs
+
+or, from a build script, `fil_rust_bindgen::Builder::new("include/api.h").generate()`.
+C structs become `#[derive(FilType)]` structs (their layout checked against
+clang's), pointers become `Ptr<T>` / `FilPtr<'f, T>`, function-pointer
+typedefs become `fn` types usable with `Callback`, opaque structs become
+marker types, and functions and globals go into a `foreign!` struct.
+Constructs fil-rust can't express (variadic functions, bitfields, unions and
+flexible arrays by value, `long double`) are left out and listed in the
+generated module's docs.
+
 ## Development
 
 The dev shell (`nix-shell`, or `direnv allow` with the provided `.envrc`)
@@ -95,12 +116,14 @@ script needs:
   `/opt/fil`, so they run inside `bwrap` with the distribution mounted there.
 - `FILC_RUNTIME_SRC` and the header paths that `fil-rust-sys/build.rs` uses
   to compile the runtime shim.
+- `LIBCLANG_PATH`, for `fil-rust-bindgen`.
 
 Tests compile their fixtures with the compiler of the selected flavor:
 
     cargo test                                       # musl
     FILC_FLAVOR=glibc cargo test --features glibc    # glibc
     FUGC_MIN_THRESHOLD=0 cargo test                  # with constant garbage collection
+    cargo test -p fil-rust-bindgen                   # the generator (FIL_RUST_BLESS=1 updates tests/generated)
 
 To bump Fil-C, change `version` in `nix/filc.nix` (and `nix/optfil.nix`,
 `nix/filc-runtime-src.nix`) and update the hashes:

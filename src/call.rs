@@ -434,6 +434,17 @@ impl<'f, Sig: FilSig> FilFn<'f, Sig> {
         Ok(FilFn { raw: ptr.raw(), _marker: PhantomData })
     }
 
+    /// A null function pointer, for optional callbacks in C structs and
+    /// arguments. Calling it is an error.
+    pub fn null() -> Self {
+        FilFn::from_raw_unchecked(FilPtr::<Opaque>::null().raw())
+    }
+
+    /// Whether this is a null function pointer.
+    pub fn is_null(self) -> bool {
+        self.as_ptr().is_null()
+    }
+
     pub(crate) fn from_raw_unchecked(raw: RawPtr) -> Self {
         FilFn { raw, _marker: PhantomData }
     }

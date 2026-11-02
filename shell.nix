@@ -36,4 +36,7 @@ pkgs.mkShell {
   FILC_GLIBC_INCLUDE = "${pkgs.glibc.dev}/include";
   FILC_LINUX_INCLUDE = "${pkgs.linuxHeaders}/include";
   FILC_HOST_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+
+  # libclang for fil-rust-bindgen.
+  LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 }
