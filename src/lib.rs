@@ -219,7 +219,7 @@ macro_rules! foreign {
             $( $func: $crate::Function<fn($($aty),*) -> $crate::foreign!(@ret $($ret)?)>, )*
         }
 
-        #[allow(dead_code)]
+        #[allow(dead_code, clippy::too_many_arguments)]
         impl $name {
             /// Opens the library at `path` and looks up its functions.
             $vis fn load(fil: &$crate::Fil<'_>, path: impl ::std::convert::AsRef<::std::path::Path>) -> $crate::Result<Self> {
