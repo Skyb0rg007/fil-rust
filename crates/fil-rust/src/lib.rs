@@ -80,6 +80,12 @@
 //! Fil-C `pthread_mutex_lock`, `read`, `sleep`) is fine: Fil-C's own libc
 //! exits the runtime around blocking system calls.
 //!
+//! A child process made by `fork()` after the runtime started has none of
+//! its threads, so [`Runtime::run`], [`Runtime::spawn`] and
+//! [`JoinHandle::join`] panic there; values that came from the runtime are
+//! leaked when dropped. Starting programs with `std::process::Command` is
+//! fine (it uses `posix_spawn` or `exec`s right away).
+//!
 //! # Errors, panics, and exceptions
 //!
 //! Checks that Rust code makes (bounds, liveness, alignment, permissions on

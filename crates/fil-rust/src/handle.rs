@@ -61,6 +61,11 @@ impl HandleTable {
     }
 
     pub(crate) fn release(&self, inner: &Inner, index: usize) {
+        // In a forked child the lock may be held forever by a thread that
+        // didn't survive the fork; the child can't use the runtime anyway.
+        if crate::runtime::in_forked_child() {
+            return;
+        }
         lock_anywhere(inner, &self.pending).push(index);
     }
 

@@ -209,6 +209,27 @@ static INNER: OnceLock<&'static Inner> = OnceLock::new();
 static SHIM: OnceLock<Shim> = OnceLock::new();
 static START_LOCK: Mutex<()> = Mutex::new(());
 
+/// Set in the child of a `fork`. The child has only the forking thread: the
+/// executors are gone, and locks they held stay held, so the runtime can't
+/// be used there.
+static FORKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn mark_forked() {
+    FORKED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether this process is the child of a `fork` made after the runtime
+/// started.
+pub(crate) fn in_forked_child() -> bool {
+    FORKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn refuse_in_forked_child() {
+    if in_forked_child() {
+        panic!("fil-rust: the Fil-C runtime can't be used in a child process made by fork() (only the parent has its threads)");
+    }
+}
+
 thread_local! {
     /// The Fil-C thread state of the current OS thread, if it is a Fil-C
     /// thread currently running Rust code (an executor or a callback).
@@ -305,6 +326,7 @@ impl Runtime {
         if !thread.is_null() {
             return unsafe { run_inline(self.inner, thread, f) };
         }
+        refuse_in_forked_child();
         let (tx, rx) = mpsc::sync_channel::<std::thread::Result<R>>(1);
         let job: Box<dyn for<'f> FnOnce(&Fil<'f>) + Send + '_> = Box::new(move |fil| {
             let result = catch_unwind(AssertUnwindSafe(|| f(fil)));
@@ -328,6 +350,7 @@ impl Runtime {
         F: for<'f> FnOnce(&Fil<'f>) -> R + Send + 'static,
         R: Send + 'static,
     {
+        refuse_in_forked_child();
         let (tx, rx) = mpsc::sync_channel::<std::thread::Result<R>>(1);
         self.inner.push_job(Box::new(move |fil| {
             let result = catch_unwind(AssertUnwindSafe(|| f(fil)));
@@ -360,6 +383,7 @@ impl<R> JoinHandle<R> {
     /// Inside a job or callback, the thread leaves the runtime while it
     /// waits.
     pub fn join(self) -> R {
+        refuse_in_forked_child();
         match outside_runtime(|| self.rx.recv()) {
             Ok(Ok(value)) => value,
             Ok(Err(panic)) => resume_unwind(panic),
@@ -369,6 +393,7 @@ impl<R> JoinHandle<R> {
 
     /// Waits up to `timeout` for the job.
     pub fn join_timeout(self, timeout: Duration) -> std::result::Result<R, JoinHandle<R>> {
+        refuse_in_forked_child();
         match outside_runtime(|| self.rx.recv_timeout(timeout)) {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(panic)) => resume_unwind(panic),
@@ -647,6 +672,7 @@ unsafe fn boot(config: Config) -> Result<&'static Inner> {
         callbacks: Registry::new(),
     }));
     let _ = INNER.set(inner);
+    unsafe { libc::pthread_atfork(None, None, Some(mark_forked)) };
     unsafe { (shim.fr_init)(thread_main_entry, crate::callback::callback_entry) };
 
     // argv for the Fil-C side; it lives for the rest of the process.

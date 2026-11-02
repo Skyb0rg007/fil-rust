@@ -142,6 +142,12 @@ impl<Sig: FilSig> Callback<Sig> {
 
 impl<Sig: FilSig> Drop for Callback<Sig> {
     fn drop(&mut self) {
+        // In a forked child the registry's lock may be held forever by a
+        // thread that didn't survive the fork: leave the entry (the handle
+        // leaks the same way).
+        if crate::runtime::in_forked_child() {
+            return;
+        }
         let removed = lock_anywhere(self.inner, &self.inner.callbacks.map).remove(&self.id);
         // Drop the closure after releasing the lock: its destructor may do
         // anything, including creating or dropping other callbacks.
