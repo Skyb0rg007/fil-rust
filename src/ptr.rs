@@ -269,7 +269,7 @@ impl<'f, T: FilType + ?Sized> FilPtr<'f, T> {
 
     /// Number of whole `T` elements accessible from here.
     pub fn len(self) -> usize {
-        if T::SIZE == 0 { 0 } else { self.remaining() / T::SIZE }
+        self.remaining().checked_div(T::SIZE).unwrap_or(0)
     }
 
     /// Whether no whole `T` is accessible from here.

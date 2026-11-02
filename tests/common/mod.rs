@@ -109,7 +109,7 @@ pub fn runtime() -> Runtime {
 ///
 /// Call this *outside* `Runtime::run`: blocking on the `OnceLock` inside a
 /// job would block a thread that is inside the Fil-C runtime, which stalls
-/// the garbage collector (see "Blocking" in the crate docs).
+/// the garbage collector (see "Threads and blocking" in the crate docs).
 pub fn basic() -> &'static basic::Basic {
     static BASIC: std::sync::OnceLock<basic::Basic> = std::sync::OnceLock::new();
     BASIC.get_or_init(|| runtime().run(|fil| basic::load(fil)))

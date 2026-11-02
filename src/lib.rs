@@ -41,6 +41,106 @@
 //!   [`foreign!`] declares a whole interface at once.
 //! * [`Callback`] turns a Rust closure into a Fil-C function pointer.
 //! * C structs implement [`FilType`] with `#[derive(FilType)]`.
+//!
+//! # Flavors
+//!
+//! Fil-C comes in two flavors, which differ in the user libc that Fil-C code
+//! links against:
+//!
+//! * [`Flavor::Musl`] (the `musl` feature, on by default): the "pizfix"
+//!   binary distribution. Point [`Config::musl`] at the directory containing
+//!   `pizfix/`.
+//! * [`Flavor::Glibc`] (the `glibc` feature): the "optfil" distribution,
+//!   normally installed at `/opt/fil`. Point [`Config::glibc`] at it.
+//!
+//! Both features can be enabled at once; the flavor is chosen when the
+//! runtime starts, and a process holds one runtime.
+//! [`Config::from_env`] reads `FILC_FLAVOR` and the matching root variable.
+//! Either way the Rust program itself stays linked to the system's glibc: the
+//! Fil-C runtime is loaded next to it, with small built-in stand-ins for the
+//! distribution's "yolo" libc.
+//!
+//! # Threads and blocking
+//!
+//! Fil-C code only runs on Fil-C threads. [`Runtime::run`] and
+//! [`Runtime::spawn`] hand jobs to a pool of executor threads, which grows on
+//! demand up to [`Config::max_workers`], so jobs that wait on each other don't
+//! starve. Threads that Fil-C code creates itself (`pthread_create`,
+//! `std::thread`) work as usual and may call Rust [`Callback`]s.
+//!
+//! While Rust code holds a [`Fil`], its thread is *entered*: the garbage
+//! collector waits for it at every handshake. So **don't block while
+//! entered.** Waiting on a lock, channel, condition variable, `OnceLock`, or
+//! another thread inside a job can deadlock the whole runtime if the thread
+//! you wait for is itself waiting on the collector. Wrap blocking work in
+//! [`Fil::exited`], which leaves the runtime for the duration of a closure;
+//! long CPU-bound loops that don't call into Fil-C should call
+//! [`Fil::pollcheck`] now and then. Calling Fil-C functions that block (a
+//! Fil-C `pthread_mutex_lock`, `read`, `sleep`) is fine: Fil-C's own libc
+//! exits the runtime around blocking system calls.
+//!
+//! # Errors, panics, and exceptions
+//!
+//! Checks that Rust code makes (bounds, liveness, alignment, permissions on
+//! a [`FilPtr`] access; a symbol that doesn't exist) return an [`Error`].
+//! Safety violations that Fil-C code makes are *Fil-C panics*: the runtime
+//! prints a diagnostic and ends the process, exactly as it would in a pure
+//! Fil-C program. A call whose Rust signature doesn't match the callee (too
+//! few arguments, a pointer passed as an integer) is caught by Fil-C's calling
+//! convention checks the same way.
+//!
+//! A C++ exception that escapes a Fil-C function called from Rust becomes
+//! [`Error::Exception`] (after destructors on the way run). A Rust panic
+//! inside a job propagates to the caller of [`Runtime::run`] or
+//! [`JoinHandle::join`]; a Rust panic inside a [`Callback`] can't unwind
+//! through C frames, so it becomes a Fil-C panic.
+//!
+//! # Scopes
+//!
+//! A [`FilPtr`] is only valid in the scope of the [`Fil`] it came from, and
+//! the borrow checker enforces it. It can't escape the closure:
+//!
+//! ```compile_fail
+//! # fn f(rt: fil_rust::Runtime) {
+//! let leaked = rt.run(|fil| fil.c_str("hi").unwrap());
+//! # }
+//! ```
+//!
+//! A `Fil` can't move to another thread:
+//!
+//! ```compile_fail
+//! # fn f(rt: fil_rust::Runtime) {
+//! rt.run(|fil| {
+//!     std::thread::scope(|s| {
+//!         s.spawn(|| fil.pollcheck());
+//!     });
+//! });
+//! # }
+//! ```
+//!
+//! And Fil-C memory is off limits while exited:
+//!
+//! ```compile_fail
+//! # fn f(rt: fil_rust::Runtime) {
+//! rt.run(|fil| {
+//!     let p = fil.alloc::<i32>(&1).unwrap();
+//!     fil.exited(|| p.read(fil));
+//! });
+//! # }
+//! ```
+//!
+//! To keep an object across scopes or threads, root it with [`Fil::root`];
+//! the [`FilHandle`] it returns is `Send + Sync`:
+//!
+//! ```no_run
+//! # fn f(rt: fil_rust::Runtime) {
+//! let greeting = rt.run(|fil| fil.root(fil.c_str("hi").unwrap()).unwrap());
+//! std::thread::spawn(move || {
+//!     let rt = fil_rust::Runtime::get().unwrap();
+//!     rt.run(|fil| assert_eq!(greeting.get(fil).read_string(fil).unwrap(), "hi"));
+//! });
+//! # }
+//! ```
 
 mod call;
 mod callback;
@@ -66,7 +166,6 @@ pub use fil_rust_macros::FilType;
 
 // Lets the derive macro's `::fil_rust` paths work inside this crate.
 extern crate self as fil_rust;
-
 
 /// Items used by the derive macro and [`foreign!`]. Not a stable API.
 #[doc(hidden)]

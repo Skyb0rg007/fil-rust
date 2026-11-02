@@ -83,7 +83,7 @@ impl Config {
         };
         let root = vars
             .iter()
-            .find_map(|v| std::env::var_os(v))
+            .find_map(std::env::var_os)
             .ok_or_else(|| Error::Load(format!("set {} to the Fil-C distribution root", vars[0])))?;
         let mut config = Config::new(flavor, root);
         if let Some(n) = std::env::var("FIL_RUST_WORKERS").ok().and_then(|v| v.parse().ok()) {
