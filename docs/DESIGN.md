@@ -1,7 +1,8 @@
 # fil-rust design
 
-Status: plan, nothing implemented yet. Written against Fil-C 0.687 (pizfix /
-musl distribution, x86_64).
+Status: implemented (see [Status](#status)). Written against Fil-C 0.687: the
+pizfix (musl) distribution on x86-64 and aarch64, and the optfil (glibc)
+distribution on x86-64.
 
 ## Goal
 
