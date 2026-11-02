@@ -120,6 +120,11 @@ impl Config {
         self.flavor
     }
 
+    /// The number of executor threads.
+    pub fn worker_count(&self) -> usize {
+        self.workers
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

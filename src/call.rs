@@ -350,19 +350,58 @@ macro_rules! impl_sig {
     };
 }
 
-impl_sig!();
-impl_sig!(A1);
-impl_sig!(A1, A2);
-impl_sig!(A1, A2, A3);
-impl_sig!(A1, A2, A3, A4);
-impl_sig!(A1, A2, A3, A4, A5);
-impl_sig!(A1, A2, A3, A4, A5, A6);
-impl_sig!(A1, A2, A3, A4, A5, A6, A7);
-impl_sig!(A1, A2, A3, A4, A5, A6, A7, A8);
-impl_sig!(A1, A2, A3, A4, A5, A6, A7, A8, A9);
-impl_sig!(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10);
-impl_sig!(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11);
-impl_sig!(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12);
+/// A `fn` type inside a signature or struct is a C function pointer; its
+/// values are [`FilFn`]s.
+macro_rules! impl_fn_ptr_type {
+    ($($a:ident),*) => {
+        impl<R: FilType + 'static, $($a: FilType + 'static),*> FilType for fn($($a),*) -> R {
+            type Value<'f> = FilFn<'f, Self>;
+            const SIZE: usize = 8;
+            const ALIGN: usize = 8;
+
+            fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<FilFn<'f, Self>> {
+                <FilFn<'static, Self> as FilType>::read(fil, at)
+            }
+
+            fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &FilFn<'f, Self>) -> Result<()> {
+                <FilFn<'static, Self> as FilType>::write(fil, at, value)
+            }
+
+            fn leaves(out: &mut Vec<Leaf>, offset: usize) {
+                out.push(Leaf { offset, size: 8, kind: LeafKind::Ptr });
+            }
+
+            fn to_word(value: &FilFn<'_, Self>) -> Option<Word> {
+                Some(Word::Ptr(value.raw))
+            }
+
+            fn from_word<'f>(fil: &Fil<'f>, word: Word) -> Option<FilFn<'f, Self>> {
+                <FilFn<'static, Self> as FilType>::from_word(fil, word)
+            }
+        }
+    };
+}
+
+macro_rules! impl_sig_and_fn_ptr {
+    ($($a:ident),*) => {
+        impl_sig!($($a),*);
+        impl_fn_ptr_type!($($a),*);
+    };
+}
+
+impl_sig_and_fn_ptr!();
+impl_sig_and_fn_ptr!(A1);
+impl_sig_and_fn_ptr!(A1, A2);
+impl_sig_and_fn_ptr!(A1, A2, A3);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5, A6);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5, A6, A7);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5, A6, A7, A8);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5, A6, A7, A8, A9);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11);
+impl_sig_and_fn_ptr!(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12);
 
 /// A Fil-C function pointer with signature `Sig`, valid within scope `'f`.
 pub struct FilFn<'f, Sig> {
