@@ -3,7 +3,7 @@
 //! tests audit that boundary:
 //!
 //! * every libc symbol libpizlo imports is on a reviewed list
-//!   (`tests/abi/<flavor>_imports.txt`), so a new Fil-C version that imports
+//!   (`tests/abi/<flavor>_<arch>_imports.txt`), so a new Fil-C version that imports
 //!   something new fails here until someone checks it;
 //! * the layouts and constants libpizlo hands to libc, built once against
 //!   musl's headers and once against glibc's, differ only in the reviewed
@@ -38,7 +38,11 @@ fn libpizlo_imports() -> BTreeSet<String> {
 
 #[test]
 fn libpizlo_imports_are_reviewed() {
-    let name = format!("tests/abi/{}_imports.txt", format!("{:?}", flavor()).to_lowercase());
+    let name = format!(
+        "tests/abi/{}_{}_imports.txt",
+        format!("{:?}", flavor()).to_lowercase(),
+        std::env::consts::ARCH
+    );
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(&name);
     let reviewed: BTreeSet<String> = std::fs::read_to_string(&path)
         .unwrap()
@@ -56,8 +60,8 @@ fn libpizlo_imports_are_reviewed() {
     );
 }
 
-/// Differences between musl's and glibc's x86-64 headers that libpizlo
-/// passes across, and why each is safe.
+/// Differences between musl's and glibc's headers that libpizlo passes
+/// across, and why each is safe.
 const REVIEWED: &[(&str, &str)] = &[
     // musl reserves extra space at the end; glibc writes less than the
     // (musl-sized, bounds-checked) buffer libpizlo passes.
@@ -84,10 +88,27 @@ const REVIEWED: &[(&str, &str)] = &[
     ("const PTHREAD_STACK_MIN", "unused by libpizlo"),
 ];
 
+/// Further differences on aarch64, where glibc's pthread objects are larger.
+#[cfg(target_arch = "aarch64")]
+const REVIEWED_ARCH: &[(&str, &str)] = &[
+    // glibc's state fits in musl's size, but its init functions clear the
+    // whole glibc size: the stand-in's wrappers use a glibc-sized copy.
+    // Every thread start and runtime mutex goes through them.
+    ("sizeof pthread_attr_t", "stand-in wrappers"),
+    ("sizeof pthread_mutex_t", "stand-in wrappers"),
+    // libpizlo imports no mutexattr or condattr functions.
+    ("sizeof pthread_mutexattr_t", "not passed by libpizlo"),
+    ("sizeof pthread_condattr_t", "not passed by libpizlo"),
+];
+#[cfg(not(target_arch = "aarch64"))]
+const REVIEWED_ARCH: &[(&str, &str)] = &[];
+
 fn probe(name: &str, args: &[String]) -> Vec<String> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/abi/layout_probe.c");
     let exe = tmp().join(name);
-    let status = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()))
+    // FILC_TARGET_CC is the target's C compiler when cross-compiling.
+    let cc = ["FILC_TARGET_CC", "CC"].into_iter().find_map(|v| std::env::var(v).ok()).unwrap_or_else(|| "cc".into());
+    let status = Command::new(cc)
         .arg("-w")
         .args(args)
         .arg(&src)
@@ -113,7 +134,7 @@ fn musl_and_glibc_layouts_differ_only_in_reviewed_ways() {
     for (m, g) in musl.iter().zip(&glibc) {
         let key = |l: &str| l.rsplitn(if l.starts_with("field") { 3 } else { 2 }, ' ').last().unwrap().to_string();
         assert_eq!(key(m), key(g));
-        if m != g && !REVIEWED.iter().any(|(k, _)| *k == key(m)) {
+        if m != g && !REVIEWED.iter().chain(REVIEWED_ARCH).any(|(k, _)| *k == key(m)) {
             unreviewed.push(format!("musl: {m}\nglibc: {g}"));
         }
     }

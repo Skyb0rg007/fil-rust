@@ -50,6 +50,10 @@ pub trait FilType {
     const SIZE: usize;
     /// `alignof` of the C type.
     const ALIGN: usize;
+    /// Whether this is a struct or array rather than a scalar. Some
+    /// architectures pass a one-member struct differently from the member.
+    #[doc(hidden)]
+    const AGGREGATE: bool = false;
 
     /// Reads a value from Fil-C memory at `at`.
     fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<Self::Value<'f>>;
@@ -199,6 +203,7 @@ impl<T: FilType, const N: usize> FilType for [T; N] {
     type Value<'f> = [T::Value<'f>; N];
     const SIZE: usize = T::SIZE * N;
     const ALIGN: usize = T::ALIGN;
+    const AGGREGATE: bool = true;
 
     fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<Self::Value<'f>> {
         let mut items = Vec::with_capacity(N);

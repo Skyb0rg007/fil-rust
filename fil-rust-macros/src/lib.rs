@@ -187,6 +187,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             type Value<#fil_lt> = #value_ty;
             const SIZE: usize = Self::__FIL_LAYOUT.size;
             const ALIGN: usize = Self::__FIL_LAYOUT.align;
+            const AGGREGATE: bool = true;
 
             #[allow(unused_variables)]
             fn read<#fil_lt>(

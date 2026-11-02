@@ -4,7 +4,7 @@ mod common;
 
 use std::ffi::c_char;
 
-use common::basic::{Big, Inner, Mixed, Named, Outer, Pt, Vec2};
+use common::basic::{Big, FPair, Inner, Mixed, Named, Outer, Pt, Quad, Rgb, Vec2, Vec3};
 use common::{basic, runtime};
 use fil_rust::{Error, FilType, Function, Ptr};
 
@@ -124,6 +124,24 @@ fn small_structs_by_value() {
         assert_eq!(b.vec2_rot90(fil, Vec2 { x: 1.0, y: 2.0 }).unwrap(), Vec2 { x: -2.0, y: 1.0 });
         assert_eq!(b.mixed_make(fil, 0.5, 7).unwrap(), Mixed { d: 0.5, i: 7 });
         assert_eq!(b.mixed_total(fil, Mixed { d: 1.25, i: 2 }).unwrap(), 3.25);
+    });
+}
+
+#[test]
+fn structs_whose_lowering_depends_on_the_architecture() {
+    let b = basic();
+    runtime().run(|fil| {
+        assert_eq!(b.inner_bump(fil, Inner { a: -3, b: 100 }, 5).unwrap(), Inner { a: 2, b: 105 });
+        assert_eq!(
+            b.rgb_scale(fil, Rgb { r: 0.5, g: 1.0, b: 2.0 }, 4.0).unwrap(),
+            Rgb { r: 2.0, g: 4.0, b: 8.0 }
+        );
+        let q = Quad { a: 1.0, b: 2.0, c: 3.0, d: 4.0 };
+        assert_eq!(b.quad_dot(fil, q, Quad { a: 4.0, b: 3.0, c: 2.0, d: 1.0 }).unwrap(), 20.0);
+        let x = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+        let y = Vec3 { x: 0.0, y: 1.0, z: 0.0 };
+        assert_eq!(b.vec3_cross(fil, x, y).unwrap(), Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+        assert_eq!(b.fpair_swap(fil, FPair { f: 7.9, i: -2 }).unwrap(), FPair { f: -2.0, i: 7 });
     });
 }
 

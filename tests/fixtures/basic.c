@@ -20,12 +20,12 @@ float halve(float x) { return x / 2; }
 _Bool is_even(int x) { return x % 2 == 0; }
 void do_nothing(void) {}
 
-long sum12(char a, short b, int c, long d, float e, double f, unsigned char g,
+long sum12(signed char a, short b, int c, long d, float e, double f, unsigned char g,
            unsigned short h, unsigned i, unsigned long j, int k, long l) {
     return a + b + c + d + (long)e + (long)f + g + h + i + j + k + l;
 }
 
-double mix(int a, double b, long c, float d, char e, double f) {
+double mix(int a, double b, long c, float d, signed char e, double f) {
     return a + b + c + d + e + f;
 }
 
@@ -110,7 +110,23 @@ struct named { const char *name; int len; };
 struct named named_make(const char *s) { struct named n = {s, (int)strlen(s)}; return n; }
 int named_check(struct named n) { return n.name && (int)strlen(n.name) == n.len; }
 
-struct inner { short a; char b; };
+struct inner { short a; signed char b; };
+struct inner inner_bump(struct inner v, int k) { v.a += k; v.b += k; return v; }
+
+// Shapes whose lowering differs between x86-64 and aarch64: homogeneous
+// float aggregates (in FP registers on aarch64, even when larger than 16
+// bytes) and a float sharing an eightbyte with an int.
+struct rgb { float r, g, b; };
+struct rgb rgb_scale(struct rgb c, float k) { struct rgb r = {c.r * k, c.g * k, c.b * k}; return r; }
+struct quad { float a, b, c, d; };
+float quad_dot(struct quad x, struct quad y) { return x.a * y.a + x.b * y.b + x.c * y.c + x.d * y.d; }
+struct vec3 { double x, y, z; };
+struct vec3 vec3_cross(struct vec3 a, struct vec3 b) {
+    struct vec3 r = {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    return r;
+}
+struct fpair { float f; int i; };
+struct fpair fpair_swap(struct fpair p) { struct fpair r = {(float)p.i, (int)p.f}; return r; }
 struct outer { char tag; struct inner in; int arr[3]; double d; const char *label; };
 struct outer outer_make(const char *label) {
     struct outer o = {'T', {-7, 'q'}, {1, 2, 3}, 2.5, label};
@@ -207,6 +223,7 @@ void each(const int *a, size_t n, void (*f)(int index, int value)) {
 }
 struct pt apply_pt(struct pt (*f)(struct pt), struct pt p) { return f(p); }
 struct big apply_big(struct big (*f)(struct big), struct big b) { return f(b); }
+struct vec3 apply_vec3(struct vec3 (*f)(struct vec3), struct vec3 v) { return f(v); }
 const char *apply_str(const char *(*f)(const char *), const char *s) { return f(s); }
 
 int (*get_add_fn(void))(int, int) { return add; }

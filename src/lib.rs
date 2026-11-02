@@ -51,7 +51,8 @@
 //!   binary distribution. Point [`Config::musl`] at the directory containing
 //!   `pizfix/`.
 //! * [`Flavor::Glibc`] (the `glibc` feature): the "optfil" distribution,
-//!   normally installed at `/opt/fil`. Point [`Config::glibc`] at it.
+//!   normally installed at `/opt/fil`. Point [`Config::glibc`] at it. It
+//!   exists only for x86-64; on aarch64, only the musl flavor is available.
 //!
 //! Both features can be enabled at once; the flavor is chosen when the
 //! runtime starts, and a process holds one runtime.
@@ -143,9 +144,9 @@
 //! ```
 
 // The calling-convention encoding (struct classification, argument slots)
-// follows Fil-C's x86-64 lowering; other architectures need their own.
-#[cfg(not(target_arch = "x86_64"))]
-compile_error!("fil-rust currently supports only x86-64 Linux");
+// follows Fil-C's per-architecture lowering (see call.rs).
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("fil-rust supports only x86-64 and aarch64 Linux");
 
 mod call;
 mod callback;

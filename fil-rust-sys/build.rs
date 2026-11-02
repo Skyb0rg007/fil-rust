@@ -65,17 +65,28 @@ struct ShimInputs {
     clang: String,
     resource_dir: PathBuf,
     runtime_src: PathBuf,
+    /// `--target` for clang.
+    triple: String,
+    arch: String,
+    /// A linker for the target, if clang's default won't do (cross builds).
+    linker: Option<String>,
 }
 
 /// Compiles the runtime shim against the given libc headers.
 fn build_shim(inputs: &ShimInputs, libc_includes: &[PathBuf], out: &Path) {
     let mut cmd = Command::new(&inputs.clang);
+    cmd.arg(format!("--target={}", inputs.triple));
+    if inputs.arch == "x86_64" {
+        cmd.arg("-march=x86-64-v2");
+    }
+    if let Some(linker) = &inputs.linker {
+        cmd.arg(format!("--ld-path={linker}"));
+    }
     cmd.args([
         "-O2",
         "-g",
         "-fPIC",
         "-shared",
-        "-march=x86-64-v2",
         "-pthread",
         "-nostdinc",
         "-nostdlib",
@@ -104,11 +115,15 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = env::var("TARGET").unwrap_or_default();
-    if !target.starts_with("x86_64-") || !target.contains("-linux-") {
-        panic!("fil-rust-sys: only x86-64 Linux targets are supported (building for {target})");
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    if !(arch == "x86_64" || arch == "aarch64") || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        panic!("fil-rust-sys: only x86-64 and aarch64 Linux targets are supported (building for {target})");
     }
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let cc = env_or("CC", "cc");
+    // FILC_TARGET_CC: a C compiler for the target, when cross-compiling.
+    let cc = env::var("FILC_TARGET_CC").unwrap_or_else(|_| env_or("CC", "cc"));
+    println!("cargo:rerun-if-env-changed=FILC_TARGET_CC");
+    println!("cargo:rerun-if-env-changed=FILC_SHIM_LINKER");
     let musl = env::var_os("CARGO_FEATURE_MUSL").is_some();
     let glibc = env::var_os("CARGO_FEATURE_GLIBC").is_some();
     if !musl && !glibc {
@@ -120,6 +135,9 @@ fn main() {
         resource_dir: clang_resource_dir(&clang),
         clang,
         runtime_src: env_path("FILC_RUNTIME_SRC"),
+        triple: format!("{arch}-unknown-linux-gnu"),
+        arch: arch.clone(),
+        linker: env::var("FILC_SHIM_LINKER").ok(),
     };
     let linux_include = env_path("FILC_LINUX_INCLUDE");
 
@@ -139,6 +157,9 @@ fn main() {
         );
     }
 
+    if glibc && arch != "x86_64" {
+        panic!("fil-rust-sys: the glibc flavor's distribution exists only for x86-64");
+    }
     if glibc {
         for (src, out, soname, map) in [
             ("compat_glibc_c.c", "compat_glibc_libyolocimpl.so", "libyolocimpl.so", "compat_glibc_c.map"),

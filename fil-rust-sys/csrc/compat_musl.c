@@ -134,4 +134,106 @@ int fil_rust_musl_sendmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, in
     return i ? (int)i : -1;
 }
 
+#if defined(__aarch64__)
+/* On aarch64, glibc's pthread_attr_t is 64 bytes and its pthread_mutex_t 48,
+   where musl's are 56 and 40, and libpizlo (built against musl's headers)
+   passes musl-sized objects. glibc's state fits in musl's size: struct
+   pthread_attr ends at byte 56, and the mutex's __data at byte 40. But
+   pthread_attr_init (also used by pthread_getattr_np) and pthread_mutex_init
+   clear the whole glibc size, overwriting the 8 bytes after libpizlo's
+   object. fil-rust points libpizlo's imports of these functions here; the
+   wrappers work on a glibc-sized copy and check that the tail stays unused. */
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define FR_MUSL_ATTR_SIZE 56
+#define FR_MUSL_MUTEX_SIZE 40
+
+_Static_assert(sizeof(pthread_attr_t) == 64, "glibc aarch64 pthread_attr_t");
+_Static_assert(sizeof(pthread_mutex_t) == 48, "glibc aarch64 pthread_mutex_t");
+_Static_assert(offsetof(pthread_mutex_t, __data.__list) + sizeof(__pthread_list_t) <= FR_MUSL_MUTEX_SIZE,
+               "glibc's mutex state must fit in musl's pthread_mutex_t");
+
+static void fr_attr_in(pthread_attr_t *g, const void *musl)
+{
+    memset(g, 0, sizeof *g);
+    memcpy(g, musl, FR_MUSL_ATTR_SIZE);
+}
+
+static void fr_attr_out(void *musl, const pthread_attr_t *g)
+{
+    static const unsigned char zero[sizeof *g - FR_MUSL_ATTR_SIZE];
+    if (memcmp((const unsigned char *)g + FR_MUSL_ATTR_SIZE, zero, sizeof zero)) {
+        fputs("fil-rust: glibc's pthread_attr_t uses more than musl's 56 bytes\n", stderr);
+        abort();
+    }
+    memcpy(musl, g, FR_MUSL_ATTR_SIZE);
+}
+
+int fil_rust_musl_pthread_attr_init(void *attr)
+{
+    pthread_attr_t g;
+    int r = pthread_attr_init(&g);
+    if (!r)
+        fr_attr_out(attr, &g);
+    return r;
+}
+
+int fil_rust_musl_pthread_getattr_np(pthread_t thread, void *attr)
+{
+    pthread_attr_t g;
+    int r = pthread_getattr_np(thread, &g);
+    if (!r)
+        fr_attr_out(attr, &g);
+    return r;
+}
+
+int fil_rust_musl_pthread_attr_destroy(void *attr)
+{
+    pthread_attr_t g;
+    fr_attr_in(&g, attr);
+    return pthread_attr_destroy(&g);
+}
+
+int fil_rust_musl_pthread_attr_getstack(const void *attr, void **addr, size_t *size)
+{
+    pthread_attr_t g;
+    fr_attr_in(&g, attr);
+    return pthread_attr_getstack(&g, addr, size);
+}
+
+int fil_rust_musl_pthread_attr_setstacksize(void *attr, size_t size)
+{
+    pthread_attr_t g;
+    fr_attr_in(&g, attr);
+    int r = pthread_attr_setstacksize(&g, size);
+    if (!r)
+        fr_attr_out(attr, &g);
+    return r;
+}
+
+int fil_rust_musl_pthread_create(pthread_t *thread, const void *attr, void *(*fn)(void *), void *arg)
+{
+    pthread_attr_t g;
+    if (!attr)
+        return pthread_create(thread, NULL, fn, arg);
+    fr_attr_in(&g, attr);
+    return pthread_create(thread, &g, fn, arg);
+}
+
+/* libpizlo only initializes default mutexes (it imports no mutexattr
+   functions). A fresh, unlocked mutex can be copied. */
+int fil_rust_musl_pthread_mutex_init(void *mutex, const void *attr)
+{
+    if (attr)
+        return EINVAL;
+    pthread_mutex_t g;
+    int r = pthread_mutex_init(&g, NULL);
+    if (!r)
+        memcpy(mutex, &g, FR_MUSL_MUTEX_SIZE);
+    return r;
+}
+#endif
+
 #include "compat_signals.inc"

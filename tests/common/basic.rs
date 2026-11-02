@@ -49,6 +49,37 @@ pub struct Inner {
     pub b: i8,
 }
 
+#[derive(FilType, Clone, Copy, Debug, PartialEq)]
+#[fil(size = 12, align = 4)]
+pub struct Rgb {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+#[derive(FilType, Clone, Copy, Debug, PartialEq)]
+pub struct Quad {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
+}
+
+#[derive(FilType, Clone, Copy, Debug, PartialEq)]
+#[fil(size = 24, align = 8)]
+pub struct Vec3 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+#[derive(FilType, Clone, Copy, Debug, PartialEq)]
+#[fil(size = 8, align = 4)]
+pub struct FPair {
+    pub f: f32,
+    pub i: i32,
+}
+
 #[derive(FilType, Clone, Copy, Debug)]
 #[fil(size = 40, align = 8)]
 pub struct Outer<'f> {
@@ -104,6 +135,11 @@ fil_rust::foreign! {
         fn named_make(s: Ptr<c_char>) -> Named<'static>;
         fn named_check(n: Named<'static>) -> i32;
         fn outer_make(label: Ptr<c_char>) -> Outer<'static>;
+        fn inner_bump(v: Inner, k: i32) -> Inner;
+        fn rgb_scale(c: Rgb, k: f32) -> Rgb;
+        fn quad_dot(x: Quad, y: Quad) -> f32;
+        fn vec3_cross(a: Vec3, b: Vec3) -> Vec3;
+        fn fpair_swap(p: FPair) -> FPair;
         fn outer_sum(o: Ptr<Outer<'static>>) -> f64;
 
         fn list_build(n: i32) -> Ptr<Node<'static>>;

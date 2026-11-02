@@ -63,9 +63,10 @@ fn main() -> fil_rust::Result<()> {
 - **Bindings from headers.** `fil-rust-bindgen` turns a C header into
   `FilType` structs and a `foreign!` interface, from a build script or the
   command line (see `examples/bindgen-demo`).
-- **Both flavors.** Libraries built with the musl ("pizfix") or the glibc
+- **Both flavors, two architectures.** Libraries built with the musl ("pizfix") or the glibc
   ("optfil") Fil-C distribution can be loaded. Enable the `glibc` feature for
   the latter. The Rust program always stays linked to the system glibc.
+  x86-64 and aarch64 (musl only) are supported.
 
 Safety violations in Fil-C code are Fil-C panics: they end the process with a
 diagnostic, just as in a pure Fil-C program. See the crate docs and
@@ -124,6 +125,14 @@ Tests compile their fixtures with the compiler of the selected flavor:
     FILC_FLAVOR=glibc cargo test --features glibc    # glibc
     FUGC_MIN_THRESHOLD=0 cargo test                  # with constant garbage collection
     cargo test -p fil-rust-bindgen                   # the generator (FIL_RUST_BLESS=1 updates tests/generated)
+
+fil-rust supports x86-64 and aarch64 Linux (aarch64 with the musl flavor
+only; the glibc distribution is x86-64 only). `shell-aarch64.nix`
+cross-builds for aarch64 on an x86-64 host and runs the tests, the examples
+and the aarch64 Fil-C compiler under qemu-user. It needs `binfmt_misc` for
+aarch64 (on NixOS, `boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`):
+
+    nix-shell shell-aarch64.nix --run 'cargo test'
 
 To bump Fil-C, change `version` in `nix/filc.nix` (and `nix/optfil.nix`,
 `nix/filc-runtime-src.nix`) and update the hashes:

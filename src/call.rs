@@ -6,10 +6,20 @@
 //! capability of each pointer slot. The callee checks every slot it reads, so
 //! a mismatched signature can only produce a Fil-C panic, never corruption.
 //!
-//! Aggregates follow clang's x86-64 SysV lowering, which Fil-C keeps: an
-//! aggregate of at most 16 bytes travels as one slot per eightbyte (a lone
-//! pointer stays a pointer); larger ones are passed by reference (`byval`) and
-//! returned through a hidden first argument (`sret`).
+//! Arguments are laid out by the LLVM IR types that clang lowers C types to,
+//! each at an offset aligned to at least 8; aggregates are copied in as they
+//! sit in memory. The lowering is per architecture (Fil-C's clang keeps
+//! pointers as pointers in both):
+//!
+//! * x86-64 (SysV): an aggregate of at most 16 bytes travels as one slot per
+//!   eightbyte; larger ones are copied into the buffer inline (`byval`).
+//! * aarch64 (AAPCS64): a homogeneous floating-point aggregate (up to four
+//!   `float`s or `double`s) travels as its floats; any other aggregate of at
+//!   most 16 bytes takes exactly two slots; larger ones are passed as a
+//!   pointer to a copy.
+//!
+//! On both, larger aggregates are returned through a hidden first argument
+//! (`sret`).
 
 use std::marker::PhantomData;
 
@@ -41,17 +51,41 @@ pub fn classify<T: FilType + ?Sized>() -> Result<Class> {
     if leaves.iter().any(|l| l.size > 8 || l.size == 0) {
         return Err(Error::UnsupportedAbi("scalars wider than 8 bytes".into()));
     }
-    // Packed (misaligned) members force memory class.
-    if T::SIZE > 16 || leaves.iter().any(|l| l.offset % l.size != 0) {
-        return Ok(Class::Memory);
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Packed (misaligned) members force memory class.
+        if T::SIZE > 16 || leaves.iter().any(|l| l.offset % l.size != 0) {
+            return Ok(Class::Memory);
+        }
+        Ok(Class::Words(eightbyte_kinds(&leaves, T::SIZE)))
     }
-    Ok(Class::Words(eightbyte_kinds::<T>(&leaves)))
+    #[cfg(target_arch = "aarch64")]
+    {
+        if !T::AGGREGATE || is_hfa(&leaves, T::SIZE) {
+            return Ok(Class::Words(eightbyte_kinds(&leaves, T::SIZE)));
+        }
+        if T::SIZE > 16 {
+            return Ok(Class::Memory);
+        }
+        Ok(Class::Words(eightbyte_kinds(&leaves, 16)))
+    }
 }
 
-/// The kind of each eightbyte of `T`: a pointer if a pointer occupies it,
-/// else a float if it holds only floats, else an integer.
-fn eightbyte_kinds<T: FilType + ?Sized>(leaves: &[Leaf]) -> Vec<LeafKind> {
-    (0..T::SIZE.div_ceil(8))
+/// A homogeneous floating-point aggregate: one to four floats of the same
+/// size, back to back.
+#[cfg(target_arch = "aarch64")]
+fn is_hfa(leaves: &[Leaf], size: usize) -> bool {
+    let Some(first) = leaves.first() else { return false };
+    (1..=4).contains(&leaves.len())
+        && leaves.iter().enumerate().all(|(i, l)| l.kind == LeafKind::Float && l.size == first.size && l.offset == i * first.size)
+        && leaves.len() * first.size == size
+}
+
+/// The kind of each eightbyte of the first `size` bytes: a pointer if a
+/// pointer occupies it, else a float if it holds only floats, else an
+/// integer.
+fn eightbyte_kinds(leaves: &[Leaf], size: usize) -> Vec<LeafKind> {
+    (0..size.div_ceil(8))
         .map(|w| {
             let in_word: Vec<&Leaf> = leaves.iter().filter(|l| l.offset / 8 == w).collect();
             if in_word.iter().any(|l| l.kind == LeafKind::Ptr) {
@@ -68,19 +102,21 @@ fn eightbyte_kinds<T: FilType + ?Sized>(leaves: &[Leaf]) -> Vec<LeafKind> {
 /// How an argument of type `T` starting at slot `at` occupies the argument
 /// buffer: `pad` unused slots, then one slot per kind.
 ///
-/// Memory-class arguments (C's `byval`) are copied into the buffer inline,
-/// aligned to their alignment (at least 8).
+/// On x86-64, memory-class arguments (C's `byval`) are copied into the
+/// buffer inline, aligned to their alignment (at least 8). On aarch64 they
+/// are a pointer to a copy.
 fn arg_layout<T: FilType + ?Sized>(class: &Class, at: usize) -> (usize, Vec<LeafKind>) {
     match class {
         Class::Void => (0, Vec::new()),
         Class::Words(kinds) => (0, kinds.clone()),
+        Class::Memory if cfg!(target_arch = "aarch64") => (0, vec![LeafKind::Ptr]),
         Class::Memory => {
             let align = T::ALIGN.max(8);
             let offset = at * 8;
             let pad = (offset.div_ceil(align) * align - offset) / 8;
             let mut leaves = Vec::new();
             T::leaves(&mut leaves, 0);
-            (pad, eightbyte_kinds::<T>(&leaves))
+            (pad, eightbyte_kinds(&leaves, T::SIZE))
         }
     }
 }
@@ -104,9 +140,16 @@ fn encode_value<'f, T: FilType + ?Sized>(
     if class == Class::Void {
         return Err(Error::UnsupportedAbi("void can't be passed as an argument".into()));
     }
+    if cfg!(target_arch = "aarch64") && class == Class::Memory {
+        // Passed as a pointer to a copy the callee may modify.
+        let copy = fil.alloc_raw(T::SIZE, T::ALIGN.max(16))?;
+        T::write(fil, copy, value)?;
+        out.push(Word::Ptr(copy));
+        return Ok(());
+    }
     let (pad, kinds) = arg_layout::<T>(&class, out.len());
     out.extend(std::iter::repeat_n(Word::Bits(0), pad));
-    let tmp = fil.alloc_raw(round8(T::SIZE), T::ALIGN.max(16))?;
+    let tmp = fil.alloc_raw(round8(T::SIZE).max(kinds.len() * 8), T::ALIGN.max(16))?;
     T::write(fil, tmp, value)?;
     for (i, kind) in kinds.iter().enumerate() {
         let at = raw_add(tmp, i * 8);
@@ -133,6 +176,12 @@ fn decode_arg<'f, T: FilType + ?Sized>(
     let start = *at + pad;
     *at = start + kinds.len();
     let taken = &words[start..*at];
+    if cfg!(target_arch = "aarch64") && *class == Class::Memory {
+        return match taken {
+            [Word::Ptr(copy)] => T::read(fil, *copy),
+            _ => Err(Error::NullCapability),
+        };
+    }
     if let [word] = taken
         && let Some(value) = T::from_word(fil, *word)
     {
@@ -166,7 +215,7 @@ fn from_words<'f, T: FilType + ?Sized>(
     kinds: &[LeafKind],
     words: &[Word],
 ) -> Result<T::Value<'f>> {
-    let tmp = fil.alloc_raw(round8(T::SIZE), T::ALIGN.max(16))?;
+    let tmp = fil.alloc_raw(round8(T::SIZE).max(kinds.len() * 8), T::ALIGN.max(16))?;
     for (i, (kind, word)) in kinds.iter().zip(words).enumerate() {
         let at = raw_add(tmp, i * 8);
         match (kind, word) {

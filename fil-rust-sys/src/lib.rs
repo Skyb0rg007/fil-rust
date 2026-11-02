@@ -243,12 +243,29 @@ impl Flavor {
     /// different behavior.
     pub fn import_redirects(self) -> &'static [(&'static str, &'static str)] {
         match self {
+            #[cfg(target_arch = "x86_64")]
             Flavor::Musl => &[
                 // musl zeroes the padding in 64-bit cmsghdrs; glibc has none.
                 ("sendmsg", "fil_rust_musl_sendmsg\0"),
                 ("sendmmsg", "fil_rust_musl_sendmmsg\0"),
                 // Signals that land on Rust threads (compat_signals.inc).
                 ("sigaction", "fil_rust_sigaction\0"),
+            ],
+            #[cfg(target_arch = "aarch64")]
+            Flavor::Musl => &[
+                ("sendmsg", "fil_rust_musl_sendmsg\0"),
+                ("sendmmsg", "fil_rust_musl_sendmmsg\0"),
+                ("sigaction", "fil_rust_sigaction\0"),
+                // glibc's aarch64 pthread_attr_t and pthread_mutex_t are 8
+                // bytes larger than musl's, and their init functions clear
+                // the whole glibc size (compat_musl.c).
+                ("pthread_attr_init", "fil_rust_musl_pthread_attr_init\0"),
+                ("pthread_attr_destroy", "fil_rust_musl_pthread_attr_destroy\0"),
+                ("pthread_attr_getstack", "fil_rust_musl_pthread_attr_getstack\0"),
+                ("pthread_attr_setstacksize", "fil_rust_musl_pthread_attr_setstacksize\0"),
+                ("pthread_getattr_np", "fil_rust_musl_pthread_getattr_np\0"),
+                ("pthread_create", "fil_rust_musl_pthread_create\0"),
+                ("pthread_mutex_init", "fil_rust_musl_pthread_mutex_init\0"),
             ],
             Flavor::Glibc => &[("sigaction", "fil_rust_sigaction\0")],
         }
@@ -268,7 +285,10 @@ impl Flavor {
     /// libc would corrupt the process.
     pub fn real_yolo_libc_names(self) -> &'static [&'static str] {
         match self {
+            #[cfg(target_arch = "x86_64")]
             Flavor::Musl => &["libyoloc.so", "ld-fil1-x86_64.so"],
+            #[cfg(target_arch = "aarch64")]
+            Flavor::Musl => &["libyoloc.so", "ld-fil1-aarch64.so"],
             Flavor::Glibc => &["libyolocimpl.so", "libyolomimpl.so", "ld-fil1-x86_64.so"],
         }
     }
@@ -334,7 +354,8 @@ pub unsafe fn dlopen_bytes(label: &str, bytes: &[u8], flags: c_int) -> Result<*m
 
 /// Points the GOT entries through which the loaded object `path` imports
 /// each `(symbol, address)` of `redirects` at `address` instead, so that just
-/// that object's calls go elsewhere. Returns the symbols that were found.
+/// that object's calls go elsewhere. Fails if the object doesn't import one
+/// of the symbols. Returns the number of entries patched.
 ///
 /// # Safety
 ///
@@ -343,7 +364,7 @@ pub unsafe fn dlopen_bytes(label: &str, bytes: &[u8], flags: c_int) -> Result<*m
 pub unsafe fn redirect_imports(
     path: &std::path::Path,
     redirects: &[(&str, *const c_void)],
-) -> Result<Vec<String>, String> {
+) -> Result<usize, String> {
     struct Search<'a> {
         path: &'a [u8],
         found: Option<(usize, *const libc::Elf64_Phdr, usize)>,
@@ -398,6 +419,14 @@ pub unsafe fn redirect_imports(
         return Err("no symbol table".into());
     }
 
+    #[cfg(target_arch = "x86_64")]
+    const R_GLOB_DAT: u32 = 6; // R_X86_64_GLOB_DAT
+    #[cfg(target_arch = "x86_64")]
+    const R_JUMP_SLOT: u32 = 7; // R_X86_64_JUMP_SLOT
+    #[cfg(target_arch = "aarch64")]
+    const R_GLOB_DAT: u32 = 1025; // R_AARCH64_GLOB_DAT
+    #[cfg(target_arch = "aarch64")]
+    const R_JUMP_SLOT: u32 = 1026; // R_AARCH64_JUMP_SLOT
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
     let mut patched = Vec::new();
     for (table, size) in [(rela, relasz), (jmprel, pltrelsz)] {
@@ -407,8 +436,7 @@ pub unsafe fn redirect_imports(
         let relocs = unsafe { std::slice::from_raw_parts(table as *const libc::Elf64_Rela, size / 24) };
         for r in relocs {
             let kind = (r.r_info & 0xffff_ffff) as u32;
-            // R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT
-            if kind != 6 && kind != 7 {
+            if kind != R_GLOB_DAT && kind != R_JUMP_SLOT {
                 continue;
             }
             let sym = unsafe { &*(symtab as *const libc::Elf64_Sym).add((r.r_info >> 32) as usize) };
@@ -428,10 +456,13 @@ pub unsafe fn redirect_imports(
                     libc::mprotect(page_start as *mut c_void, page, libc::PROT_READ);
                 }
             }
-            patched.push(symbol.to_string());
+            patched.push(*symbol);
         }
     }
-    Ok(patched)
+    if let Some((missing, _)) = redirects.iter().find(|(n, _)| !patched.contains(n)) {
+        return Err(format!("{} does not import {missing}", path.display()));
+    }
+    Ok(patched.len())
 }
 
 /// Paths of every object currently mapped by the dynamic loader.

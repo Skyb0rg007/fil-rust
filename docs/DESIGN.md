@@ -129,9 +129,9 @@ capability that can't be dereferenced. So a wrong signature on the Rust side
 leads at worst to a Fil-C panic, never to UB. That holds as long as Rust only
 ever writes genuine `lower` values into the aux buffer.
 
-Struct-by-value arguments and returns follow clang's LLVM-IR lowering for
-x86-64 SysV (coercion to integer pairs, `sret` pointers). They don't follow the
-C source signature.
+Struct-by-value arguments and returns follow clang's LLVM-IR lowering for the
+target (x86-64 SysV or AAPCS64: coercion to integer pairs or float arrays,
+`sret` pointers). They don't follow the C source signature.
 
 ### GC and threads
 
@@ -381,15 +381,22 @@ lifetime parameter for structs holding pointers (`Node<'f>`).
 
 A `Function<Sig>` is a checked function pointer with signature
 `Sig = fn(A, B, ..) -> R`. Calls encode arguments into the generic calling
-convention's buffers, following clang's x86-64 lowering as Fil-C sees it:
+convention's buffers, following clang's lowering as Fil-C sees it:
 
 - each argument starts on an 8-byte slot; integers narrower than 64 bits are
   extended; pointers write their capability into the aux buffer
-- structs of up to 16 bytes are flattened per eightbyte
-- larger (or misaligned) structs are copied **inline** into the argument
-  buffer at their alignment, one slot per eightbyte
 - larger returns go through an `sret` pointer passed as a leading argument
 - varargs are simply extra slots after the fixed arguments
+- on x86-64, structs of up to 16 bytes are flattened per eightbyte; larger
+  (or misaligned) structs are copied **inline** into the argument buffer at
+  their alignment, one slot per eightbyte
+- on aarch64, a homogeneous floating-point aggregate (up to four `float`s or
+  `double`s, so up to 32 bytes) is passed inline as its floats; any other
+  struct of up to 16 bytes takes exactly two words, even a 4-byte one; larger
+  structs are copied to a temporary and passed by pointer
+
+(The aarch64 rules were read off Fil-C's aarch64 compiler with `-mllvm
+-print-before-all`. `long double`, a 128-bit float there, is unsupported.)
 
 Return values are read back as words and pointers through checked accessors.
 `DynCall` builds a call argument by argument when the signature is only known
@@ -469,7 +476,8 @@ that they are up to date.
 
 ## Status
 
-Implemented: everything above, for both flavors, on x86-64. The integration
+Implemented: everything above, for both flavors on x86-64 and for the musl
+flavor on aarch64 (the glibc distribution is x86-64 only). The integration
 tests (`tests/`) run against either flavor (`FILC_FLAVOR=glibc cargo test
 --features glibc`) and cover scalar, string, struct, sret, varargs and
 function-pointer calls; checked memory access and its failure modes; handles
@@ -479,6 +487,11 @@ panics, signature mismatches, panicking callbacks, `exit`) in child processes;
 the boot layout of each flavor; the musl/glibc boundary audit; signal
 handling next to Rust's; and bindings generated from headers.
 
+aarch64 is cross-built on an x86-64 host and tested under qemu-user
+(`nix-shell shell-aarch64.nix --run 'cargo test'`, which needs
+`binfmt_misc` for aarch64). The whole suite, the examples and
+`bindgen-demo` pass there, with and without `FUGC_MIN_THRESHOLD=0`.
+
 ## Open questions and risks
 
 - **Runtime internals aren't a stable API.** Mitigated by pinning versions,
@@ -487,7 +500,7 @@ handling next to Rust's; and bindings generated from headers.
 - **Running libpizlo next to the host libc isn't supported upstream.**
   This is audited by `tests/abi_audit.rs`:
   - Every libc symbol libpizlo imports is on a reviewed list
-    (`tests/abi/{musl,glibc}_imports.txt`), so a Fil-C upgrade that adds an
+    (`tests/abi/<flavor>_<arch>_imports.txt`), so a Fil-C upgrade that adds an
     import fails until it is reviewed.
   - A probe (`tests/abi/layout_probe.c`) prints the size, alignment and field
     layout of every libc struct libpizlo passes (about 60 structs) and the
@@ -499,13 +512,25 @@ handling next to Rust's; and bindings generated from headers.
     struct); `semid_ds.sem_nsems` is narrower (the low bytes hold the value);
     musl's `O_LARGEFILE` is the real kernel bit (a no-op on 64-bit); two
     compile-time stack minimums are unused.
+  - On aarch64 they also differ in four pthread types, and that was another
+    real bug: glibc's `pthread_attr_t` and `pthread_mutex_t` are 8 bytes
+    larger than musl's. glibc's state fits in musl's size, but
+    `pthread_attr_init` (which `pthread_getattr_np` uses) and
+    `pthread_mutex_init` clear the whole glibc size, so the first Fil-C
+    thread overwrote its caller's saved frame pointer and crashed. The
+    stand-in wraps the `pthread_attr_*` functions, `pthread_getattr_np`,
+    `pthread_create` and `pthread_mutex_init` to work on a glibc-sized copy
+    (aborting if glibc ever uses the extra bytes), and libpizlo's imports of
+    them are redirected there. libpizlo passes no `pthread_mutexattr_t` or
+    `pthread_condattr_t`, the other two.
   - One difference was a real bug: `cmsghdr.cmsg_len` is `int` + padding in
     musl, and libpizlo passes the program's control buffer through as is.
     musl's `sendmsg` zeroes that padding; glibc's has none to zero, so file
     descriptor passing with a dirty buffer failed with `EINVAL`. fil-rust
     now redirects libpizlo's `sendmsg`/`sendmmsg` imports (by rewriting its
-    GOT entries after loading it) to stand-in wrappers that do what musl
-    does, and the audit tests the fix end to end.
+    GOT entries after loading it; boot fails if an expected import is
+    missing) to stand-in wrappers that do what musl does, and the audit tests
+    the fix end to end.
   - The glibc flavor's libpizlo was built against the same libc family, and
     every versioned import is resolved at load time (`RTLD_NOW`).
 - **Signals.** Checked by `tests/signals.rs`:
@@ -526,8 +551,7 @@ handling next to Rust's; and bindings generated from headers.
 - **Panics are process-fatal.** This is inherent to Fil-C. An out-of-process
   host (a Fil-C executable serving calls over shared memory) would let Rust
   survive them, at the cost of copying.
-- **aarch64.** Everything but the struct-ABI classifier is
-  architecture-neutral; only x86-64 is implemented and tested, and other
-  targets are rejected at build time. The glibc distribution is x86-64 only;
-  an aarch64 port would need the classifier for Fil-C's aarch64 lowering and
-  a test setup for the musl distribution's aarch64 build.
+- **aarch64 is tested under emulation only.** qemu-user runs the suite, but
+  its memory model is stronger than real hardware's, so weak-ordering bugs in
+  the executor or callback paths could hide there. Other targets are
+  rejected at build time.

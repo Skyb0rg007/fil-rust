@@ -6,7 +6,7 @@ use std::ffi::c_char;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::basic::{Big, IntFn, Pt};
+use common::basic::{Big, IntFn, Pt, Vec3};
 use common::{basic, runtime};
 use fil_rust::{Callback, FilFn, FilPtr, Ptr};
 
@@ -66,6 +66,12 @@ fn callbacks_with_structs() {
         let apply_big = b.library().function::<fn(fn(Big) -> Big, Big) -> Big>(fil, "apply_big").unwrap();
         let r = apply_big.call(fil, (bump.get(fil), Big { a: 10, b: 20, c: 30, d: 40 })).unwrap();
         assert_eq!(r, Big { a: 11, b: 22, c: 33, d: 44 });
+
+        // Three doubles: memory on x86-64, FP registers on aarch64.
+        let neg = fil.callback::<fn(Vec3) -> Vec3, _>(|_, (v,)| Vec3 { x: -v.x, y: -v.y, z: -v.z }).unwrap();
+        let apply_vec3 = b.library().function::<fn(fn(Vec3) -> Vec3, Vec3) -> Vec3>(fil, "apply_vec3").unwrap();
+        let r = apply_vec3.call(fil, (neg.get(fil), Vec3 { x: 1.0, y: 2.0, z: 3.0 })).unwrap();
+        assert_eq!(r, Vec3 { x: -1.0, y: -2.0, z: -3.0 });
     });
 }
 

@@ -50,7 +50,8 @@ fn main() -> fil_rust::Result<()> {
 
         // `struct item` (with its `char name[32]`) read back from C memory.
         let hammer: item = inv_lib.inv_find(fil, inv, fil.c_str("hammer")?)?.read(fil)?;
-        let name: Vec<u8> = hammer.name.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        // (`c_char` is `i8` on x86-64 and `u8` on aarch64.)
+        let name: Vec<u8> = hammer.name.iter().take_while(|&&c| c != 0).map(|&c| c.to_ne_bytes()[0]).collect();
         println!("found {} x{} at {}", String::from_utf8_lossy(&name), hammer.qty, hammer.unit_price);
 
         // `item_fn` is a plain `fn` type, so a Rust closure can be one.
