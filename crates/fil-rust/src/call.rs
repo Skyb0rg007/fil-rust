@@ -26,7 +26,7 @@ use std::marker::PhantomData;
 use fil_rust_sys::RawPtr;
 
 use crate::ptr::{FilPtr, Opaque};
-use crate::types::{FilType, Leaf, LeafKind, Word, raw_add};
+use crate::types::{FilType, Leaf, LeafKind, Place, RawWord, Word, raw_add};
 use crate::{Error, Fil, Result, error};
 
 /// How a type travels through the calling convention.
@@ -130,10 +130,10 @@ fn round8(n: usize) -> usize {
 fn encode_value<'f, T: FilType + ?Sized>(
     fil: &Fil<'f>,
     value: &T::Value<'f>,
-    out: &mut Vec<Word>,
+    out: &mut Vec<RawWord>,
 ) -> Result<()> {
     if let Some(word) = T::to_word(value) {
-        out.push(word);
+        out.push(word.raw());
         return Ok(());
     }
     let class = classify::<T>()?;
@@ -143,22 +143,22 @@ fn encode_value<'f, T: FilType + ?Sized>(
     if cfg!(target_arch = "aarch64") && class == Class::Memory {
         // Passed as a pointer to a copy the callee may modify.
         let copy = fil.alloc_raw(T::SIZE, T::ALIGN.max(16))?;
-        T::write(fil, copy, value)?;
-        out.push(Word::Ptr(copy));
+        T::write(fil, Place::new(copy), value)?;
+        out.push(RawWord::Ptr(copy));
         return Ok(());
     }
     let (pad, kinds) = arg_layout::<T>(&class, out.len());
-    out.extend(std::iter::repeat_n(Word::Bits(0), pad));
+    out.extend(std::iter::repeat_n(RawWord::Bits(0), pad));
     let tmp = fil.alloc_raw(round8(T::SIZE).max(kinds.len() * 8), T::ALIGN.max(16))?;
-    T::write(fil, tmp, value)?;
+    T::write(fil, Place::new(tmp), value)?;
     for (i, kind) in kinds.iter().enumerate() {
         let at = raw_add(tmp, i * 8);
         out.push(match kind {
-            LeafKind::Ptr => Word::Ptr(fil.load_ptr_raw(at)?),
+            LeafKind::Ptr => RawWord::Ptr(fil.load_ptr_raw(at)?),
             _ => {
                 let mut buf = [0u8; 8];
                 fil.copy_out_raw(at, &mut buf)?;
-                Word::Bits(u64::from_ne_bytes(buf))
+                RawWord::Bits(u64::from_ne_bytes(buf))
             }
         });
     }
@@ -169,7 +169,7 @@ fn encode_value<'f, T: FilType + ?Sized>(
 fn decode_arg<'f, T: FilType + ?Sized>(
     fil: &Fil<'f>,
     class: &Class,
-    words: &[Word],
+    words: &[RawWord],
     at: &mut usize,
 ) -> Result<T::Value<'f>> {
     let (pad, kinds) = arg_layout::<T>(class, *at);
@@ -178,12 +178,12 @@ fn decode_arg<'f, T: FilType + ?Sized>(
     let taken = &words[start..*at];
     if cfg!(target_arch = "aarch64") && *class == Class::Memory {
         return match taken {
-            [Word::Ptr(copy)] => T::read(fil, *copy),
+            [RawWord::Ptr(copy)] => T::read(fil, Place::new(*copy)),
             _ => Err(Error::NullCapability),
         };
     }
     if let [word] = taken
-        && let Some(value) = T::from_word(fil, *word)
+        && let Some(value) = T::from_word(fil, Word::from_raw(*word))
     {
         return Ok(value);
     }
@@ -194,13 +194,13 @@ fn decode_arg<'f, T: FilType + ?Sized>(
 fn decode_value<'f, T: FilType + ?Sized>(
     fil: &Fil<'f>,
     class: &Class,
-    words: &[Word],
+    words: &[RawWord],
 ) -> Result<T::Value<'f>> {
     match class {
-        Class::Void => T::read(fil, RawPtr::NULL),
+        Class::Void => T::read(fil, Place::new(RawPtr::NULL)),
         Class::Words(kinds) => {
             if let [word] = words
-                && let Some(value) = T::from_word(fil, *word)
+                && let Some(value) = T::from_word(fil, Word::from_raw(*word))
             {
                 return Ok(value);
             }
@@ -213,30 +213,30 @@ fn decode_value<'f, T: FilType + ?Sized>(
 fn from_words<'f, T: FilType + ?Sized>(
     fil: &Fil<'f>,
     kinds: &[LeafKind],
-    words: &[Word],
+    words: &[RawWord],
 ) -> Result<T::Value<'f>> {
     let tmp = fil.alloc_raw(round8(T::SIZE).max(kinds.len() * 8), T::ALIGN.max(16))?;
     for (i, (kind, word)) in kinds.iter().zip(words).enumerate() {
         let at = raw_add(tmp, i * 8);
         match (kind, word) {
-            (LeafKind::Ptr, Word::Ptr(p)) => fil.store_ptr_raw(at, *p)?,
-            (_, Word::Bits(bits)) => fil.copy_in_raw(at, &bits.to_ne_bytes())?,
-            (_, Word::Ptr(p)) => fil.copy_in_raw(at, &(p.ptr as u64).to_ne_bytes())?,
+            (LeafKind::Ptr, RawWord::Ptr(p)) => fil.store_ptr_raw(at, *p)?,
+            (_, RawWord::Bits(bits)) => fil.copy_in_raw(at, &bits.to_ne_bytes())?,
+            (_, RawWord::Ptr(p)) => fil.copy_in_raw(at, &(p.ptr as u64).to_ne_bytes())?,
         }
     }
-    T::read(fil, tmp)
+    T::read(fil, Place::new(tmp))
 }
 
 /// Writes `words` into the cc buffers and calls `function`. Returns the size
 /// of the return values.
-fn invoke(fil: &Fil<'_>, function: RawPtr, words: &[Word]) -> Result<usize> {
+fn invoke(fil: &Fil<'_>, function: RawPtr, words: &[RawWord]) -> Result<usize> {
     let shim = fil.shim();
     let size = words.len() * 8;
     unsafe { (shim.fr_cc_begin)(fil.thread, size) };
     for (i, word) in words.iter().enumerate() {
         let status = match *word {
-            Word::Bits(bits) => unsafe { (shim.fr_cc_set_word)(fil.thread, size, i * 8, bits) },
-            Word::Ptr(p) => unsafe { (shim.fr_cc_set_ptr)(fil.thread, size, i * 8, p) },
+            RawWord::Bits(bits) => unsafe { (shim.fr_cc_set_word)(fil.thread, size, i * 8, bits) },
+            RawWord::Ptr(p) => unsafe { (shim.fr_cc_set_ptr)(fil.thread, size, i * 8, p) },
         };
         error::check(status)?;
     }
@@ -246,7 +246,7 @@ fn invoke(fil: &Fil<'_>, function: RawPtr, words: &[Word]) -> Result<usize> {
 }
 
 /// Copies `kinds.len()` words out of the cc buffer of `size` bytes.
-fn read_words(fil: &Fil<'_>, size: usize, kinds: &[Option<LeafKind>]) -> Result<Vec<Word>> {
+fn read_words(fil: &Fil<'_>, size: usize, kinds: &[Option<LeafKind>]) -> Result<Vec<RawWord>> {
     let shim = fil.shim();
     kinds
         .iter()
@@ -255,11 +255,11 @@ fn read_words(fil: &Fil<'_>, size: usize, kinds: &[Option<LeafKind>]) -> Result<
             if *kind == Some(LeafKind::Ptr) {
                 let mut p = RawPtr::NULL;
                 error::check(unsafe { (shim.fr_cc_get_ptr)(fil.thread, size, i * 8, &mut p) })?;
-                Ok(Word::Ptr(p))
+                Ok(RawWord::Ptr(p))
             } else {
                 let mut bits = 0u64;
                 error::check(unsafe { (shim.fr_cc_get_word)(fil.thread, size, i * 8, &mut bits) })?;
-                Ok(Word::Bits(bits))
+                Ok(RawWord::Bits(bits))
             }
         })
         .collect()
@@ -280,8 +280,8 @@ fn decode_return<'f, R: FilType>(
     sret: Option<RawPtr>,
 ) -> Result<R::Value<'f>> {
     match class {
-        Class::Void => R::read(fil, RawPtr::NULL),
-        Class::Memory => R::read(fil, sret.expect("sret allocated for memory-class returns")),
+        Class::Void => R::read(fil, Place::new(RawPtr::NULL)),
+        Class::Memory => R::read(fil, Place::new(sret.expect("sret allocated for memory-class returns"))),
         Class::Words(kinds) => {
             let needed = kinds.len() * 8;
             if return_size < needed {
@@ -304,13 +304,13 @@ pub trait FilSig: 'static {
     type Ret<'f>;
 
     #[doc(hidden)]
-    fn call_raw<'f>(fil: &Fil<'f>, function: RawPtr, args: Self::Args<'f>) -> Result<Self::Ret<'f>>;
+    fn call_raw<'f>(fil: &Fil<'f>, function: Place<'f>, args: Self::Args<'f>) -> Result<Self::Ret<'f>>;
 
     #[doc(hidden)]
-    fn callback_args<'f>(fil: &Fil<'f>, argument_size: usize) -> (Self::Args<'f>, Option<RawPtr>);
+    fn callback_args<'f>(fil: &Fil<'f>, argument_size: usize) -> (Self::Args<'f>, Option<Place<'f>>);
 
     #[doc(hidden)]
-    fn callback_return<'f>(fil: &Fil<'f>, value: &Self::Ret<'f>, sret: Option<RawPtr>) -> Result<usize>;
+    fn callback_return<'f>(fil: &Fil<'f>, value: &Self::Ret<'f>, sret: Option<Place<'f>>) -> Result<usize>;
 }
 
 macro_rules! impl_sig {
@@ -320,24 +320,24 @@ macro_rules! impl_sig {
             type Ret<'f> = R::Value<'f>;
 
             #[allow(non_snake_case, unused_mut)]
-            fn call_raw<'f>(fil: &Fil<'f>, function: RawPtr, args: Self::Args<'f>) -> Result<R::Value<'f>> {
+            fn call_raw<'f>(fil: &Fil<'f>, function: Place<'f>, args: Self::Args<'f>) -> Result<R::Value<'f>> {
                 let ret_class = classify::<R>()?;
                 let mut words = Vec::new();
                 let sret = if ret_class == Class::Memory {
                     let p = fil.alloc_raw(R::SIZE, R::ALIGN.max(16))?;
-                    words.push(Word::Ptr(p));
+                    words.push(RawWord::Ptr(p));
                     Some(p)
                 } else {
                     None
                 };
                 let ($($a,)*) = args;
                 $(encode_value::<$a>(fil, &$a, &mut words)?;)*
-                let return_size = invoke(fil, function, &words)?;
+                let return_size = invoke(fil, function.raw(), &words)?;
                 decode_return::<R>(fil, &ret_class, return_size, sret)
             }
 
             #[allow(non_snake_case, unused_mut, unused_variables)]
-            fn callback_args<'f>(fil: &Fil<'f>, argument_size: usize) -> (Self::Args<'f>, Option<RawPtr>) {
+            fn callback_args<'f>(fil: &Fil<'f>, argument_size: usize) -> (Self::Args<'f>, Option<Place<'f>>) {
                 let fail = |msg: String| -> ! { crate::callback::fail(fil, &msg) };
                 let ret_class = classify::<R>().unwrap_or_else(|e| fail(e.to_string()));
                 $(let $a = classify::<$a>().unwrap_or_else(|e| fail(e.to_string()));)*
@@ -361,7 +361,7 @@ macro_rules! impl_sig {
                 let mut at = usize::from(ret_class == Class::Memory);
                 let sret = if ret_class == Class::Memory {
                     match words[0] {
-                        Word::Ptr(p) => Some(p),
+                        RawWord::Ptr(p) => Some(Place::new(p)),
                         _ => fail("missing sret pointer".into()),
                     }
                 } else {
@@ -372,14 +372,14 @@ macro_rules! impl_sig {
                 (($($a,)*), sret)
             }
 
-            fn callback_return<'f>(fil: &Fil<'f>, value: &R::Value<'f>, sret: Option<RawPtr>) -> Result<usize> {
+            fn callback_return<'f>(fil: &Fil<'f>, value: &R::Value<'f>, sret: Option<Place<'f>>) -> Result<usize> {
                 let ret_class = classify::<R>()?;
                 let mut words = Vec::new();
                 match ret_class {
-                    Class::Void => words.push(Word::Bits(0)),
+                    Class::Void => words.push(RawWord::Bits(0)),
                     Class::Memory => {
                         R::write(fil, sret.ok_or(Error::NullCapability)?, value)?;
-                        words.push(Word::Bits(0));
+                        words.push(RawWord::Bits(0));
                     }
                     Class::Words(_) => encode_value::<R>(fil, value, &mut words)?,
                 }
@@ -388,8 +388,8 @@ macro_rules! impl_sig {
                 unsafe { (shim.fr_cc_begin)(fil.thread, size) };
                 for (i, word) in words.iter().enumerate() {
                     let status = match *word {
-                        Word::Bits(bits) => unsafe { (shim.fr_cc_set_word)(fil.thread, size, i * 8, bits) },
-                        Word::Ptr(p) => unsafe { (shim.fr_cc_set_ptr)(fil.thread, size, i * 8, p) },
+                        RawWord::Bits(bits) => unsafe { (shim.fr_cc_set_word)(fil.thread, size, i * 8, bits) },
+                        RawWord::Ptr(p) => unsafe { (shim.fr_cc_set_ptr)(fil.thread, size, i * 8, p) },
                     };
                     error::check(status)?;
                 }
@@ -408,11 +408,11 @@ macro_rules! impl_fn_ptr_type {
             const SIZE: usize = 8;
             const ALIGN: usize = 8;
 
-            fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<FilFn<'f, Self>> {
+            fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<FilFn<'f, Self>> {
                 <FilFn<'static, Self> as FilType>::read(fil, at)
             }
 
-            fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &FilFn<'f, Self>) -> Result<()> {
+            fn write<'f>(fil: &Fil<'f>, at: Place<'f>, value: &FilFn<'f, Self>) -> Result<()> {
                 <FilFn<'static, Self> as FilType>::write(fil, at, value)
             }
 
@@ -420,11 +420,11 @@ macro_rules! impl_fn_ptr_type {
                 out.push(Leaf { offset, size: 8, kind: LeafKind::Ptr });
             }
 
-            fn to_word(value: &FilFn<'_, Self>) -> Option<Word> {
-                Some(Word::Ptr(value.raw))
+            fn to_word<'f>(value: &Self::Value<'f>) -> Option<Word<'f>> {
+                Some(Word::from_raw(RawWord::Ptr(value.raw)))
             }
 
-            fn from_word<'f>(fil: &Fil<'f>, word: Word) -> Option<FilFn<'f, Self>> {
+            fn from_word<'f>(fil: &Fil<'f>, word: Word<'f>) -> Option<FilFn<'f, Self>> {
                 <FilFn<'static, Self> as FilType>::from_word(fil, word)
             }
         }
@@ -500,7 +500,7 @@ impl<'f, Sig: FilSig> FilFn<'f, Sig> {
 
     /// Calls the function.
     pub fn call(self, fil: &Fil<'f>, args: Sig::Args<'f>) -> Result<Sig::Ret<'f>> {
-        Sig::call_raw(fil, self.raw, args)
+        Sig::call_raw(fil, Place::new(self.raw), args)
     }
 
     /// The function pointer as a plain pointer.
@@ -525,27 +525,27 @@ impl<'x, Sig: FilSig> FilType for FilFn<'x, Sig> {
     const SIZE: usize = 8;
     const ALIGN: usize = 8;
 
-    fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<FilFn<'f, Sig>> {
+    fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<FilFn<'f, Sig>> {
         // Not validated here: calling checks it's a function.
-        Ok(FilFn::from_raw_unchecked(fil.load_ptr_raw(at)?))
+        Ok(FilFn::from_raw_unchecked(fil.load_ptr_raw(at.raw())?))
     }
 
-    fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &FilFn<'f, Sig>) -> Result<()> {
-        fil.store_ptr_raw(at, value.raw)
+    fn write<'f>(fil: &Fil<'f>, at: Place<'f>, value: &FilFn<'f, Sig>) -> Result<()> {
+        fil.store_ptr_raw(at.raw(), value.raw)
     }
 
     fn leaves(out: &mut Vec<Leaf>, offset: usize) {
         out.push(Leaf { offset, size: 8, kind: LeafKind::Ptr });
     }
 
-    fn to_word(value: &FilFn<'_, Sig>) -> Option<Word> {
-        Some(Word::Ptr(value.raw))
+    fn to_word<'f>(value: &Self::Value<'f>) -> Option<Word<'f>> {
+        Some(Word::from_raw(RawWord::Ptr(value.raw)))
     }
 
-    fn from_word<'f>(_fil: &Fil<'f>, word: Word) -> Option<FilFn<'f, Sig>> {
-        Some(match word {
-            Word::Ptr(raw) => FilFn::from_raw_unchecked(raw),
-            Word::Bits(bits) => FilFn::from_raw_unchecked(RawPtr::from_addr(bits as usize)),
+    fn from_word<'f>(_fil: &Fil<'f>, word: Word<'f>) -> Option<FilFn<'f, Sig>> {
+        Some(match word.raw() {
+            RawWord::Ptr(raw) => FilFn::from_raw_unchecked(raw),
+            RawWord::Bits(bits) => FilFn::from_raw_unchecked(RawPtr::from_addr(bits as usize)),
         })
     }
 }
@@ -593,7 +593,7 @@ impl<Sig: FilSig> Function<Sig> {
 
     /// Calls the function.
     pub fn call<'f>(&self, fil: &Fil<'f>, args: Sig::Args<'f>) -> Result<Sig::Ret<'f>> {
-        Sig::call_raw(fil, self.raw, args)
+        Sig::call_raw(fil, Place::new(self.raw), args)
     }
 
     /// The function as a scoped function pointer (to pass it to Fil-C).
@@ -612,17 +612,25 @@ impl<Sig: FilSig> Function<Sig> {
     }
 }
 
+/// The arguments of a [`DynCall`] so far. Only the crate's own [`FilArg`]
+/// implementations can add to it (others delegate to them), so no argument
+/// can carry a forged capability.
+pub struct DynArgs<'f> {
+    words: Vec<RawWord>,
+    _scope: crate::types::Scope<'f>,
+}
+
 /// A value that can be passed to [`DynCall::arg`].
 pub trait FilArg<'f> {
     #[doc(hidden)]
-    fn push(&self, fil: &Fil<'f>, out: &mut Vec<Word>) -> Result<()>;
+    fn push(&self, fil: &Fil<'f>, out: &mut DynArgs<'f>) -> Result<()>;
 }
 
 macro_rules! scalar_arg {
     ($($t:ty),*) => {$(
         impl<'f> FilArg<'f> for $t {
-            fn push(&self, fil: &Fil<'f>, out: &mut Vec<Word>) -> Result<()> {
-                encode_value::<$t>(fil, self, out)
+            fn push(&self, fil: &Fil<'f>, out: &mut DynArgs<'f>) -> Result<()> {
+                encode_value::<$t>(fil, self, &mut out.words)
             }
         }
     )*};
@@ -631,15 +639,15 @@ macro_rules! scalar_arg {
 scalar_arg!(i8, u8, i16, u16, i32, u32, i64, u64, isize, usize, f32, f64, bool);
 
 impl<'f, T: ?Sized> FilArg<'f> for FilPtr<'f, T> {
-    fn push(&self, _fil: &Fil<'f>, out: &mut Vec<Word>) -> Result<()> {
-        out.push(Word::Ptr(self.raw()));
+    fn push(&self, _fil: &Fil<'f>, out: &mut DynArgs<'f>) -> Result<()> {
+        out.words.push(RawWord::Ptr(self.raw()));
         Ok(())
     }
 }
 
 impl<'f, S> FilArg<'f> for FilFn<'f, S> {
-    fn push(&self, _fil: &Fil<'f>, out: &mut Vec<Word>) -> Result<()> {
-        out.push(Word::Ptr(self.raw));
+    fn push(&self, _fil: &Fil<'f>, out: &mut DynArgs<'f>) -> Result<()> {
+        out.words.push(RawWord::Ptr(self.raw));
         Ok(())
     }
 }
@@ -650,13 +658,13 @@ impl<'f, S> FilArg<'f> for FilFn<'f, S> {
 pub struct DynCall<'a, 'f> {
     fil: &'a Fil<'f>,
     function: RawPtr,
-    words: Vec<Word>,
+    words: DynArgs<'f>,
     error: Option<Error>,
 }
 
 impl<'a, 'f> DynCall<'a, 'f> {
     fn new(fil: &'a Fil<'f>, function: RawPtr) -> Self {
-        DynCall { fil, function, words: Vec::new(), error: None }
+        DynCall { fil, function, words: DynArgs { words: Vec::new(), _scope: PhantomData }, error: None }
     }
 
     /// Adds an argument.
@@ -672,7 +680,7 @@ impl<'a, 'f> DynCall<'a, 'f> {
     /// Adds an argument of a [`FilType`] (for example a struct by value).
     pub fn arg_value<T: FilType>(mut self, value: &T::Value<'f>) -> Self {
         if self.error.is_none()
-            && let Err(e) = encode_value::<T>(self.fil, value, &mut self.words)
+            && let Err(e) = encode_value::<T>(self.fil, value, &mut self.words.words)
         {
             self.error = Some(e);
         }
@@ -687,12 +695,12 @@ impl<'a, 'f> DynCall<'a, 'f> {
         let class = classify::<R>()?;
         let sret = if class == Class::Memory {
             let p = self.fil.alloc_raw(R::SIZE, R::ALIGN.max(16))?;
-            self.words.insert(0, Word::Ptr(p));
+            self.words.words.insert(0, RawWord::Ptr(p));
             Some(p)
         } else {
             None
         };
-        let return_size = invoke(self.fil, self.function, &self.words)?;
+        let return_size = invoke(self.fil, self.function, &self.words.words)?;
         decode_return::<R>(self.fil, &class, return_size, sret)
     }
 }

@@ -1,5 +1,7 @@
 //! How Rust types map onto Fil-C memory and the Fil-C calling convention.
 
+use std::marker::PhantomData;
+
 use fil_rust_sys::RawPtr;
 
 use crate::{Fil, Result};
@@ -24,13 +26,107 @@ pub struct Leaf {
     pub kind: LeafKind,
 }
 
-/// One 8-byte calling-convention slot.
+/// The scope `'f`, invariant, and `!Send + !Sync` (like [`Fil`]).
+pub(crate) type Scope<'f> = PhantomData<(fn(&'f ()) -> &'f (), *const ())>;
+
+/// A location in Fil-C memory that [`FilType::read`] and [`FilType::write`]
+/// act on: an address plus the capability that grants access through it,
+/// valid in the scope `'f`.
+///
+/// Safe code can't make one, change its capability, or keep it past its
+/// scope; it can only move it within the same object with
+/// [`byte_add`](Place::byte_add) and pass it on to another type's `read` or
+/// `write`. Every access through it is still checked.
+#[derive(Clone, Copy)]
+pub struct Place<'f> {
+    raw: RawPtr,
+    _scope: Scope<'f>,
+}
+
+impl<'f> Place<'f> {
+    /// `raw` must stay valid (reachable) for the scope `'f`.
+    pub(crate) fn new(raw: RawPtr) -> Place<'f> {
+        Place { raw, _scope: PhantomData }
+    }
+
+    pub(crate) fn raw(self) -> RawPtr {
+        self.raw
+    }
+
+    /// The location `bytes` further on, with the same capability (so still
+    /// bounded by the same object).
+    #[inline]
+    pub fn byte_add(self, bytes: usize) -> Place<'f> {
+        Place::new(RawPtr { ptr: self.raw.ptr.wrapping_byte_add(bytes), lower: self.raw.lower })
+    }
+
+    /// The address.
+    pub fn addr(self) -> usize {
+        self.raw.ptr as usize
+    }
+}
+
+impl std::fmt::Debug for Place<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Place({:p})", self.raw.ptr)
+    }
+}
+
+/// One 8-byte calling-convention slot, inside the crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Word {
+pub(crate) enum RawWord {
     /// Raw bits (integers and floats).
     Bits(u64),
     /// A pointer together with its capability.
     Ptr(RawPtr),
+}
+
+/// One 8-byte calling-convention slot in the scope `'f`: either plain bits
+/// or a pointer with its capability. Pointer words come only from the
+/// crate's own types, so a [`FilType::to_word`] implementation can produce
+/// bits or delegate to another type, but can't forge a capability.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Word<'f> {
+    raw: RawWord,
+    _scope: Scope<'f>,
+}
+
+impl<'f> Word<'f> {
+    /// A word holding `bits` (an integer, or a float's bits).
+    pub fn bits(bits: u64) -> Word<'f> {
+        Word::from_raw(RawWord::Bits(bits))
+    }
+
+    /// The bits, if this isn't a pointer word.
+    pub fn as_bits(self) -> Option<u64> {
+        match self.raw {
+            RawWord::Bits(bits) => Some(bits),
+            RawWord::Ptr(_) => None,
+        }
+    }
+
+    /// The word's value as an integer: the bits, or a pointer's address.
+    pub fn to_bits_lossy(self) -> u64 {
+        match self.raw {
+            RawWord::Bits(bits) => bits,
+            RawWord::Ptr(p) => p.ptr as u64,
+        }
+    }
+
+    /// Pointer words must stay valid for the scope `'f`.
+    pub(crate) fn from_raw(raw: RawWord) -> Word<'f> {
+        Word { raw, _scope: PhantomData }
+    }
+
+    pub(crate) fn raw(self) -> RawWord {
+        self.raw
+    }
+}
+
+impl std::fmt::Debug for Word<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.raw.fmt(f)
+    }
 }
 
 /// A type with a defined representation in Fil-C memory.
@@ -56,25 +152,25 @@ pub trait FilType {
     const AGGREGATE: bool = false;
 
     /// Reads a value from Fil-C memory at `at`.
-    fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<Self::Value<'f>>;
+    fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<Self::Value<'f>>;
     /// Writes a value to Fil-C memory at `at`.
-    fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &Self::Value<'f>) -> Result<()>;
+    fn write<'f>(fil: &Fil<'f>, at: Place<'f>, value: &Self::Value<'f>) -> Result<()>;
     /// Appends this type's scalar leaves (with `offset` added) to `out`.
     fn leaves(out: &mut Vec<Leaf>, offset: usize);
 
     /// Fast path for scalars: the value as a single calling-convention word.
-    fn to_word(_value: &Self::Value<'_>) -> Option<Word> {
+    fn to_word<'f>(_value: &Self::Value<'f>) -> Option<Word<'f>> {
         None
     }
     /// Fast path for scalars: the value from a single calling-convention word.
-    fn from_word<'f>(_fil: &Fil<'f>, _word: Word) -> Option<Self::Value<'f>> {
+    fn from_word<'f>(_fil: &Fil<'f>, _word: Word<'f>) -> Option<Self::Value<'f>> {
         None
     }
 }
 
 /// Returns `at` moved forward by `offset` bytes (same capability).
 #[inline]
-pub fn raw_add(at: RawPtr, offset: usize) -> RawPtr {
+pub(crate) fn raw_add(at: RawPtr, offset: usize) -> RawPtr {
     RawPtr { ptr: at.ptr.wrapping_byte_add(offset), lower: at.lower }
 }
 
@@ -85,31 +181,28 @@ macro_rules! int_type {
             const SIZE: usize = std::mem::size_of::<$t>();
             const ALIGN: usize = std::mem::align_of::<$t>();
 
-            fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<$t> {
+            fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<$t> {
                 let mut buf = [0u8; std::mem::size_of::<$t>()];
-                fil.copy_out_raw(at, &mut buf)?;
+                fil.copy_out_raw(at.raw(), &mut buf)?;
                 Ok(<$t>::from_ne_bytes(buf))
             }
 
-            fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &$t) -> Result<()> {
-                fil.copy_in_raw(at, &value.to_ne_bytes())
+            fn write<'f>(fil: &Fil<'f>, at: Place<'f>, value: &$t) -> Result<()> {
+                fil.copy_in_raw(at.raw(), &value.to_ne_bytes())
             }
 
             fn leaves(out: &mut Vec<Leaf>, offset: usize) {
                 out.push(Leaf { offset, size: Self::SIZE, kind: LeafKind::Int });
             }
 
-            fn to_word(value: &$t) -> Option<Word> {
+            fn to_word<'f>(value: &$t) -> Option<Word<'f>> {
                 // Sign- or zero-extend like the C ABI; the callee reads only
                 // the bytes of its declared type.
-                Some(Word::Bits(*value as i128 as u64))
+                Some(Word::bits(*value as i128 as u64))
             }
 
-            fn from_word<'f>(_fil: &Fil<'f>, word: Word) -> Option<$t> {
-                match word {
-                    Word::Bits(bits) => Some(bits as $t),
-                    Word::Ptr(p) => Some(p.ptr as usize as $t),
-                }
+            fn from_word<'f>(_fil: &Fil<'f>, word: Word<'f>) -> Option<$t> {
+                Some(word.to_bits_lossy() as $t)
             }
         }
     )*};
@@ -122,11 +215,11 @@ impl FilType for bool {
     const SIZE: usize = 1;
     const ALIGN: usize = 1;
 
-    fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<bool> {
+    fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<bool> {
         Ok(u8::read(fil, at)? != 0)
     }
 
-    fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &bool) -> Result<()> {
+    fn write<'f>(fil: &Fil<'f>, at: Place<'f>, value: &bool) -> Result<()> {
         u8::write(fil, at, &(*value as u8))
     }
 
@@ -134,15 +227,15 @@ impl FilType for bool {
         out.push(Leaf { offset, size: 1, kind: LeafKind::Int });
     }
 
-    fn to_word(value: &bool) -> Option<Word> {
-        Some(Word::Bits(*value as u64))
+    fn to_word<'f>(value: &bool) -> Option<Word<'f>> {
+        Some(Word::bits(*value as u64))
     }
 
-    fn from_word<'f>(_fil: &Fil<'f>, word: Word) -> Option<bool> {
-        match word {
-            Word::Bits(bits) => Some(bits as u8 != 0),
-            Word::Ptr(p) => Some(!p.ptr.is_null()),
-        }
+    fn from_word<'f>(_fil: &Fil<'f>, word: Word<'f>) -> Option<bool> {
+        Some(match word.raw {
+            RawWord::Bits(bits) => bits as u8 != 0,
+            RawWord::Ptr(p) => !p.ptr.is_null(),
+        })
     }
 }
 
@@ -153,11 +246,11 @@ macro_rules! float_type {
             const SIZE: usize = std::mem::size_of::<$t>();
             const ALIGN: usize = std::mem::align_of::<$t>();
 
-            fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<$t> {
+            fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<$t> {
                 Ok(<$t>::from_bits(<$bits>::read(fil, at)?))
             }
 
-            fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &$t) -> Result<()> {
+            fn write<'f>(fil: &Fil<'f>, at: Place<'f>, value: &$t) -> Result<()> {
                 <$bits>::write(fil, at, &value.to_bits())
             }
 
@@ -165,15 +258,12 @@ macro_rules! float_type {
                 out.push(Leaf { offset, size: Self::SIZE, kind: LeafKind::Float });
             }
 
-            fn to_word(value: &$t) -> Option<Word> {
-                Some(Word::Bits(value.to_bits() as u64))
+            fn to_word<'f>(value: &$t) -> Option<Word<'f>> {
+                Some(Word::bits(value.to_bits() as u64))
             }
 
-            fn from_word<'f>(_fil: &Fil<'f>, word: Word) -> Option<$t> {
-                match word {
-                    Word::Bits(bits) => Some(<$t>::from_bits(bits as $bits)),
-                    Word::Ptr(_) => None,
-                }
+            fn from_word<'f>(_fil: &Fil<'f>, word: Word<'f>) -> Option<$t> {
+                word.as_bits().map(|bits| <$t>::from_bits(bits as $bits))
             }
         }
     };
@@ -188,11 +278,11 @@ impl FilType for () {
     const SIZE: usize = 0;
     const ALIGN: usize = 1;
 
-    fn read<'f>(_fil: &Fil<'f>, _at: RawPtr) -> Result<()> {
+    fn read<'f>(_fil: &Fil<'f>, _at: Place<'f>) -> Result<()> {
         Ok(())
     }
 
-    fn write<'f>(_fil: &Fil<'f>, _at: RawPtr, _value: &()) -> Result<()> {
+    fn write<'f>(_fil: &Fil<'f>, _at: Place<'f>, _value: &()) -> Result<()> {
         Ok(())
     }
 
@@ -205,10 +295,10 @@ impl<T: FilType, const N: usize> FilType for [T; N] {
     const ALIGN: usize = T::ALIGN;
     const AGGREGATE: bool = true;
 
-    fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<Self::Value<'f>> {
+    fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<Self::Value<'f>> {
         let mut items = Vec::with_capacity(N);
         for i in 0..N {
-            items.push(T::read(fil, raw_add(at, i * T::SIZE))?);
+            items.push(T::read(fil, at.byte_add(i * T::SIZE))?);
         }
         match items.try_into() {
             Ok(array) => Ok(array),
@@ -216,9 +306,9 @@ impl<T: FilType, const N: usize> FilType for [T; N] {
         }
     }
 
-    fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &Self::Value<'f>) -> Result<()> {
+    fn write<'f>(fil: &Fil<'f>, at: Place<'f>, value: &Self::Value<'f>) -> Result<()> {
         for (i, item) in value.iter().enumerate() {
-            T::write(fil, raw_add(at, i * T::SIZE), item)?;
+            T::write(fil, at.byte_add(i * T::SIZE), item)?;
         }
         Ok(())
     }

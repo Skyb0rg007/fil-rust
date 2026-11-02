@@ -126,7 +126,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         quote! {
             #member: <#ty as #krate::FilType>::read(
                 fil,
-                #private::raw_add(at, Self::__FIL_LAYOUT.offsets[#i]),
+                at.byte_add(Self::__FIL_LAYOUT.offsets[#i]),
             )?
         }
     });
@@ -135,7 +135,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         quote! {
             <#ty as #krate::FilType>::write(
                 fil,
-                #private::raw_add(at, Self::__FIL_LAYOUT.offsets[#i]),
+                at.byte_add(Self::__FIL_LAYOUT.offsets[#i]),
                 &value.#member,
             )?;
         }
@@ -192,7 +192,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             #[allow(unused_variables)]
             fn read<#fil_lt>(
                 fil: &#krate::Fil<#fil_lt>,
-                at: #private::RawPtr,
+                at: #krate::Place<#fil_lt>,
             ) -> #krate::Result<#value_ty> {
                 ::core::result::Result::Ok(#name { #(#reads),* })
             }
@@ -200,7 +200,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             #[allow(unused_variables)]
             fn write<#fil_lt>(
                 fil: &#krate::Fil<#fil_lt>,
-                at: #private::RawPtr,
+                at: #krate::Place<#fil_lt>,
                 value: &#value_ty,
             ) -> #krate::Result<()> {
                 #(#writes)*

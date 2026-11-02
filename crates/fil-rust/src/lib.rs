@@ -157,7 +157,7 @@ mod ptr;
 mod runtime;
 mod types;
 
-pub use call::{DynCall, FilArg, FilFn, FilSig, Function};
+pub use call::{DynArgs, DynCall, FilArg, FilFn, FilSig, Function};
 pub use callback::Callback;
 pub use error::{Error, Result};
 pub use fil_rust_sys::Flavor;
@@ -165,7 +165,7 @@ pub use handle::{FilBuf, FilHandle};
 pub use library::Library;
 pub use ptr::{Capability, FilPtr, Opaque, Ptr};
 pub use runtime::{Config, Fil, JoinHandle, Runtime};
-pub use types::FilType;
+pub use types::{FilType, Leaf, LeafKind, Place, Word};
 
 #[cfg(feature = "derive")]
 pub use fil_rust_macros::FilType;
@@ -177,8 +177,7 @@ extern crate self as fil_rust;
 #[doc(hidden)]
 pub mod __private {
     pub use crate::call::{Class, classify};
-    pub use crate::types::{CLayout, Leaf, LeafKind, Word, c_layout, raw_add};
-    pub use fil_rust_sys::RawPtr;
+    pub use crate::types::{CLayout, Leaf, LeafKind, c_layout};
 }
 
 /// Declares a typed interface to a Fil-C library.

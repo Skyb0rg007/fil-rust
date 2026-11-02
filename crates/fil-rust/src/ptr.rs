@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use fil_rust_sys::{PtrInfo, RawPtr, flags, special};
 
 use crate::call::{FilFn, FilSig};
-use crate::types::{FilType, Leaf, LeafKind, Word, raw_add};
+use crate::types::{FilType, Leaf, LeafKind, Place, RawWord, Word, raw_add};
 use crate::{Error, Fil, Result};
 
 /// Marker for pointers whose pointee type is unknown (`void*`).
@@ -236,12 +236,21 @@ impl<'f, T: FilType + ?Sized> FilPtr<'f, T> {
 
     /// Reads the `T` this pointer points to.
     pub fn read(self, fil: &Fil<'f>) -> Result<T::Value<'f>> {
-        T::read(fil, self.raw)
+        if T::SIZE > 0 {
+            self.check(T::SIZE, false)?;
+        }
+        T::read(fil, Place::new(self.raw))
     }
 
-    /// Writes a `T` where this pointer points.
+    /// Writes a `T` where this pointer points. A write that doesn't fit
+    /// changes nothing.
     pub fn write(self, fil: &Fil<'f>, value: &T::Value<'f>) -> Result<()> {
-        T::write(fil, self.raw, value)
+        // Checked as a whole first: a struct or array is written field by
+        // field, and a failure halfway would leave it half written.
+        if T::SIZE > 0 {
+            self.check(T::SIZE, true)?;
+        }
+        T::write(fil, Place::new(self.raw), value)
     }
 
     /// Reads element `index` of the array starting here.
@@ -292,26 +301,26 @@ impl<'x, T: ?Sized> FilType for FilPtr<'x, T> {
     const SIZE: usize = 8;
     const ALIGN: usize = 8;
 
-    fn read<'f>(fil: &Fil<'f>, at: RawPtr) -> Result<FilPtr<'f, T>> {
-        Ok(FilPtr::from_raw(fil.load_ptr_raw(at)?))
+    fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<FilPtr<'f, T>> {
+        Ok(FilPtr::from_raw(fil.load_ptr_raw(at.raw())?))
     }
 
-    fn write<'f>(fil: &Fil<'f>, at: RawPtr, value: &FilPtr<'f, T>) -> Result<()> {
-        fil.store_ptr_raw(at, value.raw)
+    fn write<'f>(fil: &Fil<'f>, at: Place<'f>, value: &FilPtr<'f, T>) -> Result<()> {
+        fil.store_ptr_raw(at.raw(), value.raw)
     }
 
     fn leaves(out: &mut Vec<Leaf>, offset: usize) {
         out.push(Leaf { offset, size: 8, kind: LeafKind::Ptr });
     }
 
-    fn to_word(value: &FilPtr<'_, T>) -> Option<Word> {
-        Some(Word::Ptr(value.raw))
+    fn to_word<'f>(value: &Self::Value<'f>) -> Option<Word<'f>> {
+        Some(Word::from_raw(RawWord::Ptr(value.raw)))
     }
 
-    fn from_word<'f>(_fil: &Fil<'f>, word: Word) -> Option<FilPtr<'f, T>> {
-        Some(match word {
-            Word::Ptr(raw) => FilPtr::from_raw(raw),
-            Word::Bits(bits) => FilPtr::from_addr(bits as usize),
+    fn from_word<'f>(_fil: &Fil<'f>, word: Word<'f>) -> Option<FilPtr<'f, T>> {
+        Some(match word.raw() {
+            RawWord::Ptr(raw) => FilPtr::from_raw(raw),
+            RawWord::Bits(bits) => FilPtr::from_addr(bits as usize),
         })
     }
 }
