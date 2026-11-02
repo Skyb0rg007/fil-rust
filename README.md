@@ -133,8 +133,22 @@ Tests compile their fixtures with the compiler of the selected flavor:
     cargo test --workspace                           # every crate, including the generator
                                                      # (FIL_RUST_BLESS=1 updates tests/generated)
 
-`nix-build` builds the workspace, runs its tests against the musl
-distribution, and installs the `fil-rust-bindgen` command. The pinned
+`PROPTEST_CASES` sets how many cases each property test tries, and
+`FIL_RUST_STRESS` multiplies the stress tests' iterations. The compile-fail
+tests (`tests/ui`) compare compiler messages; after a toolchain bump,
+`TRYBUILD=overwrite cargo test --test ui` regenerates them for review.
+
+`nix-build` builds the workspace and installs the `fil-rust-bindgen` command.
+The tests are separate derivations in `passthru.tests` (`nix/tests.nix`):
+
+    nix-build -A tests              # all of them
+    nix-build -A tests.musl         # the whole workspace, musl flavor
+    nix-build -A tests.glibc        # fil-rust against the glibc flavor (x86-64)
+    nix-build -A tests.gc-stress    # memory/thread/property/stress tests, constant GC
+    nix-build -A tests.examples     # runs every example and bindgen-demo
+    nix-build -A tests.clippy       # clippy, warnings as errors
+
+The pinned
 nixpkgs and rust-overlay live only in `nix/pkgs.nix`; `default.nix` and
 `shell.nix` share the rest through `nix/fil-rust.nix`.
 
@@ -152,8 +166,8 @@ machine.
 
 In the shell, the tests, the examples and the target's Fil-C compiler run
 through qemu-user, which needs `binfmt_misc` for the target (on NixOS,
-`boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`). `nix-build` skips the
-tests when cross-compiling.
+`boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`). When cross-compiling,
+`tests` is empty.
 
 ### Bumping Fil-C
 

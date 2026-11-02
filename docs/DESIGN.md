@@ -381,6 +381,16 @@ typed `FilFn`).
 (`#[fil(size = N, align = M)]` checks it at compile time), and supports one
 lifetime parameter for structs holding pointers (`Node<'f>`).
 
+`FilType` can be implemented by hand in safe code, so nothing it touches can
+forge a pointer. `read` and `write` get a `Place<'f>`: an opaque location
+inside an object that has already been bounds-checked for the whole value,
+which can only be offset (`byte_add`) and handed to field types. Values that
+travel as one calling-convention word (`to_word`, `from_word`) are `Word<'f>`,
+which safe code can build only from integer bits; a word holding a pointer
+comes only from a `FilPtr`. Both carry the scope lifetime, so neither can
+outlive it. `FilArg::push` (for `DynCall` varargs) appends to an opaque
+`DynArgs<'f>` the same way.
+
 ### Calls
 
 A `Function<Sig>` is a checked function pointer with signature
@@ -416,9 +426,13 @@ becomes `Error::Exception`. Rust panics never cross the boundary.
 
 ### Libraries
 
-`Runtime::load(path)` preloads the library's `DT_NEEDED` dependencies from the
-configured search path and the distribution's lib directory, then `dlopen`s it
-with the host loader, `RTLD_LOCAL`. Symbols are found through the
+`Runtime::load(path)` first checks the file without running any of it: it
+must be an ELF shared library linked against `libpizlo.so` (so a native
+library, whose constructors would run unchecked, is refused) and not against
+the other flavor's libc. It then preloads the library's `DT_NEEDED`
+dependencies from the configured search path and the distribution's lib
+directory (a preloaded dependency satisfies the entry through its soname, so
+it needs one), then `dlopen`s it with the host loader, `RTLD_LOCAL`. Symbols are found through the
 `pizlonated_<name>` getters, which return a properly bounded pointer to the
 function object or global (globals are initialized lazily by their getter).
 `Library::function` checks that the symbol is a function before returning a
@@ -489,7 +503,16 @@ and owned buffers under GC stress; callbacks from many Fil-C threads; C++
 containers, threads and exceptions; process-ending cases (Fil-C safety
 panics, signature mismatches, panicking callbacks, `exit`) in child processes;
 the boot layout of each flavor; the musl/glibc boundary audit; signal
-handling next to Rust's; and bindings generated from headers.
+handling next to Rust's; and bindings generated from headers. Beyond those:
+code that must not compile (`tests/ui`: pointers escaping their scope or
+thread, forged `Place`s and `Word`s, wrong signatures); misuse that must fail
+cleanly (`misuse.rs`: native and wrong-flavor libraries, lying declarations,
+integers posing as pointers); property tests that compare Rust's view of
+memory, values and arithmetic with C's (`properties.rs`); struct layouts
+checked field by field against C (`layout.rs`); runtime configuration and
+startup in fresh processes (`startup.rs`); and concurrency stress while the
+collector runs (`stress.rs`). Nix runs each configuration as a
+`passthru.tests` derivation (`nix/tests.nix`).
 
 aarch64 is cross-built on an x86-64 host and tested under qemu-user
 (`nix-shell --argstr crossSystem aarch64-unknown-linux-gnu --run 'cargo test'`,
