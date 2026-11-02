@@ -44,10 +44,45 @@ defines the native `main`, which calls
 That boots the runtime, allocates GC copies of argv/environ, and calls the
 user-libc `__libc_start_main`, which in turn calls the program's Fil-C `main`.
 
-**Consequence:** Rust code can live in a Fil-C process as a peer of libpizlo:
-native code linked against `libyoloc.so` and loaded by `ld-fil1-x86_64.so`.
-Rust cannot live in a glibc process and `dlopen` a Fil-C library. The loader,
-libc, and runtime all have to be Fil-C's.
+The loader itself has nothing Fil-C-specific in it. `ld-fil1-x86_64.so` is
+byte-for-byte the same file as `libyoloc.so` (stock musl's combined libc and
+`ld.so`). Fil-C shared objects are ordinary ELF files with ordinary
+relocations. The load-time work that *is* Fil-C-specific is done by libpizlo,
+called from the libraries' own code: constant relocations, global
+initialization, and deferred constructors.
+
+### Fil-C on the host glibc (verified)
+
+What ties the runtime to musl is libpizlo's imports, not the loader. libpizlo
+imports about 280 symbols from the yolo libc. All but a handful are standard
+POSIX/Linux functions that glibc also exports. The exceptions are the yolo-musl
+extras (`libc_internal_signals`, `num_libc_internal_signals`, `sigdelsetyolo`,
+`yolo_futex_*`) and `getdents`. Each is a thin wrapper around a raw syscall.
+The Fil-C user libc exports only `pizlonated_*` symbols (plus `_init` and
+`_fini`), so it never clashes with glibc's names.
+
+A ~70-line **compat shim** (`spikes/glibc-host/yoloc_compat.c`) provides those
+extras on top of glibc and has the soname `libyoloc.so`. A glibc program loads
+the shim with `RTLD_GLOBAL` *before* any Fil-C object, so their `NEEDED
+libyoloc.so` binds to the shim by soname. After that, **glibc's own `ld.so`
+loads libpizlo, the Fil-C libc and Fil-C libraries.** No custom loader is
+needed. `spikes/glibc-host/run.sh` checks this on glibc 2.44:
+
+- the runtime boots, the user libc initializes, and Fil-C `main` runs
+- cross-library calls and `printf`/`strdup` work
+- 4 threads with heavy allocation under `FUGC_MIN_THRESHOLD=0` (GC churn) work
+- futex-based `pthread_cond_timedwait` works
+- `stat` and `readdir` return correct struct contents
+- signal delivery works
+- C++ exceptions work
+- `dlopen`/`dlsym` called from Fil-C code (served by glibc) works
+- an out-of-bounds write still triggers a Fil-C safety panic
+
+**Consequence:** the Rust program is an ordinary glibc binary. Fil-C code runs
+inside it as a set of dlopen'd libraries, and Rust calls them as a peer of
+libpizlo. The caveat is that this is not an upstream-supported configuration.
+libpizlo was compiled against musl headers, so every struct it passes to libc
+must have the same layout in glibc (see [Risks](#open-questions-and-risks)).
 
 ### Symbols are getters, not functions
 
@@ -121,9 +156,11 @@ C source signature.
 
 ## Approaches considered
 
-**A. In-process native host (chosen).** The Rust binary is a yolo-musl program
-that boots the Fil-C runtime itself and calls Fil-C functions through the
-generic entrypoint, just as libpizlo does. Calls cost about as much as a C
+**A. In-process native host on glibc (chosen).** The Rust binary is a normal
+glibc program. It loads the compat shim and then the Fil-C runtime, boots the
+runtime, and calls Fil-C functions through the generic entrypoint, just as
+libpizlo does. (An earlier version of this plan made the Rust binary itself a
+yolo-musl program. That still works, but it isn't needed now.) Calls cost about as much as a C
 call plus argument marshalling, and data can be shared without copying
 everything. The downside is that we depend on runtime internals (the
 `filc_thread` layout, cc buffers, aux encoding). Those are fixed for a given
@@ -142,13 +179,27 @@ it). Safety would come for free, but rustc's LLVM is newer than Fil-C's clang
 asm, and all Rust code would pay Fil-C overhead. Rejected; this is a different
 project.
 
+**D. A Fil-C loader written in Rust.** Rejected, because it solves the wrong
+problem: the loader isn't Fil-C-specific, and glibc's `ld.so` already loads
+everything once the shim is in place. A custom loader would only matter if we
+kept the real musl `libyoloc.so` inside a glibc process. That means two libcs
+in one address space:
+- each wants its own thread control block behind `%fs` (musl's
+  `__pthread_self()->errno_val` would read glibc's TCB)
+- both grow the heap with `brk`
+- both expect to own the process-wide signal handlers and internal signals
+  (musl reserves 32–34, glibc 32–33)
+- musl's `dlopen`, `dl_iterate_phdr` and TLS need musl's own loader state
+
+A Rust loader would end up reimplementing musl's `ldso` and still be fragile.
+
 ## Architecture
 
 ```
-fil-rust-sys     raw bindings to libpizlo + a small C shim, pinned to one Fil-C version
+fil-rust-sys     raw bindings to libpizlo + the C shims (runtime shim, libyoloc compat), pinned to one Fil-C version
 fil-rust         safe API: runtime context, pointers, buffers, calls, libraries, callbacks
-fil-rust-macros  #[fil_rust::main], foreign-function declarations, #[derive(FilRepr)]
-nix/, .cargo/    toolchain: musl target, linker wrapper, runtime headers
+fil-rust-macros  foreign-function declarations, #[derive(FilRepr)]
+nix/             Fil-C distribution, libyoloc compat shim, runtime headers
 ```
 
 ### fil-rust-sys and the C shim
@@ -176,30 +227,43 @@ distribution. The shim exports plain `extern "C"` functions:
 Later we can move hot paths (`fr_arg_*`) into Rust for speed, once tests pin
 down their behavior.
 
-### Bootstrapping: `#[fil_rust::main]`
+The runtime shim is compiled with the host C compiler against glibc headers
+plus the runtime headers. Those headers embed libc types in runtime structs
+(`pthread_*_t`, `sigset_t`), so the shim build `static_assert`s their sizes
+against the musl build's values. On x86-64 they match.
 
-The Rust binary targets `x86_64-unknown-linux-musl`, linked dynamically against
-`libyoloc.so`, with `ld-fil1-x86_64.so` as its interpreter. Its startup mirrors
-`filc_crt.o`:
+The second shim is the **libyoloc compat library**: the spike's
+`yoloc_compat.c`, built against glibc with soname `libyoloc.so`. Nix builds it
+next to the Fil-C distribution and exposes it as `FILC_YOLOC_COMPAT`.
 
-```rust
-#[fil_rust::main]
-fn main(fil: &mut Fil) { ... }
-```
+### Bootstrapping: `fil_rust::Runtime::start()`
 
-The macro expands to a native `main` that calls
-`filc_start_program(argc, argv, pizlonated___libc_start_main, rust_main_getter)`.
-`rust_main_getter` returns a function object whose generic entrypoint is a Rust
-thunk. So the user libc gets fully initialized (stdio, environ, ctors) by its
-own `__libc_start_main`, and then Rust code runs inside it on an already
-entered `filc_thread`. Returning from the closure returns from Fil-C `main`, so
-`exit()` runs atexit handlers as usual.
+The Rust binary is a normal glibc program built with the default Rust target.
+No custom linker setup is needed, and nothing Fil-C is linked at build time.
+Startup works like this:
 
-Linking caveat: both libcs are called `libc`, and the user libc's file is
-literally `libc.so`. Rust's `-lc` must resolve to `libyoloc.so`. A linker
-wrapper (`fil-rust-link`, shipped by the Nix shell and set in
-`.cargo/config.toml`) rewrites `-lc`, sets `-dynamic-linker`, and adds
-`pizfix/lib` to the RUNPATH.
+1. **Load in order.** `dlopen(FILC_YOLOC_COMPAT, RTLD_NOW | RTLD_GLOBAL)`, then
+   libpizlo and the Fil-C user libc. The order is a safety invariant: if a
+   Fil-C object were loaded first, its RUNPATH would pull in the real musl
+   `libyoloc.so`. After loading, the crate checks with `dl_iterate_phdr` that
+   no musl libyoloc is mapped, and refuses to start if one is.
+2. **Boot.** `filc_start_program(argc, argv, pizlonated___libc_start_main, rust_main_getter)`
+   never returns: it parks its calling thread in `pause()` and runs Fil-C
+   `main` on a new "phony main" thread. So `start()` calls it on a dedicated
+   std thread. `rust_main_getter` returns a function object whose generic
+   entrypoint is a Rust thunk, so the user libc gets fully initialized (stdio,
+   environ, ctors) by its own `__libc_start_main` before any Rust code runs on
+   the Fil-C side.
+3. **Hand off.** The thunk signals `start()` that the runtime is ready, then
+   exits the runtime (`filc_exit`) and parks. It must never return, because
+   returning from Fil-C `main` calls `exit()`. It can later serve as the
+   creator thread for adopting other threads (see [Threads](#threads)).
+4. `start()` returns a `Runtime` handle. `runtime.enter()` gives the calling
+   thread a `Fil` token, adopting the thread first if it isn't a Fil-C thread
+   yet.
+
+The Rust `main` stays in charge, and when it returns the process exits through
+glibc's normal path.
 
 ### The context token: `Fil`
 
@@ -355,12 +419,26 @@ calls section above.
 
 ### Threads
 
-Threads spawned with `std::thread` have no `filc_thread`, so they can't call
-Fil-C. `fil_rust::thread::spawn(fil, |fil| ...)` creates the thread with
-Fil-C's own `zthread_create`, called as a normal Fil-C function with a Rust
-callback. The thread is then registered, entered, and joinable through
-`zthread_join`. Adopting threads that already exist is out of scope until the
-runtime has an API for it.
+With a glibc `main`, every Rust thread (including the main thread) starts out
+without a `filc_thread`, so adopting threads is core functionality, not an
+extra.
+
+- **Adoption (preferred).** The runtime shim does for an existing thread what
+  the runtime's own thread entry does for a `zthread_create` thread:
+  1. An entered thread creates the `filc_thread` with
+     `filc_thread_create_with_manual_tracking`.
+  2. The adopted thread stores it in `filc_thread_key` (exported) with
+     `pthread_setspecific`.
+  3. It records its tid and computes its stack limit with
+     `filc_compute_stack_limit`.
+
+  A Rust TLS destructor disposes of the thread when it exits. `runtime.enter()`
+  adopts lazily.
+- **Fallback.** If adoption turns out to need more internals than is
+  reasonable, `fil_rust::thread::spawn(fil, |fil| ...)` creates threads with
+  Fil-C's own `zthread_create`, called as a normal Fil-C function with a Rust
+  callback. `Runtime::call_on_fil_thread` dispatches work to such a thread from
+  any Rust thread.
 
 ### Optional: out-of-process isolation
 
@@ -383,25 +461,31 @@ This only gets built if someone needs to survive panics.
 | Fil-C getting a pointer into Rust memory | impossible: Rust memory never gets a capability; data must be copied into GC objects |
 | unwinding across the boundary | exceptions → `Err`; Rust panics in callbacks → abort |
 | runtime ABI drift | crate pinned to one Fil-C version, checked via `zversion()` at startup |
+| real musl libyoloc entering the glibc process | the crate controls load order; `dl_iterate_phdr` check at startup |
+| libc struct layout mismatch (runtime built against musl headers) | audit of every libpizlo import (M1), plus shim wrappers where layouts differ |
 
 ## Milestones
 
 **M0: spikes (go/no-go for approach A).** Throwaway code in `spikes/`:
-1. A Rust musl binary dynamically linked against `libyoloc.so` with the
-   `ld-fil1` interpreter prints "hello", with `-lc` redirected. Check that the
-   Rust std's signal handlers (stack-overflow SIGSEGV) don't clash with the
-   runtime's signal handling.
-2. Boot the runtime from Rust with a Rust-provided `pizlonated_main` getter.
-   Check that the user-libc `printf` works when called from Fil-C.
-3. Hand-written call of `add` and `dup_upper` from a test `.so` through the
-   generic entrypoint, using a C shim built against the 0.687 headers.
-4. Confirm the struct-return and varargs buffer layouts.
+1. ✅ Fil-C runtime, user libc and libraries running in a glibc process,
+   loaded by glibc's `ld.so` (`spikes/glibc-host`).
+2. Boot the runtime from a glibc **Rust** binary on a sacrificial thread, with
+   a Rust-provided `pizlonated_main` getter that hands control back.
+3. Adopt the Rust main thread and a `std::thread` into the runtime, then make a
+   hand-written call of `add` and `dup_upper` through the generic entrypoint
+   (C shim built against the 0.687 headers).
+4. Check that Rust std's signal handling (stack-overflow SIGSEGV/SIGBUS
+   handler) coexists with the runtime's handlers.
+5. Confirm the struct-return and varargs buffer layouts.
 
-**M1: `fil-rust-sys`.** Nix fetches the runtime headers at the pinned tag; the
-shim gets built by `build.rs`; linker wrapper and `.cargo/config.toml`; version
-check.
+**M1: `fil-rust-sys`.**
+- Nix fetches the runtime headers at the pinned tag and builds the libyoloc
+  compat shim.
+- `build.rs` builds the runtime shim.
+- Startup load-order check and version check.
+- glibc-vs-musl layout audit of all libpizlo imports.
 
-**M2: safe core.** `Fil`, `#[fil_rust::main]`, scopes and native frames,
+**M2: safe core.** `Runtime::start`, thread adoption, `Fil`, scopes and native frames,
 `FilPtr`, `FilHandle`, `FilBuf`, copy accessors, `FilCString`, untyped calls
 with scalars and pointers. Tests build Fil-C fixtures with `filcc` in
 `build.rs`.
@@ -421,12 +505,29 @@ integration.
 - **Runtime internals aren't a stable API.** Mitigated by pinning the version,
   keeping the shim minimal, and checking `zversion()`. Bumping Fil-C means
   rebuilding the shim and rerunning the ABI golden tests.
-- **Rust std on yolo musl.** It should work, since the musl ABI matches Rust's
-  musl target. The risks are the dynamic-linking flags and Rust's own `crt`
-  objects (M0.1).
+- **Running libpizlo on glibc isn't supported upstream.** libpizlo was
+  compiled against musl's headers. Most structs it hands to libc are
+  kernel-defined and identical in glibc on x86-64 (`stat`, `sigaction`,
+  `sigset_t`, `timespec`, `rlimit`, `epoll_event`, the `pthread_*_t` sizes),
+  and libc constants such as `RTLD_*`, `_SC_*` and errno match. Known
+  musl/glibc differences that the audit must check:
+  - `msghdr` / `cmsghdr` padding vs `size_t` lengths (`sendmsg`, `recvmsg`,
+    `sendmmsg`, `recvmmsg`)
+  - the SysV IPC `*_ds` structs
+  - `statvfs`
+  - `timex` (`clock_adjtime`)
+
+  Where a layout differs, the compat shim wraps the function. If this ever
+  becomes untenable, the fallback is to build libpizlo from source against
+  glibc in the musl-user-libc configuration.
 - **Signals.** The runtime defers signals for entered threads and installs its
-  own handlers. Rust std's SIGSEGV/SIGBUS stack-guard handler may need to be
-  disabled or reordered.
+  own handlers. The compat shim reports glibc's internal signals (32 and 33),
+  so the runtime leaves those alone. Rust std's SIGSEGV/SIGBUS stack-guard
+  handler may need to be disabled or reordered (M0.4).
+- **Load-order hazard.** Every Fil-C object carries a RUNPATH to `pizfix/lib`,
+  which contains the real musl `libyoloc.so`. Loading any Fil-C object before
+  the shim would map musl into the process. The crate owns all loading and
+  checks for this at startup.
 - **Panics are process-fatal in-process.** This is inherent to Fil-C. M6 is
   the answer if it matters.
 - **aarch64.** The design is architecture-neutral except for the struct-ABI
