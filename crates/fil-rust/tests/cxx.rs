@@ -23,8 +23,14 @@ fil_rust::foreign! {
         fn throw_with_guards(depth: i32) -> i32;
         fn get_destructor_runs() -> i32;
         fn throw_int(v: i32) -> i32;
+        fn guarded_call(f: fn(i32) -> i32, x: i32) -> i32;
+        fn call_on_thread(f: fn(i32) -> i32, x: i32) -> i32;
     }
 }
+
+/// Held by the tests that count destructor runs (a global in the fixture).
+/// Taken outside `run`: a thread must not block while it is in Fil-C.
+static DESTRUCTORS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn cxx() -> &'static Cxx {
     static CXX: std::sync::OnceLock<Cxx> = std::sync::OnceLock::new();
@@ -107,6 +113,7 @@ fn callbacks_called_from_cxx() {
 #[test]
 fn destructors_run_while_unwinding_to_rust() {
     let c = cxx();
+    let _counting = DESTRUCTORS.lock().unwrap();
     runtime().run(|fil| {
         let before = c.get_destructor_runs(fil).unwrap();
         assert_eq!(c.throw_with_guards(fil, 10).unwrap_err(), Error::Exception);
@@ -150,4 +157,50 @@ fn exceptions_on_many_threads() {
     for t in threads {
         t.join().unwrap();
     }
+}
+
+#[test]
+fn exceptions_between_nested_cxx_and_rust_frames() {
+    let c = cxx();
+    let _counting = DESTRUCTORS.lock().unwrap();
+    runtime().run(|fil| {
+        // guarded_call (C++) -> outer (Rust) -> guarded_call (C++) -> inner
+        // (Rust) -> throw_with_guards (C++, throws through 3 guards). Each
+        // exception stops at the nearest Rust frame; every guard runs once.
+        let inner = std::sync::Arc::new(
+            fil.callback::<fn(i32) -> i32, _>(move |fil, (x,)| match c.throw_with_guards(fil, 2) {
+                Err(Error::Exception) => x + 100,
+                other => panic!("unexpected {other:?}"),
+            })
+            .unwrap(),
+        );
+        let i2 = inner.clone();
+        let outer = fil
+            .callback::<fn(i32) -> i32, _>(move |fil, (x,)| c.guarded_call(fil, i2.get(fil), x).unwrap() * 10)
+            .unwrap();
+        let before = c.get_destructor_runs(fil).unwrap();
+        assert_eq!(c.guarded_call(fil, outer.get(fil), 5).unwrap(), 1050);
+        assert_eq!(c.get_destructor_runs(fil).unwrap() - before, 3 + 2);
+        drop(inner);
+    });
+}
+
+#[test]
+fn callbacks_on_cxx_threads() {
+    let c = cxx();
+    runtime().run(|fil| {
+        // A Rust callback on a thread std::thread made, calling C++ that
+        // throws: the exception stops at the callback, which returns normally.
+        let cb = fil
+            .callback::<fn(i32) -> i32, _>(move |fil, (x,)| match c.throw_int(fil, x) {
+                Err(Error::Exception) => -x,
+                other => panic!("unexpected {other:?}"),
+            })
+            .unwrap();
+        assert_eq!(c.call_on_thread(fil, cb.get(fil), 4).unwrap(), -4);
+        let plain = fil.callback::<fn(i32) -> i32, _>(|_, (x,)| x * 3).unwrap();
+        for x in 0..20 {
+            assert_eq!(c.call_on_thread(fil, plain.get(fil), x).unwrap(), x * 3);
+        }
+    });
 }

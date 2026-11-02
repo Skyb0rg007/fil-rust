@@ -89,3 +89,27 @@ extern "C" int throw_with_guards(int depth) {
 extern "C" int get_destructor_runs(void) { return destructor_runs; }
 
 extern "C" int throw_int(int v) { throw v; }
+
+// Calls f with a destructor-carrying local live and a handler ready.
+extern "C" int guarded_call(int (*f)(int), int x) {
+    Guard g;
+    try {
+        return f(x);
+    } catch (...) {
+        return -1000;
+    }
+}
+
+// Calls f on a new std::thread; an exception there is caught there.
+extern "C" int call_on_thread(int (*f)(int), int x) {
+    int result = 0;
+    std::thread t([&] {
+        try {
+            result = f(x);
+        } catch (...) {
+            result = -2000;
+        }
+    });
+    t.join();
+    return result;
+}

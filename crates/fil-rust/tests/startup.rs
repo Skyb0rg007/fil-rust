@@ -166,6 +166,35 @@ fn child_entry() {
             let sum: i32 = jobs.into_iter().map(|j| j.join()).sum();
             assert_eq!(sum, 6);
         }
+        "concurrent-start" => {
+            // Good and bad configurations race to start the runtime.
+            let start = Arc::new(Barrier::new(12));
+            let threads: Vec<_> = (0..12)
+                .map(|i| {
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        let config = if i % 3 == 2 { Config::new(flavor(), "/nonexistent/fil-c") } else { config() };
+                        start.wait();
+                        (i % 3 == 2, Runtime::start(config))
+                    })
+                })
+                .collect();
+            let mut started = 0;
+            for t in threads {
+                match t.join().unwrap() {
+                    (false, Ok(rt)) => {
+                        assert_eq!(rt.run(|fil| fil.c_str("up").unwrap().read_string(fil).unwrap()), "up");
+                        started += 1;
+                    }
+                    (false, Err(e)) => panic!("a good configuration failed: {e}"),
+                    (true, Err(Error::Load(_) | Error::AlreadyStarted)) => {}
+                    (true, other) => panic!("a bad configuration gave {other:?}"),
+                }
+            }
+            assert_eq!(started, 8);
+            // Only one runtime came up: one set of executors.
+            assert_eq!(Runtime::get().unwrap().config().root(), config().root());
+        }
         other => panic!("unknown case {other}"),
     }
     println!("child ok");
@@ -231,4 +260,11 @@ fn worker_counts_are_clamped() {
     assert_eq!((c.worker_count(), c.max_worker_count()), (6, 6));
     let c = config().max_workers(0);
     assert_eq!(c.max_worker_count(), 1);
+}
+
+#[test]
+fn concurrent_starts_bring_up_one_runtime() {
+    for _ in 0..3 {
+        passes("concurrent-start", &[]);
+    }
 }
