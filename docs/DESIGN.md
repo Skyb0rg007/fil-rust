@@ -196,339 +196,269 @@ A Rust loader would end up reimplementing musl's `ldso` and still be fragile.
 ## Architecture
 
 ```
-fil-rust-sys     raw bindings to libpizlo + the C shims (runtime shim, libyoloc compat), pinned to one Fil-C version
-fil-rust         safe API: runtime context, pointers, buffers, calls, libraries, callbacks
-fil-rust-macros  foreign-function declarations, #[derive(FilRepr)]
-nix/             Fil-C distribution, libyoloc compat shim, runtime headers
+fil-rust-sys     the C shims (runtime shim, yolo-libc stand-ins), built by build.rs and embedded in the crate
+fil-rust         safe API: runtime, executors, pointers, memory, calls, libraries, callbacks, handles
+fil-rust-macros  #[derive(FilType)]
+nix/             the Fil-C distributions (pizfix for musl, optfil for glibc) and runtime source headers
+examples/        runnable programs, each with its C/C++ source in examples/c
+tests/           integration tests over C/C++ fixtures, run against either flavor
 ```
 
-### fil-rust-sys and the C shim
+Nothing Fil-C is linked into the Rust binary. Every native object fil-rust
+needs (the runtime shim and the stand-ins) is compiled by `build.rs`, embedded
+with `include_bytes!`, and loaded at run time from a `memfd`. The Fil-C
+distribution itself is found at run time from [`Config`].
+
+### Flavors
+
+Fil-C has two user-libc flavors, selected per process with `Config::musl` /
+`Config::glibc` (or `FILC_FLAVOR`), and compiled in with the `musl` (default)
+and `glibc` cargo features. Both features can be on at once.
+
+| | musl ("pizfix") | glibc ("optfil", `/opt/fil`) |
+|---|---|---|
+| user libc | `pizfix/lib/libc.so` | `lib/libc.so.6666`, `libm.so.6666`, `libdl.so.6662`, `libpthread.so.6660` |
+| yolo libc the runtime imports | `libyoloc.so` (musl) | `libyolocimpl.so`, `libyolomimpl.so`, `ld-fil1-x86_64.so` (glibc 2.40-ish) |
+| stand-ins fil-rust provides | `libyoloc.so` | those three, plus `libpizlo.so` (see below) |
+| shim built against | musl headers | host glibc headers |
+
+The glibc distribution's objects use **symbol versions**. glibc's `ld.so`
+matches a versioned reference by version *name* anywhere in the global scope,
+so a stand-in only needs the right soname, the right `VERDEF` nodes (from a
+linker version script), and definitions for the symbols the host glibc
+doesn't already export: the yolo futex wrappers, the internal-signal table,
+and a few `__ieee754_*` aliases in libm. Everything else binds to the host
+glibc.
+
+The glibc distribution's `libpizlo.so` has no `DT_SONAME` and its user libs
+have no RUNPATH, so their `DT_NEEDED libpizlo.so` can't match the runtime
+loaded by path. An empty stand-in with soname `libpizlo.so` satisfies the
+dependency by name; the runtime's symbols come from the real libpizlo, which
+is loaded `RTLD_GLOBAL`.
+
+The nix shell provides both distributions. optfil's compiler expects to live
+at `/opt/fil`, so `nix/optfil.nix` wraps `filcc`/`fil++` in `bwrap` with the
+distribution bind-mounted there.
+
+### The runtime shim
 
 Most of the runtime's native API is `static inline` code in
-`filc_runtime.h` / `filc_runtime_inlines.h`. Examples are cursors,
-`filc_ptr_create_with_object`, `filc_store_ptr`, frame push/pop, and pollcheck.
-Reimplementing it in Rust would copy layout details by hand. Instead,
-`fil-rust-sys` compiles a small **yolo C shim** against the runtime headers from
-the matching source tag. Nix fetches those headers alongside the binary
-distribution. The shim exports plain `extern "C"` functions:
+`filc_runtime.h`. Rather than copy layouts into Rust, `fil-rust-sys` compiles
+`csrc/shim.c` against the runtime headers of the pinned source tag (fetched
+by `nix/filc-runtime-src.nix`) and exposes a table of `fr_*` functions,
+resolved with `dlsym` and checked by an ABI version number:
 
-- `fr_initialize`, `fr_enter`, `fr_exit`, `fr_pollcheck`, `fr_my_thread`
-- `fr_push_native_frame` / `fr_pop_native_frame`, `fr_track(ptr)`
-- `fr_allocate(size, align) -> filc_ptr`, `fr_ptr_lower/upper/is_readonly/is_free`
-- `fr_load_ptr(base, off)`, `fr_store_ptr(base, off, val)` (with the barrier)
-- `fr_call_begin(arg_size)`, `fr_arg_int{8,16,32,64}`, `fr_arg_f{32,64}`,
-  `fr_arg_ptr`, `fr_call(fn_ptr) -> (has_exception, return_size)`,
-  `fr_ret_*` (all built on the runtime's own cursor functions)
-- `fr_handle_table_new / encode / decode` (exact pointer table)
-- `fr_function_new(thunk, data_ptr) -> filc_ptr` (a closure function object
-  for callbacks)
-- `fr_version()`, checked against `zversion()` at startup
+- threads: `fr_enter`, `fr_exit`, `fr_is_entered`, `fr_pollcheck`,
+  `fr_with_native_frame`, `fr_check_thread_layout`
+- memory: `fr_allocate`, `fr_check`, `fr_ptr_info_get`, `fr_copy_in/out`,
+  `fr_memmove`, `fr_strlen`, `fr_load_ptr`, `fr_store_ptr` (with the store
+  barrier and aux update), `fr_track`
+- roots: `fr_root_set/get` over an exact pointer table
+- calls: `fr_call_getter`, `fr_check_function`, `fr_cc_begin`,
+  `fr_cc_set/get_word`, `fr_cc_set/get_ptr`, `fr_call`
+- callbacks and executors: `fr_closure_new`, `fr_main_getter`,
+  `fr_worker_function`, `fr_panic`
 
-Later we can move hot paths (`fr_arg_*`) into Rust for speed, once tests pin
-down their behavior.
+Every memory operation runs entered and checks the capability first, so the
+garbage collector can't reclaim an object in the middle of an access.
 
-The runtime shim is compiled with the host C compiler against glibc headers
-plus the runtime headers. Those headers embed libc types in runtime structs
-(`pthread_*_t`, `sigset_t`), so the shim build `static_assert`s their sizes
-against the musl build's values. On x86-64 they match.
+### Startup
 
-The second shim is the **libyoloc compat library**: the spike's
-`yoloc_compat.c`, built against glibc with soname `libyoloc.so`. Nix builds it
-next to the Fil-C distribution and exposes it as `FILC_YOLOC_COMPAT`.
+`Runtime::start(config)`:
 
-### Bootstrapping: `fil_rust::Runtime::start()`
+1. **Loads in order:** the flavor's stand-ins (from memfds, `RTLD_GLOBAL`),
+   then the distribution's `libpizlo.so` and user libc by path. The order is a
+   safety invariant: a Fil-C object loaded first would pull in the real yolo
+   libc through its RUNPATH. After loading, `dl_iterate_phdr` confirms that no
+   real yolo libc is mapped; the same check runs after every `Runtime::load`.
+2. **Loads the shim** and checks its ABI version and flavor.
+3. **Boots.** `filc_start_program(argc, argv, __libc_start_main, main_getter)`
+   never returns, so it runs on a dedicated std thread. The user libc
+   initializes itself (stdio, environ, constructors) through its own
+   `__libc_start_main` and then calls the "main" that `fr_main_getter`
+   provides: a shim function that calls back into Rust.
+4. **Becomes the spawner.** The Fil-C main thread starts the initial executor
+   threads and then serves requests to start more (below). It never returns,
+   since returning from Fil-C `main` would call `exit()`.
 
-The Rust binary is a normal glibc program built with the default Rust target.
-No custom linker setup is needed, and nothing Fil-C is linked at build time.
-Startup works like this:
+The Rust `main` stays in charge. An `atexit` hook in the Rust process flushes
+Fil-C stdio when the process exits normally.
 
-1. **Load in order.** `dlopen(FILC_YOLOC_COMPAT, RTLD_NOW | RTLD_GLOBAL)`, then
-   libpizlo and the Fil-C user libc. The order is a safety invariant: if a
-   Fil-C object were loaded first, its RUNPATH would pull in the real musl
-   `libyoloc.so`. After loading, the crate checks with `dl_iterate_phdr` that
-   no musl libyoloc is mapped, and refuses to start if one is.
-2. **Boot.** `filc_start_program(argc, argv, pizlonated___libc_start_main, rust_main_getter)`
-   never returns: it parks its calling thread in `pause()` and runs Fil-C
-   `main` on a new "phony main" thread. So `start()` calls it on a dedicated
-   std thread. `rust_main_getter` returns a function object whose generic
-   entrypoint is a Rust thunk, so the user libc gets fully initialized (stdio,
-   environ, ctors) by its own `__libc_start_main` before any Rust code runs on
-   the Fil-C side.
-3. **Hand off.** The thunk signals `start()` that the runtime is ready, then
-   exits the runtime (`filc_exit`) and parks. It must never return, because
-   returning from Fil-C `main` calls `exit()`. It can later serve as the
-   creator thread for adopting other threads (see [Threads](#threads)).
-4. `start()` returns a `Runtime` handle. `runtime.enter()` gives the calling
-   thread a `Fil` token, adopting the thread first if it isn't a Fil-C thread
-   yet.
+### Executors
 
-The Rust `main` stays in charge, and when it returns the process exits through
-glibc's normal path.
+Rust threads are never adopted into the runtime. Instead Fil-C work runs on
+**executor threads**, which are created by the Fil-C libc's own
+`pthread_create` (so musl's per-thread state, like `errno`, exists) with the
+shim's `fr_worker_function` as the start routine.
 
-### The context token: `Fil`
+- `Runtime::run(f)` queues `f`, blocks the calling Rust thread until an
+  executor has run it, and returns its result. Because it blocks, `f` may
+  borrow from the caller. Called from a thread that is already a Fil-C thread
+  (inside a job or a callback) it runs `f` inline in a nested scope.
+- `Runtime::spawn(f)` queues a `'static` job and returns a `JoinHandle`.
+- The pool is **elastic**: when queued jobs outnumber idle and starting
+  executors, the spawner starts another, up to `Config::max_workers` (256 by
+  default). Jobs that wait on each other therefore don't starve.
+- Panics in jobs are caught on the executor and resumed in the joiner.
 
-```rust
-pub struct Fil { thread: NonNull<filc_thread>, _not_send: PhantomData<*mut ()> }
-```
+### Never block while entered
 
-- If you have a `&Fil` or `&mut Fil`, the current thread is entered. `Fil` is
-  `!Send`/`!Sync`.
-- Calling into Fil-C (or anything that can pollcheck or free) takes
-  **`&mut Fil`**.
-- Views into Fil-C memory borrow **`&Fil`**.
+FUGC's soft handshakes wait for every entered thread to reach a pollcheck.
+A thread that blocks on a Rust primitive while entered stalls every
+collection; and since creating a Fil-C thread takes the handshake lock, it
+can deadlock the pool too. (This was a real deadlock: a job blocked on a
+`OnceLock` whose initializer was waiting for a new executor.) So:
 
-The borrow checker then rules out the main hazard statically: a Rust reference
-into a Fil-C object can't outlive the next call or pollcheck. In other words,
-no view survives a point where Fil-C code could free the object or the GC could
-reclaim it.
+- `Fil::exited(f)` leaves the runtime around blocking Rust code. Its closure
+  must be `Send`, so it can't capture a `Fil` or a `FilPtr`.
+- Internally, every lock that can be taken while entered is taken by
+  `try_lock` first, falling back to exit → lock → enter. `JoinHandle` waits
+  leave the runtime when called from a Fil-C thread.
+- `Fil::pollcheck()` is for long Rust loops that don't call Fil-C.
 
-- `fil.exited(|| blocking_io())` exits the runtime around blocking Rust code.
-  The closure gets no `Fil`, so it can't touch GC memory.
-- `fil.pollcheck()` is for long-running Rust loops.
-- Every Rust → Fil-C call pushes a native frame. Pointers created during the
-  call are tracked in that frame and released when it is popped.
+### The context token: `Fil<'f>`
 
-### Pointers: `FilPtr<'f>`
+`Fil<'f>` proves the current thread is a Fil-C thread inside the runtime. It
+is `!Send` and `!Sync`, and it only exists inside a `run`/`spawn` closure or
+a callback. `'f` is invariant and higher-ranked (`for<'f> FnOnce(&Fil<'f>)`),
+so nothing tied to it can escape the closure.
 
-`FilPtr` is an opaque `{ptr, lower}`. Safe code **can't forge one**. You only
-get one:
+Every Rust → Fil-C transition pushes a native frame. Pointers that Rust
+obtains are tracked in the innermost frame (`fr_track`) and stay alive until
+the frame pops. `fil.scope(|fil| ..)` opens a nested frame to bound memory in
+long loops.
 
-- from the runtime (allocation, a call's return value, a pointer loaded from
-  memory, a global, `dlsym`), or
-- as `FilPtr::null()` or `FilPtr::from_addr(usize)`, which have a null
-  capability. These are like Fil-C's integer-to-pointer casts, so they are
-  harmless.
+### Pointers: `FilPtr<'f, T>`
 
-The `'f` lifetime ties a `FilPtr` to the native frame that keeps it alive.
-`fil.scope(|fil| ...)` opens a nested frame. To keep a pointer across scopes or
-store it in Rust structs, convert it to a `FilHandle`. A handle is a strong
-root held in an exact pointer table. It stays valid until Fil-C code frees the
-object (decoding then returns a pointer with a freed capability, which still
-can't be used to cause harm). `FilHandle` is `Send` and is decoded with a `Fil`
-on any thread.
+`FilPtr` is an opaque `{ptr, lower}` plus a C-type marker `T`. Safe code
+can't forge one: it comes from the runtime (an allocation, a call's return, a
+loaded pointer field, a global) or from `FilPtr::null()` /
+`FilPtr::from_addr()`, which carry a null capability. Arithmetic only moves
+the address; bounds are checked on access.
 
-Pointer arithmetic (`ptr.offset(n)`) only changes the intval, as in Fil-C.
-Bounds are checked when the pointer is accessed, not when it is computed.
+All accesses are **copies** checked against the live capability:
+bounds, liveness (Fil-C `free` revokes a capability immediately), write
+permission, alignment for pointer slots, and "special" objects (functions,
+thread objects), which aren't data. Failures are `Error`s. Rust never holds a
+reference into memory that Fil-C might also be using, so a racing Fil-C
+thread can at worst produce torn values, as in Fil-C itself.
 
-### Memory: tracked buffers
+`Ptr<T>` is `FilPtr<'static, T>` for use in signatures and struct field
+types; values are always `FilPtr<'f, T>`.
 
-This is the "Rust types for Fil-C tracked memory" idea, split by who might be
-accessing the memory at the same time:
+### Rooted handles and owned buffers
 
-| type | what it is | access from Rust |
-|---|---|---|
-| `FilBuf` | GC allocation made by Rust and **never passed to Fil-C** | `as_slice(&Fil) -> &[u8]`, `as_mut_slice(&mut Fil)` (exclusive, so Rust references are sound) |
-| `FilPtr` / `FilHandle` | anything Fil-C might also be accessing | **copy only**: `read(&Fil, off, &mut [u8])`, `write(&Fil, off, &[u8])`, `read_val::<T: Pod>`, `write_val`, `read_cstr` |
+- `FilHandle<T>` (`fil.root(ptr)`) keeps an object alive across scopes and
+  threads through an exact pointer table. It is `Send + Sync`; `get(fil)`
+  yields a `FilPtr` in the current scope. Dropping it releases the slot
+  (deferred until a Fil-C thread can do it, so `Drop` never blocks while
+  entered).
+- `FilBuf` is a Fil-C allocation that Rust owns exclusively, so it derefs to
+  a plain `[u8]` with no per-access checks. `share(self, fil)` consumes it and
+  returns a `FilPtr`, after which Fil-C may retain or use it concurrently.
 
-- Passing a `FilBuf` to a Fil-C function **consumes** it (`buf.share()` turns
-  it into a `FilPtr`). Fil-C may keep the pointer and use it from another
-  thread, so Rust can't safely hand out `&[u8]` into it again.
-- Copy accessors re-check the capability (lower ≤ p, p + n ≤ upper, not
-  readonly for writes, not freed) **while entered** and with no pollcheck in
-  between. The GC therefore can't reclaim the object partway through a copy.
-- Copies of shared memory use relaxed per-byte or per-word atomic accesses
-  (`atomic_memcpy`-style). A Fil-C thread racing with Rust then produces torn
-  values, never Rust UB. This mirrors Fil-C's own rule that races can't break
-  memory safety.
-- Pointer fields are read and written only through `read_ptr` / `write_ptr`,
-  which go through the shim's barrier and aux handling. A plain byte write
-  over a pointer slot just leaves a pointer whose intval doesn't match its
-  capability. Fil-C allows that and it is safe.
-- `unsafe fn as_slice_unchecked(&self, &Fil) -> &[u8]` is the escape hatch
-  for callers who know the library doesn't retain or free a buffer.
+### Types: `FilType` and `#[derive(FilType)]`
 
-Convenience types built on these: `FilCString` (allocate and copy, plus a NUL
-terminator), `FilBox<T: FilRepr>`, and `FilArray<T>`.
+`FilType` describes a C type: its size and alignment, its *leaves*
+(eightbytes holding integers, floats or pointers, which drive the calling
+convention), and how to read and write its Rust value (`Value<'f>`) at an
+offset. It is implemented for the integer and float types, `bool`, `()`,
+arrays, `FilPtr`, `Opaque`, and `fn(..) -> R` signatures (whose value is a
+typed `FilFn`).
 
-### Struct layout: `#[derive(FilRepr)]`
-
-The derive covers `#[repr(C)]` structs mirroring C structs. It produces:
-
-- field offsets
-- a pointer-field map, so pointer fields get `FilPtr` accessors that go
-  through `read_ptr` / `write_ptr` while every other field is plain `Pod`
-- typed `read` / `write` for `FilPtr<T>`
-
-The layout is checked against the C header in tests, using a test-only Fil-C
-probe that prints `offsetof` values.
+`#[derive(FilType)]` computes a C layout for a struct of `FilType` fields
+(`#[fil(size = N, align = M)]` checks it at compile time), and supports one
+lifetime parameter for structs holding pointers (`Node<'f>`).
 
 ### Calls
 
-The low level is an untyped call builder (`fil.call(f).arg_i32(1).arg_ptr(p).ret_i32()?`)
-on top of the shim cursor functions. The high level is typed declarations:
+A `Function<Sig>` is a checked function pointer with signature
+`Sig = fn(A, B, ..) -> R`. Calls encode arguments into the generic calling
+convention's buffers, following clang's x86-64 lowering as Fil-C sees it:
 
-```rust
-fil_rust::foreign! {
-    lib = "libfoo.so";
-    fn add(a: i32, b: i32) -> i32;
-    fn dup_upper(s: FilPtr<c_char>) -> FilPtr<c_char>;
-    static global_counter: i32;
-}
-```
+- each argument starts on an 8-byte slot; integers narrower than 64 bits are
+  extended; pointers write their capability into the aux buffer
+- structs of up to 16 bytes are flattened per eightbyte
+- larger (or misaligned) structs are copied **inline** into the argument
+  buffer at their alignment, one slot per eightbyte
+- larger returns go through an `sret` pointer passed as a leading argument
+- varargs are simply extra slots after the fixed arguments
 
-These expand to typed wrappers taking `&mut Fil`. Calls return
-`Result<R, FilException>`: if `has_exception` is set (a C++ exception
-escaped), the exception is reported instead of unwinding into Rust. Returns
-are read through checked cursors, so a too-small `return_size` panics the
-runtime rather than reading garbage.
+Return values are read back as words and pointers through checked accessors.
+`DynCall` builds a call argument by argument when the signature is only known
+at run time. `foreign!` declares a struct with one typed method per C
+function, looked up when the struct is created.
 
-Supported argument and return types, in order of milestones:
+**Exceptions.** `fr_call` pushes a Fil-C frame whose origin has a
+personality that catches every exception. If a C++ exception escapes the
+callee, the unwinder runs the callee's cleanups (destructors) on its way to
+that frame; the shim then disposes of the exception and returns a status that
+becomes `Error::Exception`. Rust panics never cross the boundary.
 
-1. Integers, floats, `FilPtr<T>`, `bool`, unit.
-2. Structs by value: a `FilRepr` struct also gets a classification matching
-   clang's x86-64 SysV lowering (up to 16 bytes → one or two integer/SSE
-   slots, larger → `sret` / byval pointer). Golden tests compare against the
-   IR that clang emits for the same prototypes.
-3. Varargs: Fil-C passes varargs in the same buffer (see `zcan_va_arg`). This
-   needs a spike to confirm the layout.
+### Libraries
 
-Later, the declaration bodies can be generated from C headers with bindgen.
-Bindgen's output provides the types, and a wrapper pass maps C pointers to
-`FilPtr<T>`.
+`Runtime::load(path)` preloads the library's `DT_NEEDED` dependencies from the
+configured search path and the distribution's lib directory, then `dlopen`s it
+with the host loader, `RTLD_LOCAL`. Symbols are found through the
+`pizlonated_<name>` getters, which return a properly bounded pointer to the
+function object or global (globals are initialized lazily by their getter).
+`Library::function` checks that the symbol is a function before returning a
+`Function`; `Library::global::<T>` returns a typed pointer.
 
-### Libraries and symbols
+### Callbacks
 
-- **Link time:** list the library as a NEEDED dependency (through the linker
-  wrapper). Look symbols up with the yolo `dlsym(RTLD_DEFAULT, "pizlonated_<name>")`
-  and call the getter to get a `FilPtr`.
-- **Run time:** `Library::open(fil, path)` calls Fil-C's own `dlopen` /
-  `dlsym` from the user libc, as ordinary Fil-C calls. This keeps the runtime's
-  relocation, deferred-ctor, and global-initialization handling exactly as for
-  Fil-C callers, and `dlsym` returns a properly capability-checked `FilPtr`.
-
-`Library::function(name) -> FilFn` checks that the pointer is a function
-object (`filc_check_function_call`) before any call.
-
-### Callbacks (Fil-C → Rust)
-
-`fil.callback(|fil, args: FilArgs| -> FilRet { ... }) -> FilFnPtr` creates a
-closure function object through the runtime's closure support
-(`zclosure_new` / `filc_native_zclosure_new` semantics):
-
-- The generic entrypoint is a Rust `extern "C"` thunk.
-- The closure data is a small GC object holding a `FilHandle` index into a
-  Rust-side table of boxed closures.
-- The thunk rebuilds a `Fil` for the current thread and reads its arguments
-  through the checked cursor. So Fil-C passing the wrong arguments panics the
-  runtime instead of corrupting Rust.
-- Rust panics are caught at the thunk boundary and turned into a Fil-C panic
-  (abort). Unwinding never crosses the boundary.
-
-Typed wrappers (`FilFnPtr<fn(i32) -> i32>`) work the same way as in the
-calls section above.
-
-### Threads
-
-With a glibc `main`, every Rust thread (including the main thread) starts out
-without a `filc_thread`, so adopting threads is core functionality, not an
-extra.
-
-- **Adoption (preferred).** The runtime shim does for an existing thread what
-  the runtime's own thread entry does for a `zthread_create` thread:
-  1. An entered thread creates the `filc_thread` with
-     `filc_thread_create_with_manual_tracking`.
-  2. The adopted thread stores it in `filc_thread_key` (exported) with
-     `pthread_setspecific`.
-  3. It records its tid and computes its stack limit with
-     `filc_compute_stack_limit`.
-
-  A Rust TLS destructor disposes of the thread when it exits. `runtime.enter()`
-  adopts lazily.
-- **Fallback.** If adoption turns out to need more internals than is
-  reasonable, `fil_rust::thread::spawn(fil, |fil| ...)` creates threads with
-  Fil-C's own `zthread_create`, called as a normal Fil-C function with a Rust
-  callback. `Runtime::call_on_fil_thread` dispatches work to such a thread from
-  any Rust thread.
-
-### Optional: out-of-process isolation
-
-A `fil-rust-host` Fil-C executable could load a library and serve calls over a
-socket plus shared memory, reusing `FilRepr` for serialization. Rust would then
-use the same `foreign!` declarations with `Remote` instead of `Fil`. A Fil-C
-panic would kill only the host process, and Rust would get it as an `Err`.
-This only gets built if someone needs to survive panics.
+`Callback<Sig>::new(fil, closure)` registers a `Send + Sync` closure in a Rust
+table and creates a Fil-C closure function object (`fr_closure_new`) carrying
+its id. When Fil-C calls it, a shim thunk enters Rust, which decodes the
+arguments through the same checked accessors (too few arguments is a Fil-C
+panic), runs the closure with a fresh `Fil` for the callback's scope, and
+encodes the return. A Rust panic in the closure, or a call after the
+`Callback` was dropped, becomes a Fil-C panic. Callbacks may be called from
+any Fil-C thread, including threads Fil-C code creates itself.
 
 ## Safety argument (summary)
 
 | hazard | prevented by |
 |---|---|
 | Rust forging a capability | `FilPtr` is opaque; aux values come only from the runtime |
-| Rust writing out of bounds of a Fil-C object | every access is checked against the live capability in the shim/accessor |
-| Fil-C freeing memory Rust is reading | views borrow `&Fil`; calls and pollchecks take `&mut Fil` |
-| GC reclaiming an object mid-access | accesses happen entered, with no pollcheck in between |
-| data races on shared memory being UB in Rust | shared memory is copy-only, using atomic copies |
-| wrong Rust-side signature | the callee checks argument slots; a mismatched type becomes a null capability |
-| Fil-C getting a pointer into Rust memory | impossible: Rust memory never gets a capability; data must be copied into GC objects |
-| unwinding across the boundary | exceptions → `Err`; Rust panics in callbacks → abort |
-| runtime ABI drift | crate pinned to one Fil-C version, checked via `zversion()` at startup |
-| real musl libyoloc entering the glibc process | the crate controls load order; `dl_iterate_phdr` check at startup |
-| libc struct layout mismatch (runtime built against musl headers) | audit of every libpizlo import (M1), plus shim wrappers where layouts differ |
+| Rust accessing out of bounds, freed, read-only or special memory | every access is a copy checked against the live capability, entered |
+| GC reclaiming an object Rust holds | pointers are tracked in the current native frame; `FilHandle` roots across frames |
+| a `FilPtr` outliving its frame or thread | the invariant, higher-ranked `'f`; `Fil` and `FilPtr` are `!Send` |
+| data races being UB in Rust | Rust never holds references into shared Fil-C memory; `FilBuf` is exclusive until shared |
+| wrong Rust-side signature | the callee checks argument slots; a mismatched pointer has a null capability |
+| Fil-C getting a pointer into Rust memory | impossible: data is copied into GC objects |
+| unwinding across the boundary | exceptions → `Error::Exception`; Rust panics in callbacks → Fil-C panic |
+| the GC stalled by blocked Rust code | `exited`; internal locks never block while entered |
+| runtime ABI drift | shim ABI version and flavor checks at startup; pinned distribution versions |
+| the real yolo libc entering the process | fil-rust owns all loading; `dl_iterate_phdr` check after each load |
 
-## Milestones
+## Status
 
-**M0: spikes (go/no-go for approach A).** Throwaway code in `spikes/`:
-1. ✅ Fil-C runtime, user libc and libraries running in a glibc process,
-   loaded by glibc's `ld.so` (`spikes/glibc-host`).
-2. Boot the runtime from a glibc **Rust** binary on a sacrificial thread, with
-   a Rust-provided `pizlonated_main` getter that hands control back.
-3. Adopt the Rust main thread and a `std::thread` into the runtime, then make a
-   hand-written call of `add` and `dup_upper` through the generic entrypoint
-   (C shim built against the 0.687 headers).
-4. Check that Rust std's signal handling (stack-overflow SIGSEGV/SIGBUS
-   handler) coexists with the runtime's handlers.
-5. Confirm the struct-return and varargs buffer layouts.
-
-**M1: `fil-rust-sys`.**
-- Nix fetches the runtime headers at the pinned tag and builds the libyoloc
-  compat shim.
-- `build.rs` builds the runtime shim.
-- Startup load-order check and version check.
-- glibc-vs-musl layout audit of all libpizlo imports.
-
-**M2: safe core.** `Runtime::start`, thread adoption, `Fil`, scopes and native frames,
-`FilPtr`, `FilHandle`, `FilBuf`, copy accessors, `FilCString`, untyped calls
-with scalars and pointers. Tests build Fil-C fixtures with `filcc` in
-`build.rs`.
-
-**M3: libraries and typed calls.** Link-time and `dlopen` loading, `foreign!`,
-globals, exceptions → `Err`.
-
-**M4: callbacks and threads.**
-
-**M5: structs.** `FilRepr` derive, by-value struct ABI, varargs, bindgen
-integration.
-
-**M6 (optional): out-of-process isolation.**
+Implemented: everything above, for both flavors, on x86-64. The integration
+tests (`tests/`) run against either flavor (`FILC_FLAVOR=glibc cargo test
+--features glibc`) and cover scalar, string, struct, sret, varargs and
+function-pointer calls; checked memory access and its failure modes; handles
+and owned buffers under GC stress; callbacks from many Fil-C threads; C++
+containers, threads and exceptions; and process-ending cases (Fil-C safety
+panics, signature mismatches, panicking callbacks, `exit`) in child processes.
 
 ## Open questions and risks
 
-- **Runtime internals aren't a stable API.** Mitigated by pinning the version,
-  keeping the shim minimal, and checking `zversion()`. Bumping Fil-C means
-  rebuilding the shim and rerunning the ABI golden tests.
-- **Running libpizlo on glibc isn't supported upstream.** libpizlo was
-  compiled against musl's headers. Most structs it hands to libc are
-  kernel-defined and identical in glibc on x86-64 (`stat`, `sigaction`,
-  `sigset_t`, `timespec`, `rlimit`, `epoll_event`, the `pthread_*_t` sizes),
-  and libc constants such as `RTLD_*`, `_SC_*` and errno match. Known
-  musl/glibc differences that the audit must check:
-  - `msghdr` / `cmsghdr` padding vs `size_t` lengths (`sendmsg`, `recvmsg`,
-    `sendmmsg`, `recvmmsg`)
-  - the SysV IPC `*_ds` structs
-  - `statvfs`
-  - `timex` (`clock_adjtime`)
-
-  Where a layout differs, the compat shim wraps the function. If this ever
-  becomes untenable, the fallback is to build libpizlo from source against
-  glibc in the musl-user-libc configuration.
-- **Signals.** The runtime defers signals for entered threads and installs its
-  own handlers. The compat shim reports glibc's internal signals (32 and 33),
-  so the runtime leaves those alone. Rust std's SIGSEGV/SIGBUS stack-guard
-  handler may need to be disabled or reordered (M0.4).
-- **Load-order hazard.** Every Fil-C object carries a RUNPATH to `pizfix/lib`,
-  which contains the real musl `libyoloc.so`. Loading any Fil-C object before
-  the shim would map musl into the process. The crate owns all loading and
-  checks for this at startup.
-- **Panics are process-fatal in-process.** This is inherent to Fil-C. M6 is
-  the answer if it matters.
-- **aarch64.** The design is architecture-neutral except for the struct-ABI
-  classifier. The first target is x86_64 only.
+- **Runtime internals aren't a stable API.** Mitigated by pinning versions,
+  keeping the shim small, and checking its ABI version. Bumping Fil-C means
+  rebuilding the shim and rerunning the tests on both flavors.
+- **Running libpizlo next to the host libc isn't supported upstream.** For
+  musl, libpizlo was compiled against musl headers; the structs it passes to
+  libc are almost all kernel-defined and identical on x86-64, but `msghdr`,
+  the SysV IPC structs, `statvfs` and `timex` differ and would need wrappers
+  in the stand-in if a library uses them. For glibc, the distribution's yolo
+  glibc is close to the host's, but the stand-ins rely on the host glibc
+  providing every versioned symbol the runtime imports.
+- **Signals.** The runtime defers signals for entered threads and installs
+  its own handlers; the stand-ins report glibc's internal signals (32 and 33)
+  so the runtime leaves them alone.
+- **Panics are process-fatal.** This is inherent to Fil-C. An out-of-process
+  host (a Fil-C executable serving calls over shared memory) would let Rust
+  survive them, at the cost of copying.
+- **aarch64.** Everything but the struct-ABI classifier is
+  architecture-neutral; only x86-64 is implemented and tested.
