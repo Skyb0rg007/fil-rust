@@ -11,6 +11,7 @@ let
     overlays = [ (import rust-overlay) ];
   };
   filc = pkgs.callPackage ./nix/filc.nix { };
+  filcRuntimeSrc = pkgs.callPackage ./nix/filc-runtime-src.nix { };
 in
 pkgs.mkShell {
   nativeBuildInputs = [
@@ -22,4 +23,10 @@ pkgs.mkShell {
   FILC_ROOT = "${filc}";
   FILC_CC = "${filc}/bin/filcc";
   FILC_CXX = "${filc}/bin/fil++";
+
+  # Inputs for building fil-rust-sys's C shims.
+  FILC_RUNTIME_SRC = "${filcRuntimeSrc}/libpas/src/libpas";
+  FILC_MUSL_INCLUDE = "${pkgs.musl.dev}/include";
+  FILC_LINUX_INCLUDE = "${pkgs.linuxHeaders}/include";
+  FILC_HOST_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
 }

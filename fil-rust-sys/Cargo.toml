@@ -1,0 +1,16 @@
+[package]
+name = "fil-rust-sys"
+version = "0.1.0"
+edition = "2024"
+description = "Raw bindings and C shims for hosting the Fil-C runtime in a glibc process"
+links = "filrust"
+
+[features]
+default = ["musl"]
+# Support for Fil-C binaries built with the musl ("pizfix") distribution.
+musl = []
+# Support for Fil-C binaries built with the glibc ("/opt/fil") distribution.
+glibc = []
+
+[dependencies]
+libc = "0.2"

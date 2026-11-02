@@ -1,0 +1,793 @@
+//! Starting the Fil-C runtime inside this (glibc) process, and running Rust
+//! code on its threads.
+
+use std::cell::Cell;
+use std::collections::VecDeque;
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
+
+use fil_rust_sys::{FilcThread, Flavor, RawPtr, Shim, StartProgramFn};
+
+use crate::callback::Registry;
+use crate::handle::HandleTable;
+use crate::library::Library;
+use crate::ptr::FilPtr;
+use crate::types::{FilType, raw_add};
+use crate::{Error, Result, error};
+
+/// How to find and start a Fil-C runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Config {
+    flavor: Flavor,
+    root: PathBuf,
+    workers: usize,
+    args: Vec<String>,
+    search_path: Vec<PathBuf>,
+}
+
+impl Config {
+    /// A configuration for the distribution of `flavor` installed at `root`.
+    ///
+    /// For [`Flavor::Musl`], `root` is the directory containing `build/` and
+    /// `pizfix/`. For [`Flavor::Glibc`], it is the `/opt/fil` directory
+    /// (containing `bin/` and `lib/`).
+    pub fn new(flavor: Flavor, root: impl Into<PathBuf>) -> Config {
+        Config {
+            flavor,
+            root: root.into(),
+            workers: std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8),
+            args: vec![
+                std::env::args().next().unwrap_or_else(|| "fil-rust".to_string()),
+            ],
+            search_path: Vec::new(),
+        }
+    }
+
+    /// A configuration for the musl ("pizfix") distribution at `root`.
+    pub fn musl(root: impl Into<PathBuf>) -> Config {
+        Config::new(Flavor::Musl, root)
+    }
+
+    /// A configuration for the glibc ("/opt/fil") distribution at `root`.
+    pub fn glibc(root: impl Into<PathBuf>) -> Config {
+        Config::new(Flavor::Glibc, root)
+    }
+
+    /// Reads the configuration from the environment:
+    ///
+    /// * `FILC_FLAVOR`: `musl` (default) or `glibc`;
+    /// * `FILC_MUSL_ROOT` (or `FILC_ROOT`) / `FILC_GLIBC_ROOT`: the
+    ///   distribution root for the chosen flavor;
+    /// * `FIL_RUST_WORKERS`: number of executor threads (optional).
+    pub fn from_env() -> Result<Config> {
+        let flavor = match std::env::var("FILC_FLAVOR").as_deref() {
+            Err(_) | Ok("musl") | Ok("") => Flavor::Musl,
+            Ok("glibc") => Flavor::Glibc,
+            Ok(other) => return Err(Error::Load(format!("unknown FILC_FLAVOR {other:?}"))),
+        };
+        Config::from_env_for(flavor)
+    }
+
+    /// Like [`Config::from_env`], but for a specific flavor.
+    pub fn from_env_for(flavor: Flavor) -> Result<Config> {
+        let vars: &[&str] = match flavor {
+            Flavor::Musl => &["FILC_MUSL_ROOT", "FILC_ROOT"],
+            Flavor::Glibc => &["FILC_GLIBC_ROOT"],
+        };
+        let root = vars
+            .iter()
+            .find_map(|v| std::env::var_os(v))
+            .ok_or_else(|| Error::Load(format!("set {} to the Fil-C distribution root", vars[0])))?;
+        let mut config = Config::new(flavor, root);
+        if let Some(n) = std::env::var("FIL_RUST_WORKERS").ok().and_then(|v| v.parse().ok()) {
+            config = config.workers(n);
+        }
+        Ok(config)
+    }
+
+    /// Number of Fil-C threads that execute [`Runtime::run`] jobs (at least 1).
+    pub fn workers(mut self, workers: usize) -> Config {
+        self.workers = workers.max(1);
+        self
+    }
+
+    /// The `argv` the Fil-C side sees.
+    pub fn args<I, S>(mut self, args: I) -> Config
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args = args.into_iter().map(Into::into).collect();
+        if self.args.is_empty() {
+            self.args.push("fil-rust".to_string());
+        }
+        self
+    }
+
+    /// Adds a directory searched for the dependencies (`DT_NEEDED`) of
+    /// libraries opened with [`Runtime::load`].
+    pub fn search_path(mut self, dir: impl Into<PathBuf>) -> Config {
+        self.search_path.push(dir.into());
+        self
+    }
+
+    pub fn flavor(&self) -> Flavor {
+        self.flavor
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The directory holding the runtime (libpizlo) and the Fil-C libc.
+    pub fn lib_dir(&self) -> PathBuf {
+        match self.flavor {
+            Flavor::Musl => self.root.join("pizfix/lib"),
+            Flavor::Glibc => self.root.join("lib"),
+        }
+    }
+
+    pub(crate) fn search_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = self.search_path.clone();
+        dirs.push(self.lib_dir());
+        dirs
+    }
+
+    /// The Fil-C user libc objects, loaded at startup. The first one provides
+    /// `__libc_start_main`.
+    fn user_libs(&self) -> Vec<PathBuf> {
+        let dir = self.lib_dir();
+        let names: &[&str] = match self.flavor {
+            Flavor::Musl => &["libc.so"],
+            Flavor::Glibc => &["libc.so.6666", "libm.so.6666", "libdl.so.6662", "libpthread.so.6660"],
+        };
+        names.iter().map(|n| dir.join(n)).collect()
+    }
+}
+
+type Job = Box<dyn for<'f> FnOnce(&Fil<'f>) + Send + 'static>;
+
+pub(crate) struct Inner {
+    pub(crate) config: Config,
+    pub(crate) shim: Shim,
+    pub(crate) libc: Library,
+    pub(crate) runtime_lib: Library,
+    queue: Mutex<VecDeque<Job>>,
+    queue_cv: Condvar,
+    ready: Mutex<bool>,
+    ready_cv: Condvar,
+    pub(crate) handles: HandleTable,
+    pub(crate) callbacks: Registry,
+}
+
+static INNER: OnceLock<&'static Inner> = OnceLock::new();
+static SHIM: OnceLock<Shim> = OnceLock::new();
+static START_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// The Fil-C thread state of the current OS thread, if it is a Fil-C
+    /// thread currently running Rust code (an executor or a callback).
+    static CURRENT: Cell<*mut FilcThread> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+pub(crate) fn shim() -> Option<&'static Shim> {
+    SHIM.get()
+}
+
+pub(crate) fn current_thread() -> *mut FilcThread {
+    CURRENT.with(|c| c.get())
+}
+
+pub(crate) fn set_current_thread(thread: *mut FilcThread) -> *mut FilcThread {
+    CURRENT.with(|c| c.replace(thread))
+}
+
+/// A handle to the process-wide Fil-C runtime.
+///
+/// The runtime can be started once per process, with one flavor. Rust code
+/// that touches Fil-C runs on the runtime's own threads, through
+/// [`Runtime::run`] (blocking) or [`Runtime::spawn`]; each job receives a
+/// [`Fil`] token for the thread it runs on.
+#[derive(Clone, Copy)]
+pub struct Runtime {
+    inner: &'static Inner,
+}
+
+impl std::fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Runtime").field("config", &self.inner.config).finish()
+    }
+}
+
+impl Runtime {
+    /// Starts the Fil-C runtime, or returns the running one if it was started
+    /// with an equivalent configuration.
+    pub fn start(config: Config) -> Result<Runtime> {
+        let _guard = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(inner) = INNER.get() {
+            let same = inner.config.flavor == config.flavor && inner.config.root == config.root;
+            return if same { Ok(Runtime { inner }) } else { Err(Error::AlreadyStarted) };
+        }
+        let inner = unsafe { boot(config)? };
+        Ok(Runtime { inner })
+    }
+
+    /// Starts the runtime configured by [`Config::from_env`].
+    pub fn start_from_env() -> Result<Runtime> {
+        Runtime::start(Config::from_env()?)
+    }
+
+    /// The running runtime, if it has been started.
+    pub fn get() -> Option<Runtime> {
+        INNER.get().map(|&inner| Runtime { inner })
+    }
+
+    pub(crate) fn inner(self) -> &'static Inner {
+        self.inner
+    }
+
+    pub fn config(&self) -> &'static Config {
+        &self.inner.config
+    }
+
+    pub fn flavor(&self) -> Flavor {
+        self.inner.config.flavor
+    }
+
+    /// The Fil-C user libc, for calling its functions.
+    pub fn libc(&self) -> &'static Library {
+        &self.inner.libc
+    }
+
+    /// The Fil-C runtime library (`libpizlo`), for calling `z*` functions
+    /// from `<stdfil.h>`.
+    pub fn runtime_library(&self) -> &'static Library {
+        &self.inner.runtime_lib
+    }
+
+    /// Runs `f` on a Fil-C thread and returns its result.
+    ///
+    /// If called from a Fil-C thread that is already running Rust code (inside
+    /// a job or a callback), `f` runs right there in a nested scope; otherwise
+    /// it runs on one of the runtime's executor threads while this thread
+    /// waits. Panics in `f` propagate to the caller.
+    pub fn run<R, F>(&self, f: F) -> R
+    where
+        F: for<'f> FnOnce(&Fil<'f>) -> R + Send,
+        R: Send,
+    {
+        let thread = current_thread();
+        if !thread.is_null() {
+            return unsafe { run_inline(self.inner, thread, f) };
+        }
+        let (tx, rx) = mpsc::sync_channel::<std::thread::Result<R>>(1);
+        let job: Box<dyn for<'f> FnOnce(&Fil<'f>) + Send + '_> = Box::new(move |fil| {
+            let result = catch_unwind(AssertUnwindSafe(|| f(fil)));
+            let _ = tx.send(result);
+        });
+        // SAFETY: we block below until the job has run to completion (the job
+        // always sends, even if `f` panics), so nothing it borrows can be
+        // dropped while it is still in use.
+        let job: Job = unsafe { std::mem::transmute(job) };
+        self.inner.push_job(job);
+        match rx.recv() {
+            Ok(Ok(value)) => value,
+            Ok(Err(panic)) => resume_unwind(panic),
+            Err(_) => panic!("fil-rust: executor dropped a job"),
+        }
+    }
+
+    /// Runs `f` on a Fil-C executor thread in the background.
+    pub fn spawn<R, F>(&self, f: F) -> JoinHandle<R>
+    where
+        F: for<'f> FnOnce(&Fil<'f>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let (tx, rx) = mpsc::sync_channel::<std::thread::Result<R>>(1);
+        self.inner.push_job(Box::new(move |fil| {
+            let result = catch_unwind(AssertUnwindSafe(|| f(fil)));
+            let _ = tx.send(result);
+        }));
+        JoinHandle { rx }
+    }
+
+    /// Opens a Fil-C shared library (see [`Fil::load`]).
+    pub fn load(&self, path: impl AsRef<Path>) -> Result<Library> {
+        let path = path.as_ref().to_path_buf();
+        self.run(move |fil| fil.load(&path))
+    }
+
+    /// Flushes the Fil-C libc's stdio buffers (`fflush(NULL)`). This also
+    /// happens automatically when the process exits normally.
+    pub fn flush(&self) -> Result<()> {
+        self.run(|fil| fil.flush())
+    }
+}
+
+/// The result of [`Runtime::spawn`].
+pub struct JoinHandle<R> {
+    rx: mpsc::Receiver<std::thread::Result<R>>,
+}
+
+impl<R> JoinHandle<R> {
+    /// Waits for the job and returns its result, propagating a panic.
+    pub fn join(self) -> R {
+        match self.rx.recv() {
+            Ok(Ok(value)) => value,
+            Ok(Err(panic)) => resume_unwind(panic),
+            Err(_) => panic!("fil-rust: executor dropped a job"),
+        }
+    }
+
+    /// Waits up to `timeout` for the job.
+    pub fn join_timeout(self, timeout: Duration) -> std::result::Result<R, JoinHandle<R>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(panic)) => resume_unwind(panic),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(self),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("fil-rust: executor dropped a job"),
+        }
+    }
+}
+
+impl Inner {
+    fn push_job(&self, job: Job) {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(job);
+        self.queue_cv.notify_one();
+    }
+
+    fn next_job(&self) -> Job {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(job) = queue.pop_front() {
+                return job;
+            }
+            queue = self.queue_cv.wait(queue).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn mark_ready(&self) {
+        *self.ready.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.ready_cv.notify_all();
+    }
+}
+
+/// Runs `f` with a fresh `Fil` on `thread`, entering the runtime first if the
+/// thread is currently exited.
+unsafe fn run_inline<R, F>(inner: &'static Inner, thread: *mut FilcThread, f: F) -> R
+where
+    F: for<'f> FnOnce(&Fil<'f>) -> R,
+{
+    let shim = &inner.shim;
+    let was_entered = unsafe { (shim.fr_is_entered)(thread) } != 0;
+    if !was_entered {
+        unsafe { (shim.fr_enter)(thread) };
+    }
+    let result = in_native_frame(inner, thread, || {
+        let fil = unsafe { Fil::new(inner, thread) };
+        f(&fil)
+    });
+    if !was_entered {
+        unsafe { (shim.fr_exit)(thread) };
+    }
+    result
+}
+
+/// Runs `f` inside a new native frame on `thread` (which must be entered).
+/// Objects tracked while `f` runs are released afterwards. A panic in `f` is
+/// carried across the C frame and resumed here.
+pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(inner: &Inner, thread: *mut FilcThread, f: F) -> R {
+    struct Payload<F, R> {
+        f: Option<F>,
+        result: Option<std::thread::Result<R>>,
+    }
+
+    unsafe extern "C" fn trampoline<F: FnOnce() -> R, R>(arg: *mut c_void) {
+        let payload = unsafe { &mut *(arg as *mut Payload<F, R>) };
+        let f = payload.f.take().expect("trampoline called once");
+        payload.result = Some(catch_unwind(AssertUnwindSafe(f)));
+    }
+
+    let mut payload = Payload { f: Some(f), result: None };
+    unsafe {
+        (inner.shim.fr_with_native_frame)(
+            thread,
+            trampoline::<F, R>,
+            (&mut payload as *mut Payload<F, R>).cast(),
+        );
+    }
+    match payload.result.expect("native frame body ran") {
+        Ok(value) => value,
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
+unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) {
+    let inner = *INNER.get().expect("runtime initialized before executors start");
+    if is_main != 0 {
+        for _ in 1..inner.config.workers {
+            if unsafe { (inner.shim.fr_spawn_worker)(thread) } != 0 {
+                eprintln!("fil-rust: failed to spawn a Fil-C executor thread");
+            }
+        }
+        inner.mark_ready();
+    }
+    set_current_thread(thread);
+    loop {
+        unsafe { (inner.shim.fr_exit)(thread) };
+        let job = inner.next_job();
+        unsafe { (inner.shim.fr_enter)(thread) };
+        in_native_frame(inner, thread, || {
+            let fil = unsafe { Fil::new(inner, thread) };
+            inner.handles.flush_pending(&fil);
+            job(&fil);
+        });
+    }
+}
+
+extern "C" fn flush_at_exit() {
+    // Fil-C's own exit() has already flushed if we are on a Fil-C thread.
+    if !current_thread().is_null() {
+        return;
+    }
+    if let Some(rt) = Runtime::get() {
+        let _ = rt.spawn(|fil| fil.flush()).join_timeout(Duration::from_secs(5));
+    }
+}
+
+unsafe fn boot(config: Config) -> Result<&'static Inner> {
+    use fil_rust_sys::{dlopen_bytes, dlopen_path, dlsym_checked};
+
+    let flavor = config.flavor;
+    let unsupported = || {
+        Error::Unsupported(format!(
+            "support for the {flavor:?} flavor was not built (enable the `{}` feature)",
+            if flavor == Flavor::Musl { "musl" } else { "glibc" }
+        ))
+    };
+    let compat = flavor.compat_libs().ok_or_else(unsupported)?;
+    let shim_bytes = flavor.shim().ok_or_else(unsupported)?;
+
+    let lib_dir = config.lib_dir();
+    if !lib_dir.join("libpizlo.so").exists() {
+        return Err(Error::Load(format!(
+            "{} does not contain libpizlo.so; is {} a {flavor:?} Fil-C distribution?",
+            lib_dir.display(),
+            config.root.display()
+        )));
+    }
+
+    // Order matters: the compat stand-ins must be loaded before anything from
+    // the distribution, so that Fil-C objects bind to them by soname instead
+    // of pulling in the real yolo libc through their RUNPATH.
+    let global = libc::RTLD_NOW | libc::RTLD_GLOBAL;
+    for lib in compat {
+        unsafe { dlopen_bytes(lib.soname, lib.bytes, global) }.map_err(Error::Load)?;
+    }
+    let runtime_handle =
+        unsafe { dlopen_path(&lib_dir.join("libpizlo.so"), global) }.map_err(Error::Load)?;
+    let mut user_handles = Vec::new();
+    for path in config.user_libs() {
+        user_handles.push(unsafe { dlopen_path(&path, global) }.map_err(Error::Load)?);
+    }
+    crate::library::check_no_real_yolo_libc(flavor)?;
+
+    let shim_handle = unsafe { dlopen_bytes("libfilrust_shim.so", shim_bytes, libc::RTLD_NOW) }
+        .map_err(Error::Load)?;
+    let shim = unsafe { Shim::load(shim_handle) }.map_err(Error::Load)?;
+    let abi = unsafe { (shim.fr_abi_version)() };
+    if abi != fil_rust_sys::SHIM_ABI_VERSION {
+        return Err(Error::Load(format!("shim ABI version {abi} does not match the crate")));
+    }
+    let shim_is_glibc = unsafe { (shim.fr_runtime_is_glibc_flavor)() } != 0;
+    if shim_is_glibc != (flavor == Flavor::Glibc) {
+        return Err(Error::Load("runtime shim was built for the wrong flavor".into()));
+    }
+    let _ = SHIM.set(shim);
+
+    let start_program: StartProgramFn = unsafe {
+        std::mem::transmute(dlsym_checked(runtime_handle, "filc_start_program\0").map_err(Error::Load)?)
+    };
+    let libc_start_main: fil_rust_sys::Getter = unsafe {
+        std::mem::transmute(
+            dlsym_checked(user_handles[0], "pizlonated___libc_start_main\0").map_err(Error::Load)?,
+        )
+    };
+
+    let inner: &'static Inner = Box::leak(Box::new(Inner {
+        libc: Library::from_handle(user_handles[0], config.user_libs()[0].clone()),
+        runtime_lib: Library::from_handle(runtime_handle, lib_dir.join("libpizlo.so")),
+        config,
+        shim,
+        queue: Mutex::new(VecDeque::new()),
+        queue_cv: Condvar::new(),
+        ready: Mutex::new(false),
+        ready_cv: Condvar::new(),
+        handles: HandleTable::new(),
+        callbacks: Registry::new(),
+    }));
+    let _ = INNER.set(inner);
+    unsafe { (shim.fr_init)(thread_main_entry, crate::callback::callback_entry) };
+
+    // argv for the Fil-C side; it lives for the rest of the process.
+    let args: Vec<CString> = inner
+        .config
+        .args
+        .iter()
+        .map(|a| CString::new(a.as_str()).unwrap_or_else(|_| c"fil-rust".to_owned()))
+        .collect();
+    let argc = args.len() as c_int;
+    let mut argv: Vec<*mut c_char> = args.into_iter().map(CString::into_raw).collect();
+    argv.push(std::ptr::null_mut());
+    let argv = Box::leak(argv.into_boxed_slice()).as_mut_ptr() as usize;
+    let main_getter = shim.fr_main_getter;
+
+    // filc_start_program never returns: it parks the calling thread and runs
+    // the Fil-C program (whose `main` is our executor) on its own thread.
+    std::thread::Builder::new()
+        .name("fil-c-boot".into())
+        .spawn(move || unsafe {
+            start_program(argc, argv as *mut *mut c_char, libc_start_main, main_getter);
+        })
+        .map_err(|e| Error::Load(format!("spawning the boot thread: {e}")))?;
+
+    {
+        let mut ready = inner.ready.lock().unwrap_or_else(|e| e.into_inner());
+        while !*ready {
+            let (guard, timeout) = inner
+                .ready_cv
+                .wait_timeout(ready, Duration::from_secs(60))
+                .unwrap_or_else(|e| e.into_inner());
+            ready = guard;
+            if timeout.timed_out() && !*ready {
+                return Err(Error::Load("the Fil-C runtime did not start".into()));
+            }
+        }
+    }
+
+    let rt = Runtime { inner };
+    rt.run(|fil| -> Result<()> {
+        if unsafe { (fil.shim().fr_check_thread_layout)(fil.thread) } == 0 {
+            return Err(Error::Load("runtime shim disagrees with libpizlo on filc_thread".into()));
+        }
+        Ok(())
+    })?;
+    unsafe { libc::atexit(flush_at_exit) };
+    Ok(inner)
+}
+
+/// Proof that the current thread is a Fil-C thread inside the runtime, plus
+/// the scope `'f` that keeps the [`FilPtr`]s it hands out alive.
+///
+/// You get a `Fil` from [`Runtime::run`], [`Runtime::spawn`], or as the first
+/// argument of a [`Callback`](crate::Callback). It can't leave that closure,
+/// and it can't move to another thread.
+pub struct Fil<'f> {
+    pub(crate) inner: &'static Inner,
+    pub(crate) thread: *mut FilcThread,
+    _brand: PhantomData<(fn(&'f ()) -> &'f (), *mut ())>,
+}
+
+/// Chunk size for copies between Rust and Fil-C memory; the runtime gets a
+/// chance to reach a safepoint between chunks.
+const COPY_CHUNK: usize = 64 * 1024;
+
+impl<'f> Fil<'f> {
+    pub(crate) unsafe fn new(inner: &'static Inner, thread: *mut FilcThread) -> Fil<'f> {
+        Fil { inner, thread, _brand: PhantomData }
+    }
+
+    pub(crate) fn shim(&self) -> &'static Shim {
+        &self.inner.shim
+    }
+
+    /// The runtime this thread belongs to.
+    pub fn runtime(&self) -> Runtime {
+        Runtime { inner: self.inner }
+    }
+
+    /// Runs `f` in a nested scope. Pointers created inside are released when
+    /// it returns, which bounds memory use in long loops.
+    pub fn scope<R>(&self, f: impl for<'g> FnOnce(&Fil<'g>) -> R) -> R {
+        let inner = self.inner;
+        let thread = self.thread;
+        in_native_frame(inner, thread, || {
+            let fil = unsafe { Fil::new(inner, thread) };
+            f(&fil)
+        })
+    }
+
+    /// Leaves the runtime while running `f`, so that blocking or
+    /// long-running Rust code doesn't hold up the garbage collector.
+    ///
+    /// `f` must be `Send`, so it can't capture this `Fil` or any `FilPtr`:
+    /// Fil-C memory is off limits while exited. Pointers from the enclosing
+    /// scope stay alive.
+    pub fn exited<R>(&self, f: impl FnOnce() -> R + Send) -> R {
+        unsafe { (self.shim().fr_exit)(self.thread) };
+        let result = catch_unwind(AssertUnwindSafe(f));
+        unsafe { (self.shim().fr_enter)(self.thread) };
+        match result {
+            Ok(value) => value,
+            Err(panic) => resume_unwind(panic),
+        }
+    }
+
+    /// Lets the runtime reach a safepoint (garbage collection handshakes,
+    /// deferred signals). Call it in long-running loops that don't otherwise
+    /// call into Fil-C.
+    pub fn pollcheck(&self) {
+        unsafe { (self.shim().fr_pollcheck)(self.thread) };
+    }
+
+    /// The Fil-C user libc.
+    pub fn libc(&self) -> &'static Library {
+        &self.inner.libc
+    }
+
+    /// The Fil-C runtime library (`libpizlo`).
+    pub fn runtime_library(&self) -> &'static Library {
+        &self.inner.runtime_lib
+    }
+
+    /// Opens a Fil-C shared library.
+    ///
+    /// Dependencies that the dynamic loader wouldn't find on its own are looked
+    /// up in the configured search path and the distribution's `lib` directory.
+    pub fn load(&self, path: impl AsRef<Path>) -> Result<Library> {
+        let path = path.as_ref().to_path_buf();
+        let inner = self.inner;
+        // Library constructors enter the runtime themselves, so the loader
+        // must run while this thread is exited.
+        self.exited(move || crate::library::open(inner, &path))
+    }
+
+    /// Allocates `len` zeroed bytes of Fil-C memory.
+    pub fn alloc_bytes(&self, len: usize) -> Result<FilPtr<'f, u8>> {
+        Ok(FilPtr::from_raw(self.alloc_raw(len, 16)?))
+    }
+
+    /// Allocates memory for `count` zeroed elements of `T`.
+    pub fn alloc_zeroed<T: FilType>(&self, count: usize) -> Result<FilPtr<'f, T>> {
+        let size = count.checked_mul(T::SIZE).ok_or(Error::OutOfBounds)?;
+        Ok(FilPtr::from_raw(self.alloc_raw(size, T::ALIGN)?))
+    }
+
+    /// Allocates a `T` initialized to `value`.
+    pub fn alloc<T: FilType>(&self, value: &T::Value<'f>) -> Result<FilPtr<'f, T>> {
+        let ptr = self.alloc_zeroed::<T>(1)?;
+        ptr.write(self, value)?;
+        Ok(ptr)
+    }
+
+    /// Allocates an array initialized from `values`.
+    pub fn alloc_array<T: FilType>(&self, values: &[T::Value<'f>]) -> Result<FilPtr<'f, T>> {
+        let ptr = self.alloc_zeroed::<T>(values.len())?;
+        ptr.write_array(self, values)?;
+        Ok(ptr)
+    }
+
+    /// Allocates a copy of `bytes`.
+    pub fn bytes(&self, bytes: &[u8]) -> Result<FilPtr<'f, u8>> {
+        let ptr = self.alloc_bytes(bytes.len())?;
+        ptr.write_bytes(self, bytes)?;
+        Ok(ptr)
+    }
+
+    /// Allocates a NUL-terminated copy of `s`.
+    pub fn c_str(&self, s: &str) -> Result<FilPtr<'f, c_char>> {
+        if s.as_bytes().contains(&0) {
+            return Err(Error::InteriorNul);
+        }
+        let ptr = self.alloc_bytes(s.len() + 1)?;
+        ptr.write_bytes(self, s.as_bytes())?;
+        Ok(ptr.cast())
+    }
+
+    /// Allocates a copy of `s` (including its NUL terminator).
+    pub fn c_string(&self, s: &CStr) -> Result<FilPtr<'f, c_char>> {
+        Ok(self.bytes(s.to_bytes_with_nul())?.cast())
+    }
+
+    /// Requests a garbage collection cycle and waits for it to finish.
+    pub fn collect_garbage(&self) -> Result<()> {
+        let gc = self.runtime_library().function::<fn()>(self, "zgc_request_and_wait")?;
+        gc.call(self, ())
+    }
+
+    /// `fflush(NULL)` in the Fil-C libc.
+    pub fn flush(&self) -> Result<()> {
+        let fflush = self.libc().function::<fn(crate::Ptr) -> i32>(self, "fflush")?;
+        fflush.call(self, (FilPtr::null(),))?;
+        Ok(())
+    }
+
+    /// The Fil-C runtime's version number (`zversion()`).
+    pub fn version(&self) -> Result<u32> {
+        let zversion = self.runtime_library().function::<fn() -> u32>(self, "zversion")?;
+        zversion.call(self, ())
+    }
+
+    // ---- raw memory operations, shared by the typed API ----
+
+    pub(crate) fn alloc_raw(&self, size: usize, align: usize) -> Result<RawPtr> {
+        if size > isize::MAX as usize / 2 || !align.is_power_of_two() {
+            return Err(Error::OutOfBounds);
+        }
+        Ok(unsafe { (self.shim().fr_allocate)(self.thread, size, align) })
+    }
+
+    pub(crate) fn copy_out_raw(&self, at: RawPtr, buf: &mut [u8]) -> Result<()> {
+        let shim = self.shim();
+        error::check(unsafe { (shim.fr_check)(at, buf.len(), 0) })?;
+        let mut done = 0;
+        while done < buf.len() {
+            let n = (buf.len() - done).min(COPY_CHUNK);
+            error::check(unsafe {
+                (shim.fr_copy_out)(self.thread, raw_add(at, done), buf[done..].as_mut_ptr().cast(), n)
+            })?;
+            done += n;
+            if done < buf.len() {
+                self.pollcheck();
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn copy_in_raw(&self, at: RawPtr, bytes: &[u8]) -> Result<()> {
+        let shim = self.shim();
+        error::check(unsafe { (shim.fr_check)(at, bytes.len(), 1) })?;
+        let mut done = 0;
+        while done < bytes.len() {
+            let n = (bytes.len() - done).min(COPY_CHUNK);
+            error::check(unsafe {
+                (shim.fr_copy_in)(self.thread, raw_add(at, done), bytes[done..].as_ptr().cast(), n)
+            })?;
+            done += n;
+            if done < bytes.len() {
+                self.pollcheck();
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn memmove_raw(&self, dst: RawPtr, src: RawPtr, len: usize) -> Result<()> {
+        error::check(unsafe { (self.shim().fr_memmove)(self.thread, dst, src, len) })
+    }
+
+    pub(crate) fn strlen_raw(&self, at: RawPtr) -> Result<usize> {
+        let mut len = 0usize;
+        error::check(unsafe { (self.shim().fr_strlen)(at, &mut len) })?;
+        Ok(len)
+    }
+
+    pub(crate) fn load_ptr_raw(&self, at: RawPtr) -> Result<RawPtr> {
+        let mut out = RawPtr::NULL;
+        error::check(unsafe { (self.shim().fr_load_ptr)(self.thread, at, &mut out) })?;
+        Ok(out)
+    }
+
+    pub(crate) fn store_ptr_raw(&self, at: RawPtr, value: RawPtr) -> Result<()> {
+        error::check(unsafe { (self.shim().fr_store_ptr)(self.thread, at, value) })
+    }
+
+    /// Acquires `mutex` without blocking the garbage collector: if it's
+    /// contended, the thread leaves the runtime while it waits.
+    pub(crate) fn lock<'m, T>(&self, mutex: &'m Mutex<T>) -> std::sync::MutexGuard<'m, T> {
+        match mutex.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                unsafe { (self.shim().fr_exit)(self.thread) };
+                let guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+                unsafe { (self.shim().fr_enter)(self.thread) };
+                guard
+            }
+        }
+    }
+}

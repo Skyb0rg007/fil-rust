@@ -1,7 +1,17 @@
+[workspace]
+members = ["fil-rust-sys"]
+
 [package]
 name = "fil-rust"
 version = "0.1.0"
 edition = "2024"
 description = "A Rust FFI for Fil-C shared libraries"
 
+[features]
+default = ["musl"]
+musl = ["fil-rust-sys/musl"]
+glibc = ["fil-rust-sys/glibc"]
+
 [dependencies]
+fil-rust-sys = { path = "fil-rust-sys", default-features = false }
+libc = "0.2"
