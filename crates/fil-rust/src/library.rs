@@ -149,12 +149,57 @@ fn preload_dependencies(
     Ok(())
 }
 
+/// Libraries that only one flavor's Fil-C objects are linked against.
+fn flavor_libraries(flavor: Flavor) -> &'static [&'static str] {
+    match flavor {
+        Flavor::Musl => &["libc.so", "libyoloc.so"],
+        Flavor::Glibc => &[
+            "libc.so.6666",
+            "libm.so.6666",
+            "libdl.so.6662",
+            "libpthread.so.6660",
+            "libyolocimpl.so",
+            "libyolomimpl.so",
+        ],
+    }
+}
+
+/// Checks that `path` is a Fil-C library of `flavor` before anything in it
+/// runs. Loading a native library would run its native constructors and
+/// hand out its symbols as if they were checked Fil-C code; loading one of
+/// the other flavor would bring a second Fil-C libc into the process.
+pub(crate) fn check_library(flavor: Flavor, path: &Path) -> Result<()> {
+    let data = std::fs::read(path).map_err(|e| Error::Load(format!("reading {}: {e}", path.display())))?;
+    if !data.starts_with(b"\x7fELF") {
+        return Err(Error::Load(format!("{} is not an ELF shared library", path.display())));
+    }
+    let needed = elf::needed(&data);
+    if !needed.iter().any(|n| n == "libpizlo.so") {
+        return Err(Error::Load(format!(
+            "{} is not a Fil-C library (it isn't linked against the Fil-C runtime, libpizlo.so)",
+            path.display()
+        )));
+    }
+    let other = match flavor {
+        Flavor::Musl => Flavor::Glibc,
+        Flavor::Glibc => Flavor::Musl,
+    };
+    if let Some(lib) = needed.iter().find(|n| flavor_libraries(other).contains(&n.as_str())) {
+        return Err(Error::Load(format!(
+            "{} was built for the {other:?} flavor of Fil-C (it needs {lib}), but the runtime runs the {flavor:?} flavor",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Opens a library. Must run on a Fil-C thread that is *exited*: Fil-C
 /// constructors enter the runtime themselves.
 pub(crate) fn open(inner: &Inner, path: &Path) -> Result<Library> {
     if !path.is_file() {
         return Err(Error::Load(format!("{} does not exist", path.display())));
     }
+    check_library(inner.config.flavor(), path)?;
     let mut visited = Vec::new();
     preload_dependencies(&inner.config.search_dirs(), path, &mut visited)?;
     let handle = unsafe { dlopen_path(path, libc::RTLD_NOW | libc::RTLD_LOCAL) }.map_err(Error::Load)?;

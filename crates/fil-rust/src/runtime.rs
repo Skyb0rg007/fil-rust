@@ -125,6 +125,10 @@ impl Config {
 
     /// Adds a directory searched for the dependencies (`DT_NEEDED`) of
     /// libraries opened with [`Runtime::load`].
+    ///
+    /// A dependency found here is loaded first, and then satisfies the
+    /// `DT_NEEDED` entry through its soname, so it must have one
+    /// (`-Wl,-soname,libfoo.so`).
     pub fn search_path(mut self, dir: impl Into<PathBuf>) -> Config {
         self.search_path.push(dir.into());
         self
