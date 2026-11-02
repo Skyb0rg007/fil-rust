@@ -186,6 +186,8 @@ pub mod __private {
 ///     pub struct Demo {
 ///         fn add(a: i32, b: i32) -> i32;
 ///         fn greet(name: Ptr<c_char>);
+///         /// `int counter;`
+///         static counter: i32;
 ///     }
 /// }
 ///
@@ -193,41 +195,76 @@ pub mod __private {
 /// let rt = Runtime::start_from_env()?;
 /// let demo = rt.run(|fil| Demo::load(fil, "libdemo.so"))?;
 /// let sum = rt.run(|fil| demo.add(fil, 2, 3))?;
+/// rt.run(|fil| demo.counter(fil).write(fil, &sum))?;
 /// # Ok(())
 /// # }
 /// ```
 ///
-/// The struct holds the [`Library`] and one [`Function`] per declaration,
-/// all looked up when it is created (so a missing symbol is reported early).
+/// The struct holds the [`Library`] and one [`Function`] per `fn`
+/// declaration, all looked up when it is created (so a missing symbol is
+/// reported early). A `static name: T;` declaration becomes a method
+/// returning a [`FilPtr<'f, T>`] to the global variable, which is checked to
+/// exist (and to be data) at the same time.
 /// It is `Send + Sync + Clone`. Each method takes the [`Fil`] followed by the
 /// arguments as their Rust values ([`FilType::Value`]).
 #[macro_export]
 macro_rules! foreign {
     (
         $(#[$meta:meta])*
-        $vis:vis struct $name:ident {
-            $(
-                $(#[$fmeta:meta])*
-                fn $func:ident ( $($arg:ident : $aty:ty),* $(,)? ) $(-> $ret:ty)? ;
-            )*
-        }
+        $vis:vis struct $name:ident { $($body:tt)* }
+    ) => {
+        $crate::foreign!(@parse [$(#[$meta])*] [$vis] $name [] [] $($body)*);
+    };
+
+    // Sorts the items into functions and globals.
+    (@parse $m:tt $v:tt $name:ident [$($fns:tt)*] $statics:tt
+        $(#[$fmeta:meta])* fn $func:ident ( $($arg:ident : $aty:ty),* $(,)? ) $(-> $ret:ty)? ;
+        $($rest:tt)*
+    ) => {
+        $crate::foreign!(@parse $m $v $name
+            [$($fns)* { [$(#[$fmeta])*] $func [$($arg : $aty),*] [$crate::foreign!(@ret $($ret)?)] }]
+            $statics $($rest)*);
+    };
+    // `static mut` means the same as `static`: writes are checked anyway.
+    (@parse $m:tt $v:tt $name:ident $fns:tt $statics:tt
+        $(#[$smeta:meta])* static mut $global:ident : $gty:ty ;
+        $($rest:tt)*
+    ) => {
+        $crate::foreign!(@parse $m $v $name $fns $statics
+            $(#[$smeta])* static $global : $gty ; $($rest)*);
+    };
+    (@parse $m:tt $v:tt $name:ident $fns:tt [$($statics:tt)*]
+        $(#[$smeta:meta])* static $global:ident : $gty:ty ;
+        $($rest:tt)*
+    ) => {
+        $crate::foreign!(@parse $m $v $name $fns
+            [$($statics)* { [$(#[$smeta])*] $global [$gty] }]
+            $($rest)*);
+    };
+
+    (@parse [$(#[$meta:meta])*] [$vis:vis] $name:ident
+        [$({ [$(#[$fmeta:meta])*] $func:ident [$($arg:ident : $aty:ty),*] [$ret:ty] })*]
+        [$({ [$(#[$smeta:meta])*] $global:ident [$gty:ty] })*]
     ) => {
         $(#[$meta])*
         #[derive(Clone, Debug)]
         $vis struct $name {
             library: $crate::Library,
-            $( $func: $crate::Function<fn($($aty),*) -> $crate::foreign!(@ret $($ret)?)>, )*
+            $( $func: $crate::Function<fn($($aty),*) -> $ret>, )*
         }
 
         #[allow(dead_code, clippy::too_many_arguments)]
         impl $name {
-            /// Opens the library at `path` and looks up its functions.
+            /// Opens the library at `path` and looks up its functions and
+            /// globals.
             $vis fn load(fil: &$crate::Fil<'_>, path: impl ::std::convert::AsRef<::std::path::Path>) -> $crate::Result<Self> {
                 Self::from_library(fil, fil.load(path)?)
             }
 
-            /// Looks up the functions in an already loaded library.
+            /// Looks up the functions and globals in an already loaded
+            /// library.
             $vis fn from_library(fil: &$crate::Fil<'_>, library: $crate::Library) -> $crate::Result<Self> {
+                $( library.global::<$gty>(fil, stringify!($global))?; )*
                 Ok($name {
                     $( $func: library.function(fil, stringify!($func))?, )*
                     library,
@@ -245,12 +282,22 @@ macro_rules! foreign {
                     &self,
                     fil: &$crate::Fil<'f>,
                     $($arg: <$aty as $crate::FilType>::Value<'f>),*
-                ) -> $crate::Result<<$crate::foreign!(@ret $($ret)?) as $crate::FilType>::Value<'f>> {
+                ) -> $crate::Result<<$ret as $crate::FilType>::Value<'f>> {
                     self.$func.call(fil, ($($arg,)*))
+                }
+            )*
+
+            $(
+                $(#[$smeta])*
+                $vis fn $global<'f>(&self, fil: &$crate::Fil<'f>) -> $crate::FilPtr<'f, $gty> {
+                    self.library
+                        .global::<$gty>(fil, stringify!($global))
+                        .expect(concat!("global ", stringify!($global), " was found when the library was loaded"))
                 }
             )*
         }
     };
+
     (@ret) => { () };
     (@ret $ret:ty) => { $ret };
 }

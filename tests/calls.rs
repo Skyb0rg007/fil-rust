@@ -219,10 +219,62 @@ fn linked_lists() {
     });
 }
 
+fil_rust::foreign! {
+    /// Functions and globals of basic.c, declared together.
+    struct Globals {
+        static global_counter: i32;
+        fn bump() -> i32;
+        /// `const char *global_name`
+        static mut global_name: Ptr<c_char>;
+        static global_point: Pt;
+        fn get_counter() -> i32;
+        static global_array: [i32; 4];
+    }
+}
+
+fil_rust::foreign! {
+    struct MissingGlobal {
+        static no_such_global: i32;
+    }
+}
+
+fil_rust::foreign! {
+    struct FunctionAsGlobal {
+        static add: i32;
+    }
+}
+
+/// Serializes the tests that write `global_counter`. Taken outside
+/// `Runtime::run`, never while inside the runtime.
+static COUNTER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn globals_declared_with_foreign() {
+    let b = basic();
+    let _guard = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+    runtime().run(|fil| {
+        let g = Globals::from_library(fil, b.library().clone()).unwrap();
+        g.global_counter(fil).write(fil, &99).unwrap();
+        assert_eq!(g.bump(fil).unwrap(), 100);
+        assert_eq!(g.get_counter(fil).unwrap(), 100);
+        assert_eq!(g.global_counter(fil).read(fil).unwrap(), 100);
+        assert_eq!(g.global_point(fil).read(fil).unwrap(), Pt { x: 3, y: 4 });
+        assert_eq!(g.global_array(fil).read(fil).unwrap(), [10, 20, 30, 40]);
+        assert!(!g.global_name(fil).read(fil).unwrap().is_null());
+
+        // Globals are checked when the interface is created.
+        let missing = MissingGlobal::from_library(fil, b.library().clone()).unwrap_err();
+        assert!(matches!(missing, Error::MissingSymbol(ref s) if s == "no_such_global"), "{missing:?}");
+        let special = FunctionAsGlobal::from_library(fil, b.library().clone()).unwrap_err();
+        assert_eq!(special, Error::SpecialObject);
+    });
+}
+
 #[test]
 fn global_variables() {
     let rt = runtime();
     let b = basic();
+    let _guard = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
     rt.run(|fil| {
         let lib = b.library();
         let counter = lib.global::<i32>(fil, "global_counter").unwrap();

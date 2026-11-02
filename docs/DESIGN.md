@@ -387,7 +387,8 @@ convention's buffers, following clang's x86-64 lowering as Fil-C sees it:
 Return values are read back as words and pointers through checked accessors.
 `DynCall` builds a call argument by argument when the signature is only known
 at run time. `foreign!` declares a struct with one typed method per C
-function, looked up when the struct is created.
+function and per global variable (`static name: T;` yields a
+`FilPtr<'f, T>`), all looked up when the struct is created.
 
 **Exceptions.** `fr_call` pushes a Fil-C frame whose origin has a
 personality that catches every exception. If a C++ exception escapes the
