@@ -9,7 +9,7 @@
 {
   stdenvNoCC,
   fetchurl,
-  writeShellScript,
+  bash,
   bubblewrap,
 }:
 
@@ -35,9 +35,20 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     tar -xf fil.tar.xz -C $out
     for tool in filcc fil++; do
       cat > $out/bin/$tool <<WRAPPER
-    #!/bin/sh
-    # Runs /opt/fil/bin/$tool with this package mounted at /opt/fil.
-    exec ${bubblewrap}/bin/bwrap --dev-bind / / --tmpfs /opt --bind $out/fil /opt/fil \\
+    #!${bash}/bin/bash
+    # Runs /opt/fil/bin/$tool with this package mounted at /opt/fil, in a root
+    # that has everything else in / but not /opt (which might not exist, and
+    # can't be made in a read-only root such as the Nix build sandbox's).
+    args=(--tmpfs /)
+    for entry in /*; do
+      if [ "\$entry" = /opt ]; then continue; fi
+      if [ -L "\$entry" ]; then
+        args+=(--symlink "\$(readlink "\$entry")" "\$entry")
+      else
+        args+=(--dev-bind "\$entry" "\$entry")
+      fi
+    done
+    exec ${bubblewrap}/bin/bwrap "\''${args[@]}" --dir /opt --bind $out/fil /opt/fil \\
       /opt/fil/bin/$tool "\$@"
     WRAPPER
       chmod +x $out/bin/$tool
