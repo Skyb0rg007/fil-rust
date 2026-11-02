@@ -1,0 +1,5 @@
+error: expected `size` or `align`
+ --> tests/ui/fail/derive_unknown_attribute.rs:3:7
+  |
+3 | #[fil(sise = 8)]
+  |       ^^^^

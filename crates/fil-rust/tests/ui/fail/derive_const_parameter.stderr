@@ -1,0 +1,5 @@
+error: FilType can't be derived for structs with type or const parameters
+ --> tests/ui/fail/derive_const_parameter.rs:2:15
+  |
+2 | struct Buffer<const N: usize> {
+  |               ^^^^^^^^^^^^^^

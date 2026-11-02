@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: alignment of Pair doesn't match #[fil(align)]
+ --> tests/ui/fail/derive_align_mismatch.rs:2:10
+  |
+2 | #[derive(fil_rust::FilType)]
+  |          ^^^^^^^^^^^^^^^^^ evaluation of `__FIL_CHECK_Pair` failed here

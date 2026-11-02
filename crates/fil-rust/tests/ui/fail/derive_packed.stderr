@@ -1,0 +1,5 @@
+error: FilType lays structs out with C's default rules; packed and over-aligned structs aren't supported
+ --> tests/ui/fail/derive_packed.rs:4:11
+  |
+4 | #[repr(C, packed)]
+  |           ^^^^^^

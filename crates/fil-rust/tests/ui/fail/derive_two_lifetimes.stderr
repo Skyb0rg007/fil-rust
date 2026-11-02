@@ -1,0 +1,5 @@
+error: FilType structs take at most one lifetime
+ --> tests/ui/fail/derive_two_lifetimes.rs:3:16
+  |
+3 | struct Two<'a, 'b> {
+  |                ^^

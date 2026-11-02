@@ -1,0 +1,5 @@
+error: FilType fields need a fixed size; for a flexible array member, use a fixed-length array or a pointer
+ --> tests/ui/fail/derive_unsized_field.rs:5:11
+  |
+5 |     data: [u8],
+  |           ^^^^

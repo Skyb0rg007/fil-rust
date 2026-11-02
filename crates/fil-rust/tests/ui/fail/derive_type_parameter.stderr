@@ -1,0 +1,5 @@
+error: FilType can't be derived for structs with type or const parameters
+ --> tests/ui/fail/derive_type_parameter.rs:3:16
+  |
+3 | struct Wrapper<T> {
+  |                ^

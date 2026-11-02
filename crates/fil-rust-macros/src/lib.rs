@@ -28,6 +28,9 @@ use syn::{Data, DeriveInput, Fields, GenericParam, Index, Lifetime, parse_macro_
 ///
 /// `#[fil(size = N, align = M)]` on the struct adds compile-time checks
 /// against the sizes the C compiler reports.
+///
+/// Packed and over-aligned C structs aren't supported, so `#[repr(packed)]`
+/// and `#[repr(align(N))]` are refused.
 #[proc_macro_derive(FilType, attributes(fil))]
 pub fn derive_fil_type(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -83,6 +86,27 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         return Err(syn::Error::new_spanned(w, "FilType can't be derived with a where clause"));
     }
 
+    // The layout follows C's rules for the field types alone. A packed or
+    // over-aligned C struct needs a layout this doesn't compute, so a Rust
+    // `repr` asking for one is refused rather than silently ignored.
+    for attr in input.attrs.iter().filter(|a| a.path().is_ident("repr")) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("packed") || meta.path.is_ident("align") {
+                Err(meta.error(
+                    "FilType lays structs out with C's default rules; packed and over-aligned structs aren't supported",
+                ))
+            } else {
+                // `C`, `Rust`, or an integer type (only meaningful on enums,
+                // which are refused below); any parenthesized arguments are skipped.
+                if meta.input.peek(syn::token::Paren) {
+                    let _content;
+                    syn::parenthesized!(_content in meta.input);
+                }
+                Ok(())
+            }
+        })?;
+    }
+
     let Data::Struct(data) = &input.data else {
         return Err(syn::Error::new(Span::call_site(), "FilType can only be derived for structs"));
     };
@@ -107,6 +131,15 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             .collect(),
         Fields::Unit => Vec::new(),
     };
+
+    for (_, ty) in &fields {
+        if matches!(ty, syn::Type::Slice(_)) || matches!(ty, syn::Type::Path(p) if p.path.is_ident("str")) {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "FilType fields need a fixed size; for a flexible array member, use a fixed-length array or a pointer",
+            ));
+        }
+    }
 
     let krate = quote!(::fil_rust);
     let private = quote!(#krate::__private);
