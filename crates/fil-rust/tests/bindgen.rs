@@ -13,6 +13,11 @@ use api_ffi::*;
 use common::{fixture, runtime};
 use fil_rust::{Callback, FilFn, FilPtr, Ptr};
 
+/// Held by the tests that change the library's globals, which the
+/// `opaque_handles_and_structs_with_pointers` test checks. Taken outside
+/// `run`, since a thread must not block while it is in Fil-C.
+static GLOBALS: Mutex<()> = Mutex::new(());
+
 fn load(fil: &fil_rust::Fil<'_>) -> Api {
     Api::load(fil, fixture("api.c")).expect("loading api.c")
 }
@@ -53,6 +58,7 @@ fn structs_by_value() {
 
 #[test]
 fn opaque_handles_and_structs_with_pointers() {
+    let _globals = GLOBALS.lock().unwrap();
     runtime().run(|fil| {
         let api = load(fil);
         let reg: FilPtr<'_, registry> = api.registry_new(fil).unwrap();
@@ -90,6 +96,7 @@ fn opaque_handles_and_structs_with_pointers() {
 
 #[test]
 fn function_pointer_typedefs_are_callbacks() {
+    let _globals = GLOBALS.lock().unwrap();
     runtime().run(|fil| {
         let api = load(fil);
         let reg = api.registry_new(fil).unwrap();
