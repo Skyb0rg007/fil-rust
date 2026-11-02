@@ -1,0 +1,7 @@
+error: lifetime may not live long enough
+  --> tests/ui/fail/callback_returns_arg_beyond_call.rs:13:13
+   |
+12 |         let _cb = Callback::<fn(Ptr<u8>)>::new(fil, |_, (p,)| {
+   |                                                      - has type `&Fil<'1>`
+13 |             SEEN.with(|s| *s.borrow_mut() = Some(p));
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'1` must outlive `'static`

@@ -1,0 +1,12 @@
+error[E0521]: borrowed data escapes outside of function
+  --> tests/ui/fail/place_cannot_be_kept.rs:10:5
+   |
+ 9 | fn keep<'f>(at: Place<'f>) {
+   |         --  -- `at` is a reference that is only valid in the function body
+   |         |
+   |         lifetime `'f` defined here
+10 |     KEPT.with(|k| *k.borrow_mut() = Some(at));
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     `at` escapes the function body here
+   |     argument requires that `'f` must outlive `'static`

@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/ptr_escapes_scope.rs:5:39
+  |
+5 |         let inner = fil.scope(|inner| inner.c_str("short-lived").unwrap());
+  |                                ------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                                |    |
+  |                                |    return type of closure is FilPtr<'2, i8>
+  |                                has type `&Fil<'1>`

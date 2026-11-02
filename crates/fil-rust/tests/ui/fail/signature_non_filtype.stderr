@@ -1,0 +1,24 @@
+error[E0277]: the trait bound `String: FilType` is not satisfied
+ --> tests/ui/fail/signature_non_filtype.rs:5:39
+  |
+5 |         let f = fil.libc().function::<fn(String) -> i32>(fil, "puts").unwrap();
+  |                            --------   ^^^^^^^^^^^^^^^^^ the trait `FilType` is not implemented for `String`
+  |                            |
+  |                            required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `FilType`:
+            ()
+            FilFn<'x, Sig>
+            FilPtr<'x, T>
+            [T; N]
+            bool
+            f32
+            f64
+            fn() -> R
+          and $N others
+  = note: required for `fn(String) -> i32` to implement `FilSig`
+note: required by a bound in `Library::function`
+ --> src/library.rs
+  |
+  |     pub fn function<Sig: FilSig>(&self, fil: &Fil<'_>, name: &str) -> Result<Function<Sig>> {
+  |                          ^^^^^^ required by this bound in `Library::function`

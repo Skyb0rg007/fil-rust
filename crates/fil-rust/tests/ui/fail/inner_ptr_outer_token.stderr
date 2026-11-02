@@ -1,0 +1,11 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/inner_ptr_outer_token.rs:6:5
+  |
+5 | fn smuggle<'o, 'i>(_outer: &Fil<'o>, p: FilPtr<'i, u8>) -> FilPtr<'o, u8> {
+  |            --  -- lifetime `'i` defined here
+  |            |
+  |            lifetime `'o` defined here
+6 |     p
+  |     ^ function was supposed to return data with lifetime `'o` but it is returning data with lifetime `'i`
+  |
+  = help: consider adding the following bound: `'i: 'o`

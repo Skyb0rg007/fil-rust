@@ -1,0 +1,7 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/ptr_to_static.rs:8:16
+  |
+7 |     rt.run(|fil| {
+  |             --- has type `&Fil<'1>`
+8 |         let p: Ptr<u8> = fil.alloc_bytes(1).unwrap();
+  |                ^^^^^^^ type annotation requires that `'1` must outlive `'static`

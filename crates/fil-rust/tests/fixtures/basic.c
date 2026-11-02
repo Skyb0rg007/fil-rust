@@ -70,7 +70,8 @@ char **split_words(const char *s, int *count) {
     char *copy = strdup(s);
     int cap = 4, n = 0;
     char **out = malloc(sizeof(char *) * cap);
-    for (char *tok = strtok(copy, " "); tok; tok = strtok(NULL, " ")) {
+    char *save;
+    for (char *tok = strtok_r(copy, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
         if (n + 1 >= cap) out = realloc(out, sizeof(char *) * (cap *= 2));
         out[n++] = strdup(tok);
     }

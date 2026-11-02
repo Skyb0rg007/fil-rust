@@ -1,0 +1,13 @@
+error[E0521]: borrowed data escapes outside of closure
+ --> tests/ui/fail/ptr_into_outer_vec.rs:8:27
+  |
+7 |         let mut kept: Vec<FilPtr<'_, u8>> = vec![fil.alloc_bytes(1).unwrap()];
+  |             -------- `kept` declared here, outside of the closure body
+8 |         fil.scope(|inner| kept.push(inner.alloc_bytes(1).unwrap()));
+  |                    -----  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `inner` escapes the closure body here
+  |                    |
+  |                    `inner` is a reference that is only valid in the closure body
+  |
+  = note: requirement occurs because of a mutable reference to `Vec<FilPtr<'_, u8>>`
+  = note: mutable references are invariant over their type parameter
+  = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

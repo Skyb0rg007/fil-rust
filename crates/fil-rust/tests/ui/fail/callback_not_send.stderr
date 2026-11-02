@@ -1,0 +1,49 @@
+error[E0277]: `Rc<i32>` cannot be sent between threads safely
+ --> tests/ui/fail/callback_not_send.rs:9:56
+  |
+9 |         let _cb = Callback::<fn(i32) -> i32>::new(fil, move |_, (x,)| x + *counter).unwrap();
+  |                   -------------------------------      --------------^^^^^^^^^^^^^
+  |                   |                                    |
+  |                   |                                    `Rc<i32>` cannot be sent between threads safely
+  |                   |                                    within this `{closure@$DIR/tests/ui/fail/callback_not_send.rs:9:56: 9:70}`
+  |                   required by a bound introduced by this call
+  |
+  = help: within `{closure@$DIR/tests/ui/fail/callback_not_send.rs:9:56: 9:70}`, the trait `Send` is not implemented for `Rc<i32>`
+note: required because it's used within this closure
+ --> tests/ui/fail/callback_not_send.rs:9:56
+  |
+9 |         let _cb = Callback::<fn(i32) -> i32>::new(fil, move |_, (x,)| x + *counter).unwrap();
+  |                                                        ^^^^^^^^^^^^^^
+note: required by a bound in `Callback::<Sig>::new`
+ --> src/callback.rs
+  |
+  |     pub fn new<F>(fil: &Fil<'_>, f: F) -> Result<Callback<Sig>>
+  |            --- required by a bound in this associated function
+  |     where
+  |         F: for<'f> Fn(&Fil<'f>, Sig::Args<'f>) -> Sig::Ret<'f> + Send + Sync + 'static,
+  |                                                                  ^^^^ required by this bound in `Callback::<Sig>::new`
+
+error[E0277]: `Rc<i32>` cannot be shared between threads safely
+ --> tests/ui/fail/callback_not_send.rs:9:56
+  |
+9 |         let _cb = Callback::<fn(i32) -> i32>::new(fil, move |_, (x,)| x + *counter).unwrap();
+  |                   -------------------------------      --------------^^^^^^^^^^^^^
+  |                   |                                    |
+  |                   |                                    `Rc<i32>` cannot be shared between threads safely
+  |                   |                                    within this `{closure@$DIR/tests/ui/fail/callback_not_send.rs:9:56: 9:70}`
+  |                   required by a bound introduced by this call
+  |
+  = help: within `{closure@$DIR/tests/ui/fail/callback_not_send.rs:9:56: 9:70}`, the trait `Sync` is not implemented for `Rc<i32>`
+note: required because it's used within this closure
+ --> tests/ui/fail/callback_not_send.rs:9:56
+  |
+9 |         let _cb = Callback::<fn(i32) -> i32>::new(fil, move |_, (x,)| x + *counter).unwrap();
+  |                                                        ^^^^^^^^^^^^^^
+note: required by a bound in `Callback::<Sig>::new`
+ --> src/callback.rs
+  |
+  |     pub fn new<F>(fil: &Fil<'_>, f: F) -> Result<Callback<Sig>>
+  |            --- required by a bound in this associated function
+  |     where
+  |         F: for<'f> Fn(&Fil<'f>, Sig::Args<'f>) -> Sig::Ret<'f> + Send + Sync + 'static,
+  |                                                                         ^^^^ required by this bound in `Callback::<Sig>::new`

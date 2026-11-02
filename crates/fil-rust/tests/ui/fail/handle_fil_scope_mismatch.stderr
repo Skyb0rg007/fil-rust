@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/handle_fil_scope_mismatch.rs:5:37
+  |
+5 |         let p = outer.scope(|inner| inner.alloc_bytes(1).unwrap());
+  |                              ------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                              |    |
+  |                              |    return type of closure is FilPtr<'2, u8>
+  |                              has type `&Fil<'1>`

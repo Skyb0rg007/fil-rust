@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/raw_ptr_not_accepted.rs:10:45
+   |
+10 |         let _ = <u64 as FilType>::read(fil, forged);
+   |                 ----------------------      ^^^^^^ expected `Place<'_>`, found `RawPtr`
+   |                 |
+   |                 arguments to this function are incorrect
+   |
+note: associated function defined here
+  --> src/types.rs
+   |
+   |     fn read<'f>(fil: &Fil<'f>, at: Place<'f>) -> Result<Self::Value<'f>>;
+   |        ^^^^

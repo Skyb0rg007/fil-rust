@@ -1,0 +1,14 @@
+error[E0505]: cannot move out of `buf` because it is borrowed
+ --> tests/ui/fail/buf_slice_outlives_share.rs:6:12
+  |
+4 |     let buf = rt.run(|fil| fil.buf(8).unwrap());
+  |         --- binding `buf` declared here
+5 |     let bytes: &[u8] = &buf;
+  |                        ---- borrow of `buf` occurs here
+6 |     rt.run(move |fil| {
+  |            ^^^^^^^^^^ move out of `buf` occurs here
+7 |         let _shared = buf.share(fil);
+  |                       --- move occurs due to use in closure
+8 |     });
+9 |     let _ = bytes[0];
+  |             -------- borrow later used here

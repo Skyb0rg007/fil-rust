@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/fail/signature_wrong_arity.rs:6:31
+  |
+6 |         let _ = abs.call(fil, (1, 2));
+  |                     ----      ^^^^^^ expected a tuple with 1 element, found one with 2 elements
+  |                     |
+  |                     arguments to this method are incorrect
+  |
+  = note: expected tuple `(i32,)`
+             found tuple `(i32, {integer})`
+note: method defined here
+ --> src/call.rs
+  |
+  |     pub fn call<'f>(&self, fil: &Fil<'f>, args: Sig::Args<'f>) -> Result<Sig::Ret<'f>> {
+  |            ^^^^

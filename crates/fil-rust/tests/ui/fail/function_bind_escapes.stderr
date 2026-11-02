@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/function_bind_escapes.rs:9:35
+  |
+9 |         let f = fil.scope(|inner| strlen.bind(inner));
+  |                            ------ ^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                            |    |
+  |                            |    return type of closure is FilFn<'2, fn(FilPtr<'_, i8>) -> usize>
+  |                            has type `&Fil<'1>`

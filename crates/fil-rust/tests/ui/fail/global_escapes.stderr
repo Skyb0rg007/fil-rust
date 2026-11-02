@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/global_escapes.rs:5:35
+  |
+5 |         let p = fil.scope(|inner| fil.libc().global::<i32>(inner, "errno").unwrap());
+  |                            ------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                            |    |
+  |                            |    return type of closure is FilPtr<'2, i32>
+  |                            has type `&Fil<'1>`

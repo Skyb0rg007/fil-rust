@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: size of Pair doesn't match #[fil(size)]
+ --> tests/ui/fail/derive_size_mismatch.rs:2:10
+  |
+2 | #[derive(fil_rust::FilType)]
+  |          ^^^^^^^^^^^^^^^^^ evaluation of `__FIL_CHECK_Pair` failed here

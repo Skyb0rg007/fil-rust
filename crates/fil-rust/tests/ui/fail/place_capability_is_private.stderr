@@ -1,0 +1,11 @@
+error[E0616]: field `raw` of struct `Place` is private
+ --> tests/ui/fail/place_capability_is_private.rs:6:8
+  |
+6 |     at.raw = other.raw;
+  |        ^^^ private field
+
+error[E0616]: field `raw` of struct `Place` is private
+ --> tests/ui/fail/place_capability_is_private.rs:6:20
+  |
+6 |     at.raw = other.raw;
+  |                    ^^^ private field

@@ -19,6 +19,8 @@ fil-rust-sys = { path = "crates/fil-rust-sys", default-features = false }
 bindgen = "0.73.2"
 libc = "0.2"
 prettyplease = "0.3.0"
+proptest = "1.12.0"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
 syn = "3.0.9"
+trybuild = "1.0.122"

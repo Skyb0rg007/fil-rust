@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/handle_get_escapes.rs:6:35
+  |
+6 |         let p = fil.scope(|inner| handle.get(inner));
+  |                            ------ ^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                            |    |
+  |                            |    return type of closure is FilPtr<'2, u8>
+  |                            has type `&Fil<'1>`

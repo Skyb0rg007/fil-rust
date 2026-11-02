@@ -1,0 +1,35 @@
+error[E0373]: closure may outlive the current function, but it borrows `name`, which is owned by the current function
+ --> tests/ui/fail/spawn_borrows_local.rs:5:24
+  |
+5 |     let job = rt.spawn(|fil| fil.c_str(&name).unwrap().addr());
+  |                        ^^^^^            ---- `name` is borrowed here
+  |                        |
+  |                        may outlive borrowed value `name`
+  |
+note: function requires argument type to outlive `'static`
+ --> tests/ui/fail/spawn_borrows_local.rs:5:15
+  |
+5 |     let job = rt.spawn(|fil| fil.c_str(&name).unwrap().addr());
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: to force the closure to take ownership of `name` (and any other referenced variables), use the `move` keyword
+  |
+5 |     let job = rt.spawn(move |fil| fil.c_str(&name).unwrap().addr());
+  |                        ++++
+
+error[E0505]: cannot move out of `name` because it is borrowed
+ --> tests/ui/fail/spawn_borrows_local.rs:6:10
+  |
+5 |     let job = rt.spawn(|fil| fil.c_str(&name).unwrap().addr());
+  |               ------------------------------------------------
+  |               |        |                |
+  |               |        |                borrow occurs due to use in closure
+  |               |        borrow of `name` occurs here
+  |               argument requires that `name` is borrowed for `'static`
+6 |     drop(name);
+  |          ^^^^ move out of `name` occurs here
+  |
+note: requirement that the value outlives `'static` introduced here
+ --> src/runtime.rs
+  |
+  |         F: for<'f> FnOnce(&Fil<'f>) -> R + Send + 'static,
+  |                                                   ^^^^^^^

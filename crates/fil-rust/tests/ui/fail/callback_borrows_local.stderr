@@ -1,0 +1,15 @@
+error[E0597]: `offset` does not live long enough
+  --> tests/ui/fail/callback_borrows_local.rs:8:70
+   |
+ 6 |     let offset = 5;
+   |         ------ binding `offset` declared here
+ 7 |     rt.run(|fil| {
+   |            ----- value captured here
+ 8 |         let _cb = Callback::<fn(i32) -> i32>::new(fil, |_, (x,)| x + offset).unwrap();
+   |                   ---------------------------------------------------^^^^^^-
+   |                   |                                                  |
+   |                   |                                                  borrowed value does not live long enough
+   |                   argument requires that `offset` is borrowed for `'static`
+ 9 |     });
+10 | }
+   | - `offset` dropped here while still borrowed

@@ -1,0 +1,12 @@
+error[E0382]: borrow of moved value: `buf`
+ --> tests/ui/fail/buf_used_after_share.rs:8:5
+  |
+4 |     let mut buf = rt.run(|fil| fil.buf(8).unwrap());
+  |         ------- move occurs because `buf` has type `FilBuf`, which does not implement the `Copy` trait
+5 |     rt.run(|fil| {
+  |            ----- value moved into closure here
+6 |         let _shared = buf.share(fil);
+  |                       --- variable moved due to use in closure
+7 |     });
+8 |     buf[0] = 1;
+  |     ^^^ value borrowed here after move

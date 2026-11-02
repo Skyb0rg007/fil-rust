@@ -14,3 +14,7 @@ derive = ["dep:fil-rust-macros"]
 fil-rust-sys = { workspace = true }
 fil-rust-macros = { workspace = true, optional = true }
 libc = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+trybuild = { workspace = true }

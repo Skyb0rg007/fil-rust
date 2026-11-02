@@ -1,0 +1,7 @@
+error: FilType can only be derived for structs
+ --> tests/ui/fail/derive_enum.rs:2:10
+  |
+2 | #[derive(fil_rust::FilType)]
+  |          ^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `fil_rust::FilType` (in Nightly builds, run with -Z macro-backtrace for more info)

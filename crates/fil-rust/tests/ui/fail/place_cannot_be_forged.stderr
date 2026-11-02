@@ -1,0 +1,15 @@
+warning: unused import: `FilType`
+ --> tests/ui/fail/place_cannot_be_forged.rs:2:21
+  |
+2 | use fil_rust::{Fil, FilType, Place};
+  |                     ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0560]: struct `Place<'_>` has no field named `addr`
+ --> tests/ui/fail/place_cannot_be_forged.rs:5:13
+  |
+5 |     Place { addr }
+  |             ^^^^ `Place<'_>` does not have this field
+  |
+  = note: all struct fields are already assigned

@@ -1,0 +1,5 @@
+error[E0616]: field `words` of struct `DynArgs` is private
+ --> tests/ui/fail/dyn_args_cannot_be_built.rs:8:13
+  |
+8 |         out.words.push(0x1000);
+  |             ^^^^^ private field

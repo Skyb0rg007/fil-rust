@@ -1,0 +1,23 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/foreign_wrong_argument.rs:12:31
+   |
+12 |         let _ = math.abs(fil, 1.5f64);
+   |                      ---      ^^^^^^ expected `i32`, found `f64`
+   |                      |
+   |                      arguments to this method are incorrect
+   |
+note: method defined here
+  --> tests/ui/fail/foreign_wrong_argument.rs:4:12
+   |
+ 2 | / fil_rust::foreign! {
+ 3 | |     struct Math {
+ 4 | |         fn abs(x: i32) -> i32;
+   | |            ^^^
+ 5 | |     }
+ 6 | | }
+   | |_-
+help: change the type of the numeric literal from `f64` to `i32`
+   |
+12 -         let _ = math.abs(fil, 1.5f64);
+12 +         let _ = math.abs(fil, 1i32);
+   |

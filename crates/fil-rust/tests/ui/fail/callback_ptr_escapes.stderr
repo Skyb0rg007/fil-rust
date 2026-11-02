@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/callback_ptr_escapes.rs:8:35
+  |
+8 |         let f = fil.scope(|inner| cb.get(inner));
+  |                            ------ ^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                            |    |
+  |                            |    return type of closure is FilFn<'2, fn(i32) -> i32>
+  |                            has type `&Fil<'1>`

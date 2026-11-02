@@ -1,0 +1,14 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/word_cannot_be_kept.rs:9:13
+  |
+7 |         let word = fil.scope(|inner| {
+  |                               ------ return type of closure is Word<'2>
+  |                               |
+  |                               has type `&Fil<'1>`
+8 |             let p = inner.alloc_bytes(1).unwrap();
+9 |             <FilPtr<'static, u8> as FilType>::to_word(&p).unwrap()
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |
+  = note: requirement occurs because of the type `Word<'_>`, which makes the generic argument `'_` invariant
+  = note: the struct `Word<'f>` is invariant over the parameter `'f`
+  = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
