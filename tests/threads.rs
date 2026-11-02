@@ -33,8 +33,9 @@ fn many_rust_threads_share_a_fil_c_mutex() {
 #[test]
 fn spawned_jobs_run_concurrently() {
     let rt = runtime();
-    let n = rt.config().worker_count().min(4);
-    // `n` jobs that each wait for all the others prove they run in parallel.
+    // More jobs than initial executors, each waiting for all the others:
+    // this only finishes if they all run at once, so the pool must grow.
+    let n = rt.config().worker_count() + 4;
     let barrier = Arc::new(Barrier::new(n));
     let jobs: Vec<_> = (0..n)
         .map(|i| {
@@ -118,10 +119,11 @@ fn panics_propagate_to_the_caller() {
     let msg = r.unwrap_err();
     assert_eq!(msg.downcast_ref::<&str>(), Some(&"boom in a job"));
     // The executor survives.
-    assert_eq!(rt.run(|fil| basic().add(fil, 1, 1).unwrap()), 2);
+    let b = basic();
+    assert_eq!(rt.run(|fil| b.add(fil, 1, 1).unwrap()), 2);
     let r = std::panic::catch_unwind(|| rt.spawn(|_fil| panic!("boom in a spawned job")).join());
     assert!(r.is_err());
-    assert_eq!(rt.run(|fil| basic().add(fil, 2, 2).unwrap()), 4);
+    assert_eq!(rt.run(|fil| b.add(fil, 2, 2).unwrap()), 4);
 }
 
 #[test]
@@ -129,11 +131,12 @@ fn borrowing_from_the_caller() {
     let rt = runtime();
     let words = vec!["alpha".to_string(), "beta".to_string()];
     let mut lengths = Vec::new();
+    let b = basic();
     // `run` blocks, so the job may borrow (even mutably) from the caller.
     rt.run(|fil| {
         for w in &words {
             let s = fil.c_str(w).unwrap();
-            lengths.push(basic().my_strlen(fil, s).unwrap());
+            lengths.push(b.my_strlen(fil, s).unwrap());
         }
     });
     assert_eq!(lengths, vec![5, 4]);

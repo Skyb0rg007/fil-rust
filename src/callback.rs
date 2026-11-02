@@ -12,7 +12,7 @@ use fil_rust_sys::FilcThread;
 use crate::call::{FilFn, FilSig};
 use crate::handle::FilHandle;
 use crate::ptr::{FilPtr, Opaque};
-use crate::runtime::{Inner, set_current_thread};
+use crate::runtime::{Inner, lock_anywhere, set_current_thread};
 use crate::{Fil, Result};
 
 trait Erased: Send + Sync {
@@ -45,11 +45,6 @@ pub(crate) struct Registry {
 impl Registry {
     pub(crate) fn new() -> Registry {
         Registry { map: Mutex::new(HashMap::new()), next: AtomicU64::new(1) }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.map.lock().unwrap().len()
     }
 }
 
@@ -147,7 +142,10 @@ impl<Sig: FilSig> Callback<Sig> {
 
 impl<Sig: FilSig> Drop for Callback<Sig> {
     fn drop(&mut self) {
-        self.inner.callbacks.map.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        let removed = lock_anywhere(self.inner, &self.inner.callbacks.map).remove(&self.id);
+        // Drop the closure after releasing the lock: its destructor may do
+        // anything, including creating or dropping other callbacks.
+        drop(removed);
     }
 }
 

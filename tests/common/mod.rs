@@ -98,10 +98,18 @@ pub fn config() -> Config {
 
 /// The runtime, started on first use.
 pub fn runtime() -> Runtime {
+    // Debugging aid: let a debugger attach to a hung test process.
+    if std::env::var_os("FIL_RUST_ALLOW_PTRACE").is_some() {
+        unsafe { libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY) };
+    }
     Runtime::start(config()).expect("starting the Fil-C runtime")
 }
 
 /// The `basic.c` fixture, loaded once per test process.
+///
+/// Call this *outside* `Runtime::run`: blocking on the `OnceLock` inside a
+/// job would block a thread that is inside the Fil-C runtime, which stalls
+/// the garbage collector (see "Blocking" in the crate docs).
 pub fn basic() -> &'static basic::Basic {
     static BASIC: std::sync::OnceLock<basic::Basic> = std::sync::OnceLock::new();
     BASIC.get_or_init(|| runtime().run(|fil| basic::load(fil)))

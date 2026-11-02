@@ -26,6 +26,7 @@ pub struct Config {
     flavor: Flavor,
     root: PathBuf,
     workers: usize,
+    max_workers: usize,
     args: Vec<String>,
     search_path: Vec<PathBuf>,
 }
@@ -41,6 +42,7 @@ impl Config {
             flavor,
             root: root.into(),
             workers: std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8),
+            max_workers: 256,
             args: vec![
                 std::env::args().next().unwrap_or_else(|| "fil-rust".to_string()),
             ],
@@ -90,9 +92,20 @@ impl Config {
         Ok(config)
     }
 
-    /// Number of Fil-C threads that execute [`Runtime::run`] jobs (at least 1).
+    /// Number of Fil-C threads started up front to execute [`Runtime::run`]
+    /// jobs (at least 1).
     pub fn workers(mut self, workers: usize) -> Config {
         self.workers = workers.max(1);
+        self.max_workers = self.max_workers.max(self.workers);
+        self
+    }
+
+    /// Upper bound on executor threads. When every executor is busy (for
+    /// example, blocked in [`Fil::exited`]) and jobs are waiting, the runtime
+    /// starts more executors, up to this many. Default: 256.
+    pub fn max_workers(mut self, max_workers: usize) -> Config {
+        self.max_workers = max_workers.max(1);
+        self.workers = self.workers.min(self.max_workers);
         self
     }
 
@@ -120,9 +133,14 @@ impl Config {
         self.flavor
     }
 
-    /// The number of executor threads.
+    /// The number of executor threads started up front.
     pub fn worker_count(&self) -> usize {
         self.workers
+    }
+
+    /// The maximum number of executor threads.
+    pub fn max_worker_count(&self) -> usize {
+        self.max_workers
     }
 
     pub fn root(&self) -> &Path {
@@ -157,13 +175,25 @@ impl Config {
 
 type Job = Box<dyn for<'f> FnOnce(&Fil<'f>) + Send + 'static>;
 
+/// The executor pool's shared state.
+struct Queue {
+    jobs: VecDeque<Job>,
+    /// Executors waiting for a job.
+    idle: usize,
+    /// Executors started or requested.
+    total: usize,
+    /// Executors requested from the spawner but not yet waiting for jobs.
+    starting: usize,
+}
+
 pub(crate) struct Inner {
     pub(crate) config: Config,
     pub(crate) shim: Shim,
     pub(crate) libc: Library,
     pub(crate) runtime_lib: Library,
-    queue: Mutex<VecDeque<Job>>,
+    queue: Mutex<Queue>,
     queue_cv: Condvar,
+    spawn_cv: Condvar,
     ready: Mutex<bool>,
     ready_cv: Condvar,
     pub(crate) handles: HandleTable,
@@ -321,8 +351,11 @@ pub struct JoinHandle<R> {
 
 impl<R> JoinHandle<R> {
     /// Waits for the job and returns its result, propagating a panic.
+    ///
+    /// Inside a job or callback, the thread leaves the runtime while it
+    /// waits.
     pub fn join(self) -> R {
-        match self.rx.recv() {
+        match outside_runtime(|| self.rx.recv()) {
             Ok(Ok(value)) => value,
             Ok(Err(panic)) => resume_unwind(panic),
             Err(_) => panic!("fil-rust: executor dropped a job"),
@@ -331,7 +364,7 @@ impl<R> JoinHandle<R> {
 
     /// Waits up to `timeout` for the job.
     pub fn join_timeout(self, timeout: Duration) -> std::result::Result<R, JoinHandle<R>> {
-        match self.rx.recv_timeout(timeout) {
+        match outside_runtime(|| self.rx.recv_timeout(timeout)) {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(panic)) => resume_unwind(panic),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(self),
@@ -342,18 +375,50 @@ impl<R> JoinHandle<R> {
 
 impl Inner {
     fn push_job(&self, job: Job) {
-        self.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(job);
+        // `spawn` may be called from inside a job.
+        let mut queue = lock_anywhere(self, &self.queue);
+        queue.jobs.push_back(job);
+        // Grow the pool if every executor is busy, so that jobs that block
+        // can't starve the others (or deadlock waiting on them).
+        if queue.jobs.len() > queue.idle + queue.starting && queue.total < self.config.max_workers {
+            queue.total += 1;
+            queue.starting += 1;
+            self.spawn_cv.notify_one();
+        }
+        drop(queue);
         self.queue_cv.notify_one();
     }
 
-    fn next_job(&self) -> Job {
+    fn next_job(&self, first: bool) -> Job {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if first {
+            queue.starting -= 1;
+        }
         loop {
-            if let Some(job) = queue.pop_front() {
+            if let Some(job) = queue.jobs.pop_front() {
                 return job;
             }
+            queue.idle += 1;
             queue = self.queue_cv.wait(queue).unwrap_or_else(|e| e.into_inner());
+            queue.idle -= 1;
         }
+    }
+
+    /// Blocks until executors have been requested; returns how many.
+    fn wait_for_spawn_requests(&self, already_spawned: &mut usize) -> usize {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        while queue.total == *already_spawned {
+            queue = self.spawn_cv.wait(queue).unwrap_or_else(|e| e.into_inner());
+        }
+        let n = queue.total - *already_spawned;
+        *already_spawned = queue.total;
+        n
+    }
+
+    fn spawn_failed(&self, count: usize) {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.total -= count;
+        queue.starting -= count;
     }
 
     fn mark_ready(&self) {
@@ -415,18 +480,36 @@ pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(inner: &Inner, thread: *mut F
 unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) {
     let inner = *INNER.get().expect("runtime initialized before executors start");
     if is_main != 0 {
-        in_native_frame(inner, thread, || {
-            let fil = unsafe { Fil::new(inner, thread) };
-            if let Err(e) = spawn_workers(&fil, inner.config.workers - 1) {
-                eprintln!("fil-rust: failed to spawn Fil-C executor threads: {e}");
-            }
-        });
-        inner.mark_ready();
+        // The main Fil-C thread starts the executors, then stays around to
+        // start more on demand (only a Fil-C thread can create Fil-C threads).
+        let mut spawned = {
+            let mut queue = inner.queue.lock().unwrap_or_else(|e| e.into_inner());
+            queue.total = inner.config.workers;
+            queue.starting = inner.config.workers;
+            queue.total
+        };
+        let mut request = spawned;
+        loop {
+            in_native_frame(inner, thread, || {
+                let fil = unsafe { Fil::new(inner, thread) };
+                if let Err(e) = spawn_workers(&fil, request) {
+                    eprintln!("fil-rust: failed to start Fil-C executor threads: {e}");
+                    inner.spawn_failed(request);
+                    spawned -= request;
+                }
+            });
+            inner.mark_ready();
+            unsafe { (inner.shim.fr_exit)(thread) };
+            request = inner.wait_for_spawn_requests(&mut spawned);
+            unsafe { (inner.shim.fr_enter)(thread) };
+        }
     }
     set_current_thread(thread);
+    let mut first = true;
     loop {
         unsafe { (inner.shim.fr_exit)(thread) };
-        let job = inner.next_job();
+        let job = inner.next_job(first);
+        first = false;
         unsafe { (inner.shim.fr_enter)(thread) };
         in_native_frame(inner, thread, || {
             let fil = unsafe { Fil::new(inner, thread) };
@@ -526,8 +609,9 @@ unsafe fn boot(config: Config) -> Result<&'static Inner> {
         runtime_lib: Library::from_handle(runtime_handle, lib_dir.join("libpizlo.so")),
         config,
         shim,
-        queue: Mutex::new(VecDeque::new()),
+        queue: Mutex::new(Queue { jobs: VecDeque::new(), idle: 0, total: 0, starting: 0 }),
         queue_cv: Condvar::new(),
+        spawn_cv: Condvar::new(),
         ready: Mutex::new(false),
         ready_cv: Condvar::new(),
         handles: HandleTable::new(),
@@ -810,6 +894,49 @@ impl<'f> Fil<'f> {
                 unsafe { (self.shim().fr_enter)(self.thread) };
                 guard
             }
+        }
+    }
+}
+
+/// Runs blocking code `f`. If this is a Fil-C thread inside the runtime,
+/// it leaves the runtime while `f` runs (a thread must never block while
+/// entered; see [`lock_anywhere`]).
+pub(crate) fn outside_runtime<R>(f: impl FnOnce() -> R) -> R {
+    let thread = current_thread();
+    let shim = match shim() {
+        Some(shim) if !thread.is_null() && unsafe { (shim.fr_is_entered)(thread) } != 0 => shim,
+        _ => return f(),
+    };
+    unsafe { (shim.fr_exit)(thread) };
+    let result = catch_unwind(AssertUnwindSafe(f));
+    unsafe { (shim.fr_enter)(thread) };
+    match result {
+        Ok(value) => value,
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
+/// Acquires `mutex` from any thread (for `Drop` impls, which have no `Fil`).
+///
+/// A thread inside the runtime must never block while entered: the garbage
+/// collector's handshakes would wait for it, and lock holders that re-enter
+/// the runtime could deadlock with it. So on such a thread, a contended lock
+/// is waited for outside the runtime.
+pub(crate) fn lock_anywhere<'m, T>(inner: &Inner, mutex: &'m Mutex<T>) -> std::sync::MutexGuard<'m, T> {
+    match mutex.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let thread = current_thread();
+            let entered = !thread.is_null() && unsafe { (inner.shim.fr_is_entered)(thread) } != 0;
+            if entered {
+                unsafe { (inner.shim.fr_exit)(thread) };
+            }
+            let guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+            if entered {
+                unsafe { (inner.shim.fr_enter)(thread) };
+            }
+            guard
         }
     }
 }

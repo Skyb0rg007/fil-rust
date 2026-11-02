@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use fil_rust_sys::RawPtr;
 
 use crate::ptr::{FilPtr, Opaque};
-use crate::runtime::Inner;
+use crate::runtime::{Inner, lock_anywhere};
 use crate::{Error, Fil, Result, error};
 
 struct HandleState {
@@ -60,12 +60,12 @@ impl HandleTable {
         out
     }
 
-    pub(crate) fn release(&self, index: usize) {
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).push(index);
+    pub(crate) fn release(&self, inner: &Inner, index: usize) {
+        lock_anywhere(inner, &self.pending).push(index);
     }
 
     pub(crate) fn flush_pending(&self, fil: &Fil<'_>) {
-        let indices = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        let indices = std::mem::take(&mut *fil.lock(&self.pending));
         if indices.is_empty() {
             return;
         }
@@ -74,12 +74,6 @@ impl HandleTable {
             unsafe { (fil.shim().fr_root_set)(fil.thread, index, RawPtr::NULL) };
             state.free.push(index);
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn live(&self) -> usize {
-        let state = self.state.lock().unwrap();
-        state.next - state.free.len()
     }
 }
 
@@ -121,7 +115,7 @@ impl<T: ?Sized> FilHandle<T> {
 
 impl<T: ?Sized> Drop for FilHandle<T> {
     fn drop(&mut self) {
-        self.inner.handles.release(self.index);
+        self.inner.handles.release(self.inner, self.index);
     }
 }
 
@@ -204,7 +198,7 @@ impl std::ops::DerefMut for FilBuf {
 
 impl Drop for FilBuf {
     fn drop(&mut self) {
-        self.inner.handles.release(self.index);
+        self.inner.handles.release(self.inner, self.index);
     }
 }
 

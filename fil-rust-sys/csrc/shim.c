@@ -495,18 +495,133 @@ int fr_cc_get_ptr(filc_thread* thread, size_t size, size_t offset, filc_ptr* out
 
 /* Calls `function` through its generic entrypoint with the `argument_size`
    bytes of arguments already placed in the cc buffers. */
+/* ---- Exceptions -------------------------------------------------------------
+
+   Calls from Rust run under a frame whose personality claims every exception
+   in the search phase, like a catch (...). An exception that escapes the
+   callee is therefore unwound (running destructors on the way) back to that
+   frame and reported as FR_EXCEPTION, instead of reaching std::terminate. */
+
+#define FR_URC_HANDLER_FOUND 6
+#define FR_URC_INSTALL_CONTEXT 7
+#define FR_UA_SEARCH_PHASE 1
+#define FR_UA_HANDLER_FRAME 4
+#define FR_URC_FOREIGN_EXCEPTION_CAUGHT 1
+
+FR_DECLARE_FUNCTION_OBJECT(fr_personality_object, fr_personality_thunk);
+
+static filc_ptr fr_personality_getter(filc_thread* thread, const filc_origin* origin)
+{
+    PAS_UNUSED_PARAM(thread);
+    PAS_UNUSED_PARAM(origin);
+    return fr_function_object_ptr(&fr_personality_object);
+}
+
+static const filc_function_origin fr_call_function_origin = {
+    .base = {
+        .function = "fil_rust_call",
+        .filename = "<runtime>",
+        .num_lowers_ish = 0
+    },
+    .personality_getter = fr_personality_getter,
+    .can_throw = false,
+    .can_catch = true,
+    .num_setjmps = 0,
+    .num_stack_auxes = 0
+};
+
+static const filc_origin_with_eh fr_call_origin = {
+    .base = {
+        .origin_node = &fr_call_function_origin.base,
+        .line = 0,
+        .column = 0
+    },
+    .eh_data_getter = NULL
+};
+
+/* personality(int version, int actions, uint64 class, void* exception, void* context) */
+static pizlonated_return_value fr_personality_thunk(filc_thread* thread, void* callee_lower,
+                                                    size_t argument_size)
+{
+    PAS_UNUSED_PARAM(callee_lower);
+    uint64_t actions = 0;
+    if (fr_cc_get_word(thread, argument_size, 8, &actions) != FR_OK)
+        filc_internal_panic(NULL, "fil-rust: malformed personality call.");
+    uint64_t result;
+    if (actions & FR_UA_SEARCH_PHASE)
+        result = FR_URC_HANDLER_FOUND;
+    else
+        result = FR_URC_INSTALL_CONTEXT;
+    filc_thread_ensure_zero_cc_total_buffer(thread, 8);
+    fr_cc_set_word(thread, 8, 0, result);
+    pizlonated_return_value ret = { .has_exception = false, .return_size = 8 };
+    return ret;
+}
+
+static pizlonated_return_value fr_raw_call(filc_thread* thread, filc_ptr function,
+                                           size_t argument_size)
+{
+    filc_check_function_call(function);
+    pizlonated_function entry = ((filc_function*)filc_ptr_ptr(function))->generic_entrypoint;
+    return entry(thread, filc_ptr_lower(function), argument_size);
+}
+
+/* Destroys a caught exception the way a foreign catch does: by calling its
+   exception_cleanup(_URC_FOREIGN_EXCEPTION_CAUGHT, exception). */
+static void fr_dispose_exception(filc_thread* thread, filc_ptr exception)
+{
+    if (fr_check_access(exception, 16, 0) != FR_OK)
+        return;
+    filc_ptr cleanup;
+    if (fr_load_ptr(thread, filc_ptr_with_offset(exception, 8), &cleanup) != FR_OK)
+        return;
+    if (fr_check_function(cleanup) != FR_OK)
+        return;
+    filc_thread_ensure_zero_cc_total_buffer(thread, 16);
+    fr_cc_set_word(thread, 16, 0, FR_URC_FOREIGN_EXCEPTION_CAUGHT);
+    fr_cc_set_ptr(thread, 16, 8, exception);
+    pizlonated_return_value result = fr_raw_call(thread, cleanup, 16);
+    if (result.has_exception)
+        filc_internal_panic(NULL, "fil-rust: exception cleanup threw.");
+}
+
 int fr_call(filc_thread* thread, filc_ptr function, size_t argument_size, size_t* return_size)
 {
     *return_size = 0;
     int status = fr_check_function(function);
     if (status)
         return status;
-    filc_check_function_call(function);
+
+    struct {
+        FILC_FRAME_BODY;
+    } actual_frame;
+    pas_zero_memory(&actual_frame, sizeof(actual_frame));
+    filc_frame* frame = (filc_frame*)&actual_frame;
+    frame->origin = &fr_call_origin.base;
+    filc_push_frame(thread, frame);
+
     filc_lock_top_native_frame(thread);
-    pizlonated_function entry = ((filc_function*)filc_ptr_ptr(function))->generic_entrypoint;
-    pizlonated_return_value result = entry(thread, filc_ptr_lower(function), argument_size);
+    pizlonated_return_value result = fr_raw_call(thread, function, argument_size);
     filc_unlock_top_native_frame(thread);
-    *return_size = result.return_size;
+
+    if (result.has_exception) {
+        if (thread->found_frame_for_unwind != frame)
+            filc_internal_panic(NULL, "fil-rust: unwinding did not stop at the Rust boundary.");
+        if (!filc_landing_pad(thread))
+            filc_internal_panic(NULL, "fil-rust: landing pad refused the exception.");
+        unsigned index;
+        for (index = FILC_NUM_UNWIND_REGISTERS; index--;)
+            filc_flight_ptr_store(thread, thread->unwind_registers + index, filc_ptr_forge_null());
+        filc_ptr exception = filc_flight_ptr_load(thread, &thread->exception_object_ptr);
+        filc_thread_track_object(thread, filc_ptr_object(exception));
+        filc_flight_ptr_store(thread, &thread->exception_object_ptr, filc_ptr_forge_null());
+        filc_flight_ptr_store(thread, &thread->unwind_context_ptr, filc_ptr_forge_null());
+        thread->found_frame_for_unwind = NULL;
+        fr_dispose_exception(thread, exception);
+    }
+
+    filc_pop_frame(thread, frame);
+    *return_size = result.has_exception ? 0 : result.return_size;
     return result.has_exception ? FR_EXCEPTION : FR_OK;
 }
 
