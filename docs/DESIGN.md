@@ -495,4 +495,7 @@ the boot layout of each flavor; and bindings generated from headers.
   host (a Fil-C executable serving calls over shared memory) would let Rust
   survive them, at the cost of copying.
 - **aarch64.** Everything but the struct-ABI classifier is
-  architecture-neutral; only x86-64 is implemented and tested.
+  architecture-neutral; only x86-64 is implemented and tested, and other
+  targets are rejected at build time. The glibc distribution is x86-64 only;
+  an aarch64 port would need the classifier for Fil-C's aarch64 lowering and
+  a test setup for the musl distribution's aarch64 build.
