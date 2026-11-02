@@ -276,7 +276,13 @@ garbage collector can't reclaim an object in the middle of an access.
    never returns, so it runs on a dedicated std thread. The user libc
    initializes itself (stdio, environ, constructors) through its own
    `__libc_start_main` and then calls the "main" that `fr_main_getter`
-   provides: a shim function that calls back into Rust.
+   provides: a shim function that calls back into Rust. The flavors differ
+   here: musl's runtime parks the boot thread in `pause()` and runs `main`
+   on a new thread, while glibc's runs `main` on the boot thread itself.
+   fil-rust works either way, and `tests/boot.rs` checks the resulting
+   thread layout. Once inside, a check that the shim's view of
+   `filc_thread` matches the runtime's (same thread, entered, correct tid,
+   stack limit set) guards against a mismatched shim.
 4. **Becomes the spawner.** The Fil-C main thread starts the initial executor
    threads and then serves requests to start more (below). It never returns,
    since returning from Fil-C `main` would call `exit()`.

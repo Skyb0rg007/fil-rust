@@ -479,6 +479,10 @@ pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(inner: &Inner, thread: *mut F
 
 unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) {
     let inner = *INNER.get().expect("runtime initialized before executors start");
+    // Name the thread for debuggers and `ps`. (On glibc, filc_start_program
+    // runs `main` on the boot thread itself; on musl, on a new thread.)
+    let name: &CStr = if is_main != 0 { c"fil-c-main" } else { c"fil-c-worker" };
+    unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
     if is_main != 0 {
         // The main Fil-C thread starts the executors, then stays around to
         // start more on demand (only a Fil-C thread can create Fil-C threads).
