@@ -20,7 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FR_ABI_VERSION 1u
+#define FR_ABI_VERSION 2u
 
 #define FR_OK 0
 #define FR_NULL_CAPABILITY 1
@@ -35,8 +35,6 @@
 
 /* Natives exported by libpizlo but declared only in a generated header. */
 filc_ptr filc_native_zclosure_new(filc_thread* my_thread, filc_ptr function_ptr, filc_ptr data_ptr);
-bool filc_native_zthread_create2(filc_thread* my_thread, filc_ptr callback_ptr, filc_ptr arg_ptr,
-                                 filc_ptr zthread_ptr, filc_ptr tid_ptr);
 
 /* Callbacks into Rust, registered by fr_init. */
 typedef void (*fr_thread_main_fn)(filc_thread* thread, int is_main);
@@ -260,11 +258,13 @@ void fr_with_native_frame(filc_thread* thread, void (*body)(void*), void* arg)
     filc_pop_native_frame(thread, &native_frame);
 }
 
-int fr_spawn_worker(filc_thread* thread)
+/* The executor loop as a Fil-C function (usable as a pthread start
+   routine; it ignores its argument and never returns). Workers must be
+   created with the Fil-C libc's pthread_create so that libc's per-thread
+   state (errno, TLS, the thread descriptor) is set up. */
+filc_ptr fr_worker_function(void)
 {
-    return filc_native_zthread_create2(
-        thread, fr_function_object_ptr(&fr_worker_object), filc_ptr_forge_null(),
-        filc_ptr_forge_null(), filc_ptr_forge_null()) ? FR_OK : FR_EXCEPTION;
+    return fr_function_object_ptr(&fr_worker_object);
 }
 
 PAS_NO_RETURN void fr_panic(const char* message)

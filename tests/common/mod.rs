@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod basic;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -97,4 +99,10 @@ pub fn config() -> Config {
 /// The runtime, started on first use.
 pub fn runtime() -> Runtime {
     Runtime::start(config()).expect("starting the Fil-C runtime")
+}
+
+/// The `basic.c` fixture, loaded once per test process.
+pub fn basic() -> &'static basic::Basic {
+    static BASIC: std::sync::OnceLock<basic::Basic> = std::sync::OnceLock::new();
+    BASIC.get_or_init(|| runtime().run(|fil| basic::load(fil)))
 }

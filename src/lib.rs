@@ -61,11 +61,17 @@ pub use ptr::{Capability, FilPtr, Opaque, Ptr};
 pub use runtime::{Config, Fil, JoinHandle, Runtime};
 pub use types::FilType;
 
+#[cfg(feature = "derive")]
+pub use fil_rust_macros::FilType;
+
+// Lets the derive macro's `::fil_rust` paths work inside this crate.
+extern crate self as fil_rust;
+
 
 /// Items used by the derive macro and [`foreign!`]. Not a stable API.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::call::{Class, arg_slots, classify};
+    pub use crate::call::{Class, classify};
     pub use crate::types::{CLayout, Leaf, LeafKind, Word, c_layout, raw_add};
     pub use fil_rust_sys::RawPtr;
 }

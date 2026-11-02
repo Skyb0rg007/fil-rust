@@ -46,7 +46,7 @@ pub mod special {
 }
 
 /// Version of the `fr_*` API this crate expects from the shim.
-pub const SHIM_ABI_VERSION: u32 = 1;
+pub const SHIM_ABI_VERSION: u32 = 2;
 
 /// A Fil-C flight pointer: an address plus the capability (`lower`) that
 /// grants access through it. Layout-compatible with the runtime's `filc_ptr`.
@@ -139,7 +139,7 @@ shim_api! {
     fr_is_entered: fn(*mut FilcThread) -> c_int;
     fr_pollcheck: fn(*mut FilcThread);
     fr_with_native_frame: fn(*mut FilcThread, unsafe extern "C" fn(*mut c_void), *mut c_void);
-    fr_spawn_worker: fn(*mut FilcThread) -> c_int;
+    fr_worker_function: fn() -> RawPtr;
     fr_panic: fn(*const c_char);
     fr_args_check_failure: fn(usize, usize);
     fr_root_capacity: fn() -> usize;

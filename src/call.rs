@@ -41,19 +41,20 @@ pub fn classify<T: FilType + ?Sized>() -> Result<Class> {
     if leaves.iter().any(|l| l.size > 8 || l.size == 0) {
         return Err(Error::UnsupportedAbi("scalars wider than 8 bytes".into()));
     }
-    if T::SIZE > 16 {
-        return Ok(Class::Memory);
-    }
     // Packed (misaligned) members force memory class.
-    if leaves.iter().any(|l| l.offset % l.size != 0) {
+    if T::SIZE > 16 || leaves.iter().any(|l| l.offset % l.size != 0) {
         return Ok(Class::Memory);
     }
-    let words = T::SIZE.div_ceil(8);
-    let kinds = (0..words)
+    Ok(Class::Words(eightbyte_kinds::<T>(&leaves)))
+}
+
+/// The kind of each eightbyte of `T`: a pointer if a pointer occupies it,
+/// else a float if it holds only floats, else an integer.
+fn eightbyte_kinds<T: FilType + ?Sized>(leaves: &[Leaf]) -> Vec<LeafKind> {
+    (0..T::SIZE.div_ceil(8))
         .map(|w| {
-            let in_word: Vec<&Leaf> =
-                leaves.iter().filter(|l| l.offset / 8 == w).collect();
-            if in_word.len() == 1 && in_word[0].kind == LeafKind::Ptr {
+            let in_word: Vec<&Leaf> = leaves.iter().filter(|l| l.offset / 8 == w).collect();
+            if in_word.iter().any(|l| l.kind == LeafKind::Ptr) {
                 LeafKind::Ptr
             } else if !in_word.is_empty() && in_word.iter().all(|l| l.kind == LeafKind::Float) {
                 LeafKind::Float
@@ -61,15 +62,35 @@ pub fn classify<T: FilType + ?Sized>() -> Result<Class> {
                 LeafKind::Int
             }
         })
-        .collect();
-    Ok(Class::Words(kinds))
+        .collect()
+}
+
+/// How an argument of type `T` starting at slot `at` occupies the argument
+/// buffer: `pad` unused slots, then one slot per kind.
+///
+/// Memory-class arguments (C's `byval`) are copied into the buffer inline,
+/// aligned to their alignment (at least 8).
+fn arg_layout<T: FilType + ?Sized>(class: &Class, at: usize) -> (usize, Vec<LeafKind>) {
+    match class {
+        Class::Void => (0, Vec::new()),
+        Class::Words(kinds) => (0, kinds.clone()),
+        Class::Memory => {
+            let align = T::ALIGN.max(8);
+            let offset = at * 8;
+            let pad = (offset.div_ceil(align) * align - offset) / 8;
+            let mut leaves = Vec::new();
+            T::leaves(&mut leaves, 0);
+            (pad, eightbyte_kinds::<T>(&leaves))
+        }
+    }
 }
 
 fn round8(n: usize) -> usize {
     n.div_ceil(8) * 8
 }
 
-/// Encodes a value as calling-convention words.
+/// Encodes an argument (or a register-class return value) as
+/// calling-convention words appended to `out`.
 fn encode_value<'f, T: FilType + ?Sized>(
     fil: &Fil<'f>,
     value: &T::Value<'f>,
@@ -79,60 +100,64 @@ fn encode_value<'f, T: FilType + ?Sized>(
         out.push(word);
         return Ok(());
     }
-    match classify::<T>()? {
-        Class::Void => Err(Error::UnsupportedAbi("void can't be passed as an argument".into())),
-        Class::Words(kinds) => {
-            let tmp = fil.alloc_raw(round8(T::SIZE), 16)?;
-            T::write(fil, tmp, value)?;
-            for (i, kind) in kinds.iter().enumerate() {
-                let at = raw_add(tmp, i * 8);
-                out.push(match kind {
-                    LeafKind::Ptr => Word::Ptr(fil.load_ptr_raw(at)?),
-                    _ => {
-                        let mut buf = [0u8; 8];
-                        fil.copy_out_raw(at, &mut buf)?;
-                        Word::Bits(u64::from_ne_bytes(buf))
-                    }
-                });
-            }
-            Ok(())
-        }
-        Class::Memory => {
-            let tmp = fil.alloc_raw(T::SIZE, T::ALIGN.max(16))?;
-            T::write(fil, tmp, value)?;
-            out.push(Word::Ptr(tmp));
-            Ok(())
-        }
+    let class = classify::<T>()?;
+    if class == Class::Void {
+        return Err(Error::UnsupportedAbi("void can't be passed as an argument".into()));
     }
+    let (pad, kinds) = arg_layout::<T>(&class, out.len());
+    out.extend(std::iter::repeat_n(Word::Bits(0), pad));
+    let tmp = fil.alloc_raw(round8(T::SIZE), T::ALIGN.max(16))?;
+    T::write(fil, tmp, value)?;
+    for (i, kind) in kinds.iter().enumerate() {
+        let at = raw_add(tmp, i * 8);
+        out.push(match kind {
+            LeafKind::Ptr => Word::Ptr(fil.load_ptr_raw(at)?),
+            _ => {
+                let mut buf = [0u8; 8];
+                fil.copy_out_raw(at, &mut buf)?;
+                Word::Bits(u64::from_ne_bytes(buf))
+            }
+        });
+    }
+    Ok(())
 }
 
-/// Decodes a value from calling-convention words (already copied out of the
-/// buffer). `words` are consumed from the front.
+/// Decodes the argument of type `T` starting at `words[*at]`, advancing `at`.
+fn decode_arg<'f, T: FilType + ?Sized>(
+    fil: &Fil<'f>,
+    class: &Class,
+    words: &[Word],
+    at: &mut usize,
+) -> Result<T::Value<'f>> {
+    let (pad, kinds) = arg_layout::<T>(class, *at);
+    let start = *at + pad;
+    *at = start + kinds.len();
+    let taken = &words[start..*at];
+    if let [word] = taken
+        && let Some(value) = T::from_word(fil, *word)
+    {
+        return Ok(value);
+    }
+    from_words::<T>(fil, &kinds, taken)
+}
+
+/// Decodes a register-class return value.
 fn decode_value<'f, T: FilType + ?Sized>(
     fil: &Fil<'f>,
     class: &Class,
-    words: &mut std::slice::Iter<'_, Word>,
+    words: &[Word],
 ) -> Result<T::Value<'f>> {
     match class {
         Class::Void => T::read(fil, RawPtr::NULL),
         Class::Words(kinds) => {
-            if kinds.len() == 1 {
-                let word = *words.next().expect("slot count checked");
-                if let Some(value) = T::from_word(fil, word) {
-                    return Ok(value);
-                }
-                return from_words::<T>(fil, kinds, &[word]);
+            if let [word] = words
+                && let Some(value) = T::from_word(fil, *word)
+            {
+                return Ok(value);
             }
-            let taken: Vec<Word> = words.by_ref().take(kinds.len()).copied().collect();
-            from_words::<T>(fil, kinds, &taken)
+            from_words::<T>(fil, kinds, words)
         }
-        Class::Memory => {
-            let word = *words.next().expect("slot count checked");
-            match word {
-                Word::Ptr(p) => T::read(fil, p),
-                Word::Bits(_) => Err(Error::NullCapability),
-            }
-        }
+        Class::Memory => unreachable!("memory-class values are returned through sret"),
     }
 }
 
@@ -141,7 +166,7 @@ fn from_words<'f, T: FilType + ?Sized>(
     kinds: &[LeafKind],
     words: &[Word],
 ) -> Result<T::Value<'f>> {
-    let tmp = fil.alloc_raw(round8(T::SIZE), 16)?;
+    let tmp = fil.alloc_raw(round8(T::SIZE), T::ALIGN.max(16))?;
     for (i, (kind, word)) in kinds.iter().zip(words).enumerate() {
         let at = raw_add(tmp, i * 8);
         match (kind, word) {
@@ -151,14 +176,6 @@ fn from_words<'f, T: FilType + ?Sized>(
         }
     }
     T::read(fil, tmp)
-}
-
-fn slot_count(class: &Class) -> usize {
-    match class {
-        Class::Void => 0,
-        Class::Words(kinds) => kinds.len(),
-        Class::Memory => 1,
-    }
 }
 
 /// Writes `words` into the cc buffers and calls `function`. Returns the size
@@ -203,7 +220,7 @@ fn word_kinds(class: &Class) -> Vec<Option<LeafKind>> {
     match class {
         Class::Void => Vec::new(),
         Class::Words(kinds) => kinds.iter().copied().map(Some).collect(),
-        Class::Memory => vec![Some(LeafKind::Ptr)],
+        Class::Memory => Vec::new(),
     }
 }
 
@@ -222,7 +239,7 @@ fn decode_return<'f, R: FilType>(
                 return Err(Error::ReturnTooSmall { expected: needed, actual: return_size });
             }
             let words = read_words(fil, return_size, &word_kinds(class))?;
-            decode_value::<R>(fil, class, &mut words.iter())
+            decode_value::<R>(fil, class, &words)
         }
     }
 }
@@ -279,7 +296,11 @@ macro_rules! impl_sig {
                 if ret_class == Class::Memory {
                     kinds.push(Some(LeafKind::Ptr));
                 }
-                $(kinds.extend(word_kinds(&$a));)*
+                $(
+                    let (pad, arg_kinds) = arg_layout::<$a>(&$a, kinds.len());
+                    kinds.extend(std::iter::repeat_n(None, pad));
+                    kinds.extend(arg_kinds.into_iter().map(Some));
+                )*
                 let needed = kinds.len() * 8;
                 if argument_size < needed {
                     unsafe { (fil.shim().fr_args_check_failure)(argument_size, needed) };
@@ -288,16 +309,16 @@ macro_rules! impl_sig {
                 // Copy every slot out before decoding: decoding may allocate,
                 // and anything that reaches a safepoint can reuse the buffer.
                 let words = read_words(fil, argument_size, &kinds).unwrap_or_else(|e| fail(e.to_string()));
-                let mut iter = words.iter();
+                let mut at = usize::from(ret_class == Class::Memory);
                 let sret = if ret_class == Class::Memory {
-                    match iter.next() {
-                        Some(Word::Ptr(p)) => Some(*p),
+                    match words[0] {
+                        Word::Ptr(p) => Some(p),
                         _ => fail("missing sret pointer".into()),
                     }
                 } else {
                     None
                 };
-                $(let $a = decode_value::<$a>(fil, &$a, &mut iter)
+                $(let $a = decode_arg::<$a>(fil, &$a, &words, &mut at)
                     .unwrap_or_else(|e| fail(format!("decoding a callback argument: {e}")));)*
                 (($($a,)*), sret)
             }
@@ -574,8 +595,3 @@ impl<'a, 'f> DynCall<'a, 'f> {
     }
 }
 
-/// Number of calling-convention slots `T` occupies as an argument.
-#[doc(hidden)]
-pub fn arg_slots<T: FilType>() -> Result<usize> {
-    Ok(slot_count(&classify::<T>()?))
-}

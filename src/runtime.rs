@@ -410,11 +410,12 @@ pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(inner: &Inner, thread: *mut F
 unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) {
     let inner = *INNER.get().expect("runtime initialized before executors start");
     if is_main != 0 {
-        for _ in 1..inner.config.workers {
-            if unsafe { (inner.shim.fr_spawn_worker)(thread) } != 0 {
-                eprintln!("fil-rust: failed to spawn a Fil-C executor thread");
+        in_native_frame(inner, thread, || {
+            let fil = unsafe { Fil::new(inner, thread) };
+            if let Err(e) = spawn_workers(&fil, inner.config.workers - 1) {
+                eprintln!("fil-rust: failed to spawn Fil-C executor threads: {e}");
             }
-        }
+        });
         inner.mark_ready();
     }
     set_current_thread(thread);
@@ -428,6 +429,22 @@ unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) 
             job(&fil);
         });
     }
+}
+
+/// Starts `count` executor threads with the Fil-C libc's `pthread_create`.
+fn spawn_workers(fil: &Fil<'_>, count: usize) -> Result<()> {
+    let pthread_create = fil
+        .libc()
+        .function::<fn(crate::Ptr, crate::Ptr, crate::Ptr, crate::Ptr) -> i32>(fil, "pthread_create")?;
+    let worker = FilPtr::from_raw(unsafe { (fil.shim().fr_worker_function)() });
+    for _ in 0..count {
+        let tid = fil.alloc_bytes(16)?;
+        let rc = pthread_create.call(fil, (tid.cast(), FilPtr::null(), worker, FilPtr::null()))?;
+        if rc != 0 {
+            return Err(Error::Load(format!("pthread_create failed with error {rc}")));
+        }
+    }
+    Ok(())
 }
 
 extern "C" fn flush_at_exit() {

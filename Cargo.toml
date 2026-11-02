@@ -1,5 +1,5 @@
 [workspace]
-members = ["fil-rust-sys"]
+members = ["fil-rust-sys", "fil-rust-macros"]
 
 [package]
 name = "fil-rust"
@@ -8,10 +8,12 @@ edition = "2024"
 description = "A Rust FFI for Fil-C shared libraries"
 
 [features]
-default = ["musl"]
+default = ["musl", "derive"]
 musl = ["fil-rust-sys/musl"]
 glibc = ["fil-rust-sys/glibc"]
+derive = ["dep:fil-rust-macros"]
 
 [dependencies]
 fil-rust-sys = { path = "fil-rust-sys", default-features = false }
+fil-rust-macros = { path = "fil-rust-macros", optional = true }
 libc = "0.2"
