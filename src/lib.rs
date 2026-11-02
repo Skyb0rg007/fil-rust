@@ -142,6 +142,11 @@
 //! # }
 //! ```
 
+// The calling-convention encoding (struct classification, argument slots)
+// follows Fil-C's x86-64 lowering; other architectures need their own.
+#[cfg(not(target_arch = "x86_64"))]
+compile_error!("fil-rust currently supports only x86-64 Linux");
+
 mod call;
 mod callback;
 mod error;

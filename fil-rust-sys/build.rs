@@ -103,6 +103,10 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-changed=build.rs");
 
+    let target = env::var("TARGET").unwrap_or_default();
+    if !target.starts_with("x86_64-") || !target.contains("-linux-") {
+        panic!("fil-rust-sys: only x86-64 Linux targets are supported (building for {target})");
+    }
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let cc = env_or("CC", "cc");
     let musl = env::var_os("CARGO_FEATURE_MUSL").is_some();
