@@ -1,0 +1,5 @@
+[package]
+name = "fil-rust-build"
+version.workspace = true
+edition.workspace = true
+description = "Compiles C and C++ with Fil-C in build scripts, for embedding with fil-rust"

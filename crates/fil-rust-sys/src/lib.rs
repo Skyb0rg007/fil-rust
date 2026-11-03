@@ -335,20 +335,27 @@ pub unsafe fn dlopen_path(path: &std::path::Path, flags: c_int) -> Result<*mut c
     }
 }
 
-/// Loads an embedded shared object: writes it to an anonymous memory file and
-/// `dlopen`s it through `/proc/self/fd`. The file descriptor is kept open for
-/// the life of the process.
-pub unsafe fn dlopen_bytes(label: &str, bytes: &[u8], flags: c_int) -> Result<*mut c_void, String> {
+/// Writes `bytes` to an anonymous memory file named `label` and returns its
+/// path under `/proc/self/fd`. The file descriptor is kept open for the life
+/// of the process, so the path stays valid.
+pub fn memfd_path(label: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
     let name = CString::new(label).map_err(|_| "label contains NUL".to_string())?;
     let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
         return Err(format!("memfd_create failed: {}", std::io::Error::last_os_error()));
     }
+    // SAFETY: the descriptor was just created and nothing else owns it.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.write_all(bytes).map_err(|e| format!("writing {label}: {e}"))?;
-    let path = std::path::PathBuf::from(format!("/proc/self/fd/{fd}"));
     // Keep the descriptor open: the loader maps the file by path.
     std::mem::forget(file);
+    Ok(std::path::PathBuf::from(format!("/proc/self/fd/{fd}")))
+}
+
+/// Loads an embedded shared object: writes it to an anonymous memory file
+/// ([`memfd_path`]) and `dlopen`s it through `/proc/self/fd`.
+pub unsafe fn dlopen_bytes(label: &str, bytes: &[u8], flags: c_int) -> Result<*mut c_void, String> {
+    let path = memfd_path(label, bytes)?;
     unsafe { dlopen_path(&path, flags) }
 }
 

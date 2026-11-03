@@ -38,7 +38,10 @@
 //!   a plain slice.
 //! * [`Library`] is a loaded Fil-C library. [`Function<Sig>`] is one of its
 //!   functions, typed by a Rust `fn` signature over [`FilType`]s.
-//!   [`foreign!`] declares a whole interface at once.
+//!   [`foreign!`] declares a whole interface at once. An
+//!   [`EmbeddedLibrary`] is one compiled into the program (by
+//!   `fil-rust-build` in a build script, see [`include_library!`]) and
+//!   loaded from memory.
 //! * [`Callback`] turns a Rust closure into a Fil-C function pointer.
 //! * C structs implement [`FilType`] with `#[derive(FilType)]`.
 //!
@@ -178,7 +181,7 @@ pub use callback::Callback;
 pub use error::{Error, Result};
 pub use fil_rust_sys::Flavor;
 pub use handle::{FilBuf, FilHandle};
-pub use library::Library;
+pub use library::{EmbeddedLibrary, Library};
 pub use ptr::{Capability, FilPtr, Opaque, Ptr};
 pub use runtime::{Config, Fil, JoinHandle, Runtime};
 pub use types::{FilType, Leaf, LeafKind, Place, Word};
@@ -282,6 +285,12 @@ macro_rules! foreign {
                 Self::from_library(fil, fil.load(path)?)
             }
 
+            /// Loads a library compiled into the program and looks up its
+            /// functions and globals.
+            $vis fn load_embedded(fil: &$crate::Fil<'_>, library: &$crate::EmbeddedLibrary) -> $crate::Result<Self> {
+                Self::from_library(fil, fil.load_embedded(library)?)
+            }
+
             /// Looks up the functions and globals in an already loaded
             /// library.
             $vis fn from_library(fil: &$crate::Fil<'_>, library: $crate::Library) -> $crate::Result<Self> {
@@ -321,4 +330,35 @@ macro_rules! foreign {
 
     (@ret) => { () };
     (@ret $ret:ty) => { $ret };
+}
+
+/// Includes a Fil-C library that `fil-rust-build` compiled in the build
+/// script, as an [`EmbeddedLibrary`] (usable in a `static`).
+///
+/// ```ignore
+/// // build.rs
+/// fn main() {
+///     fil_rust_build::Build::new().file("c/zap.c").compile("zap");
+/// }
+///
+/// // src/lib.rs
+/// static ZAP: fil_rust::EmbeddedLibrary = fil_rust::include_library!("zap");
+///
+/// # fn f(rt: fil_rust::Runtime) -> fil_rust::Result<()> {
+/// let zap = rt.load_embedded(&ZAP)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The library carries a build for each flavor whose Fil-C compiler the
+/// build script found.
+#[macro_export]
+macro_rules! include_library {
+    ($name:literal) => {
+        $crate::EmbeddedLibrary::new(
+            $name,
+            ::core::include!(::core::concat!(::core::env!("OUT_DIR"), "/fil-rust-build/", $name, ".musl.rs")),
+            ::core::include!(::core::concat!(::core::env!("OUT_DIR"), "/fil-rust-build/", $name, ".glibc.rs")),
+        )
+    };
 }

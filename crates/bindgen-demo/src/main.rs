@@ -1,43 +1,24 @@
-//! Calls a Fil-C library through bindings that fil-rust-bindgen generated
-//! from its header at build time (see build.rs). No hand-written
-//! declarations, and no `unsafe`.
+//! Calls a Fil-C library that the build script compiled and embedded in
+//! this program, through bindings it generated from the library's header
+//! (see build.rs): a C dependency that stays memory-safe, with no library
+//! to install, no hand-written declarations, and no `unsafe`.
 //!
 //!     cargo run -p bindgen-demo
 //!     FILC_FLAVOR=glibc cargo run -p bindgen-demo --features glibc
 
-use std::path::Path;
-use std::process::Command;
-
-use fil_rust::{Callback, Config, Flavor, Runtime};
+use fil_rust::{Callback, Config, EmbeddedLibrary, Runtime};
 
 include!(concat!(env!("OUT_DIR"), "/inventory.rs"));
 use inventory_ffi::*;
 
-/// Compiles c/inventory.c with the Fil-C compiler of the configured flavor.
-fn build_library(flavor: Flavor) -> std::path::PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let var = if flavor == Flavor::Glibc { "FILC_GLIBC_CC" } else { "FILC_CC" };
-    let cc = std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set (run in nix-shell)"));
-    let out = dir.join("../../target/example-libs").join(format!("{flavor:?}").to_lowercase());
-    std::fs::create_dir_all(&out).unwrap();
-    let lib = out.join("libinventory.so");
-    let ok = Command::new(cc)
-        .args(["-shared", "-fPIC", "-O2", "-o"])
-        .arg(&lib)
-        .arg(dir.join("c/inventory.c"))
-        .status()
-        .expect("running the Fil-C compiler")
-        .success();
-    assert!(ok, "compiling inventory.c failed");
-    lib
-}
+/// c/inventory.c, built for each flavor.
+static INVENTORY: EmbeddedLibrary = fil_rust::include_library!("inventory");
 
 fn main() -> fil_rust::Result<()> {
     let rt = Runtime::start(Config::from_env()?)?;
-    let path = build_library(rt.flavor());
 
     rt.run(|fil| -> fil_rust::Result<()> {
-        let inv_lib = Inventory::load(fil, &path)?;
+        let inv_lib = Inventory::load_embedded(fil, &INVENTORY)?;
         let inv = inv_lib.inv_open(fil)?;
         for (name, cat, qty, price) in
             [("hammer", CAT_TOOL, 3, 12.5), ("apple", CAT_FOOD, 40, 0.3), ("bolt", CAT_PART, 500, 0.05)]

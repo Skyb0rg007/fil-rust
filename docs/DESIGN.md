@@ -203,7 +203,8 @@ crates/fil-rust           safe API: runtime, executors, pointers, memory, calls,
   tests/                  integration tests over C/C++ fixtures, run against either flavor
 crates/fil-rust-macros    #[derive(FilType)]
 crates/fil-rust-bindgen   generates FilType structs and foreign! interfaces from C headers (library + CLI)
-crates/bindgen-demo       uses fil-rust-bindgen from a build script
+crates/fil-rust-build     compiles C/C++ with Fil-C in build scripts, for include_library!
+crates/bindgen-demo       builds and embeds a C library and its bindings from a build script
 nix/                      the pinned package set, the Fil-C distributions (pizfix for musl, optfil for glibc),
                           the runtime source headers, the build environment and the workspace package
 default.nix, shell.nix    the Nix build and dev shell; both take `crossSystem`
@@ -479,6 +480,34 @@ with prettyplease. `tests/generated/` holds bindings for two fixture headers;
 fil-rust's tests compile and run them, and fil-rust-bindgen's tests check
 that they are up to date.
 
+### Embedded libraries: `fil-rust-build`
+
+`fil-rust-build` is a build-script helper in the style of the `cc` crate.
+`Build::compile(name)` compiles each source to an object with the Fil-C
+compiler (`-fPIC`, Cargo's optimization level and debug info, `-MMD` for
+header dependencies, which become `rerun-if-changed`), then links
+`lib<name>.so` with soname `lib<name>.so`. A Fil-C library only loads into
+a runtime of its flavor, so it builds once per flavor whose compiler it
+finds (`FILC_CC`/`FILC_ROOT` for musl, `FILC_GLIBC_CC` or `/opt/fil` for
+glibc on x86-64), or the flavors requested with `Build::flavor`, which must
+then exist. For each flavor it writes `$OUT_DIR/fil-rust-build/<name>.<flavor>.rs`,
+an `Option<&[u8]>` expression (an `include_bytes!` of the library, or
+`None`), and `include_library!("name")` builds an `EmbeddedLibrary` from the
+two in a const context, so it can be a `static`.
+
+`Fil::load_embedded` writes the runtime flavor's build to a memfd named
+after the soname and then takes the ordinary `load` path (`check_library`,
+dependency preloading, `dlopen` by `/proc/self/fd` path), so an embedded
+library gets exactly the checks a file does. glibc matches a `DT_NEEDED`
+name against the sonames of loaded objects, so embedded libraries linked
+against each other (`Build::link_with`) resolve once the dependency is
+loaded. It doesn't match an opened *path* against a soname, though, so
+loading by path never deduplicates: fil-rust remembers each embedded soname
+with its bytes and reuses the memfd for the same library, refuses a
+different library under a loaded soname, and refuses a soname already
+loaded from a file. Either would otherwise load a second copy, with its own
+globals.
+
 ## Safety argument (summary)
 
 | hazard | prevented by |
@@ -508,7 +537,9 @@ and owned buffers under GC stress; callbacks from many Fil-C threads; C++
 containers, threads and exceptions; process-ending cases (Fil-C safety
 panics, signature mismatches, panicking callbacks, `exit`) in child processes;
 the boot layout of each flavor; the musl/glibc boundary audit; signal
-handling next to Rust's; and bindings generated from headers. Beyond those:
+handling next to Rust's; bindings generated from headers; and libraries
+built with `fil-rust-build` and loaded from memory (`embedded.rs`, with the
+builder's own tests compiling real C and C++). Beyond those:
 code that must not compile (`tests/ui`: pointers escaping their scope or
 thread, forged `Place`s and `Word`s, wrong signatures); misuse that must fail
 cleanly (`misuse.rs`: native and wrong-flavor libraries, lying declarations,

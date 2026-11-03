@@ -42,6 +42,7 @@ version = "0.0.0"
 dependencies = [
  "fil-rust",
  "fil-rust-bindgen",
+ "fil-rust-build",
 ]
 
 [[package]]
@@ -183,6 +184,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 name = "fil-rust"
 version = "0.1.0"
 dependencies = [
+ "fil-rust-build",
  "fil-rust-macros",
  "fil-rust-sys",
  "libc",
@@ -200,6 +202,10 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "fil-rust-build"
+version = "0.1.0"
 
 [[package]]
 name = "fil-rust-macros"

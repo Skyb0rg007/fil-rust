@@ -371,6 +371,14 @@ impl Runtime {
         self.run(move |fil| fil.load(&path))
     }
 
+    /// Loads a library compiled into the program (see [`EmbeddedLibrary`]),
+    /// running its constructors.
+    ///
+    /// [`EmbeddedLibrary`]: crate::EmbeddedLibrary
+    pub fn load_embedded(&self, library: &crate::EmbeddedLibrary) -> Result<Library> {
+        self.run(|fil| fil.load_embedded(library))
+    }
+
     /// Flushes the Fil-C libc's stdio buffers (`fflush(NULL)`). This also
     /// happens automatically when the process exits normally.
     pub fn flush(&self) -> Result<()> {
@@ -843,6 +851,17 @@ impl<'f> Fil<'f> {
         // Library constructors enter the runtime themselves, so the loader
         // must run while this thread is exited.
         self.exited(move || crate::library::open(inner, &path))
+    }
+
+    /// Loads a library compiled into the program (see [`EmbeddedLibrary`])
+    /// from an anonymous memory file, with the same checks as
+    /// [`Fil::load`]. Loading the same library again returns it again.
+    ///
+    /// [`EmbeddedLibrary`]: crate::EmbeddedLibrary
+    pub fn load_embedded(&self, library: &crate::EmbeddedLibrary) -> Result<Library> {
+        let inner = self.inner;
+        let library = *library;
+        self.exited(move || crate::library::open_embedded(inner, &library))
     }
 
     /// Allocates `len` zeroed bytes of Fil-C memory.

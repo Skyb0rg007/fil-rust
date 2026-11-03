@@ -211,6 +211,103 @@ pub(crate) fn open(inner: &Inner, path: &Path) -> Result<Library> {
     Ok(Library::from_handle(handle, path.to_path_buf()))
 }
 
+/// A Fil-C library compiled into the program, usually by
+/// [`fil-rust-build`](https://docs.rs/fil-rust-build) in a build script and
+/// included with [`include_library!`](crate::include_library), with one
+/// build per flavor.
+///
+/// [`Fil::load_embedded`] loads the build for the runtime's flavor from an
+/// anonymous memory file, with the same checks as [`Fil::load`]. Its soname
+/// is `lib<name>.so`, so embedded libraries linked against each other find
+/// their dependencies once those are loaded (load dependencies first).
+#[derive(Clone, Copy)]
+pub struct EmbeddedLibrary {
+    name: &'static str,
+    musl: Option<&'static [u8]>,
+    glibc: Option<&'static [u8]>,
+}
+
+impl EmbeddedLibrary {
+    /// A library named `name` (its soname is `lib<name>.so`), with its
+    /// builds for each flavor. A prebuilt library can be embedded with
+    /// `include_bytes!`.
+    pub const fn new(name: &'static str, musl: Option<&'static [u8]>, glibc: Option<&'static [u8]>) -> Self {
+        EmbeddedLibrary { name, musl, glibc }
+    }
+
+    /// The library's name, without the `lib` prefix and `.so` suffix.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The soname the library was built with, `lib<name>.so`.
+    pub fn soname(&self) -> String {
+        format!("lib{}.so", self.name)
+    }
+
+    /// The build for `flavor`, if there is one.
+    pub fn bytes(&self, flavor: Flavor) -> Option<&'static [u8]> {
+        match flavor {
+            Flavor::Musl => self.musl,
+            Flavor::Glibc => self.glibc,
+        }
+    }
+}
+
+impl std::fmt::Debug for EmbeddedLibrary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddedLibrary")
+            .field("name", &self.name)
+            .field("musl", &self.musl.map(<[u8]>::len))
+            .field("glibc", &self.glibc.map(<[u8]>::len))
+            .finish()
+    }
+}
+
+/// Embedded libraries already written to memory files, by soname, with the
+/// bytes they were written from.
+static EMBEDDED: std::sync::Mutex<Vec<(String, &'static [u8], PathBuf)>> = std::sync::Mutex::new(Vec::new());
+
+/// Opens an embedded library. Like [`open`], must run on an exited Fil-C
+/// thread.
+pub(crate) fn open_embedded(inner: &Inner, library: &EmbeddedLibrary) -> Result<Library> {
+    let flavor = inner.config.flavor();
+    let soname = library.soname();
+    if library.name.is_empty() || library.name.contains(['/', '\0']) {
+        return Err(Error::Load(format!("{:?} is not a valid library name", library.name)));
+    }
+    let Some(bytes) = library.bytes(flavor) else {
+        return Err(Error::Load(format!(
+            "{soname} has no build for the {flavor:?} flavor (fil-rust-build builds a flavor \
+             only when it finds that flavor's Fil-C compiler; see its documentation)"
+        )));
+    };
+    let path = {
+        let mut embedded = EMBEDDED.lock().unwrap_or_else(|e| e.into_inner());
+        match embedded.iter().find(|(name, ..)| *name == soname) {
+            // The same library again: the loader returns the loaded one.
+            Some((_, loaded, path)) if *loaded == bytes => path.clone(),
+            Some(_) => {
+                return Err(Error::Load(format!("a different library named {soname} is already loaded")));
+            }
+            None => {
+                // The loader matches dependencies by soname, but opening by
+                // path would load a second copy of a library with this
+                // soname loaded from elsewhere.
+                if is_loaded(&soname) {
+                    return Err(Error::Load(format!(
+                        "a library with the soname {soname} is already loaded from a file"
+                    )));
+                }
+                let path = fil_rust_sys::memfd_path(&soname, bytes).map_err(Error::Load)?;
+                embedded.push((soname, bytes, path.clone()));
+                path
+            }
+        }
+    };
+    open(inner, &path)
+}
+
 /// Just enough ELF parsing to list `DT_NEEDED` entries.
 pub(crate) mod elf {
     fn u16_at(d: &[u8], o: usize) -> Option<u16> {

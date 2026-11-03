@@ -62,7 +62,11 @@ fn main() -> fil_rust::Result<()> {
   escape to Rust become `Error::Exception`.
 - **Bindings from headers.** `fil-rust-bindgen` turns a C header into
   `FilType` structs and a `foreign!` interface, from a build script or the
-  command line (see `crates/bindgen-demo`).
+  command line.
+- **C dependencies built in.** `fil-rust-build` compiles C and C++ with Fil-C
+  from a build script, and `include_library!` embeds the result in the
+  program, so a C dependency ships inside the binary and stays memory-safe
+  (see `crates/bindgen-demo`).
 - **Both flavors, two architectures.** Libraries built with the musl ("pizfix") or the glibc
   ("optfil") Fil-C distribution can be loaded. Enable the `glibc` feature for
   the latter. The Rust program always stays linked to the system glibc.
@@ -86,10 +90,40 @@ Run them from the dev shell:
 
     FILC_FLAVOR=glibc cargo run --features glibc --example hello
 
-`crates/bindgen-demo` is a separate crate whose build script generates its
-bindings from a header with `fil-rust-bindgen`:
+`crates/bindgen-demo` is a separate crate whose build script compiles its C
+library with `fil-rust-build` and generates the bindings from its header
+with `fil-rust-bindgen`; the program embeds the library, so it needs only the
+Fil-C distribution's runtime to run:
 
     cargo run -p bindgen-demo
+
+## Building C into the program
+
+A build script compiles the C (once per Fil-C flavor whose compiler it
+finds, see the `fil-rust-build` docs):
+
+```rust
+// build.rs
+fn main() {
+    fil_rust_build::Build::new()
+        .files(["c/zap.c", "c/zap_util.c"])
+        .include("c")
+        .define("ZAP_FAST", None)
+        .compile("zap");
+}
+```
+
+and the program embeds `libzap.so` and loads it from memory, with the same
+checks as a library loaded from a file:
+
+```rust
+static ZAP: fil_rust::EmbeddedLibrary = fil_rust::include_library!("zap");
+
+let zap = rt.load_embedded(&ZAP)?;
+```
+
+Libraries built this way can link against each other (`Build::link_with`);
+load the dependency first.
 
 ## Generating bindings
 
@@ -107,8 +141,8 @@ generated module's docs.
 ## Development
 
 The repository is a Cargo workspace; the crates live under `crates/`
-(`fil-rust`, `fil-rust-sys`, `fil-rust-macros`, `fil-rust-bindgen` and
-`bindgen-demo`), and every dependency is declared once, in the top-level
+(`fil-rust`, `fil-rust-sys`, `fil-rust-macros`, `fil-rust-bindgen`,
+`fil-rust-build` and `bindgen-demo`), and every dependency is declared once, in the top-level
 `Cargo.toml`. `cargo` commands at the top level act on `fil-rust` unless told
 otherwise (`--workspace`, `-p`).
 
