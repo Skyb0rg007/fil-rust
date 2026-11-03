@@ -15,7 +15,7 @@ use fil_rust::{Config, Error, Flavor, Ptr, Runtime};
 
 fn child(case: &str, env: &[(&str, Option<&str>)]) -> Output {
     let mut cmd = Command::new(std::env::current_exe().unwrap());
-    cmd.args(["child_entry", "--exact", "--nocapture", "--test-threads=1"]).env("FIL_RUST_CHILD", case);
+    common::without_core_dumps(&mut cmd).args(["child_entry", "--exact", "--nocapture", "--test-threads=1"]).env("FIL_RUST_CHILD", case);
     for (k, v) in env {
         match v {
             Some(v) => cmd.env(k, v),

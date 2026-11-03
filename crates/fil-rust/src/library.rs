@@ -48,16 +48,20 @@ impl Library {
     fn getter(&self, name: &str) -> Result<*mut c_void> {
         let symbol = CString::new(format!("pizlonated_{name}"))
             .map_err(|_| Error::MissingSymbol(name.to_string()))?;
-        unsafe {
+        // dlsym takes the loader's lock, which a thread in dlopen holds while
+        // library constructors run, and those enter the runtime (creating
+        // threads, for one, waits for every entered thread). So never wait
+        // for it while entered.
+        let handle = self.handle as usize;
+        let getter = crate::runtime::outside_runtime(|| unsafe {
             libc::dlerror();
-            let getter = libc::dlsym(self.handle, symbol.as_ptr());
+            let getter = libc::dlsym(handle as *mut c_void, symbol.as_ptr());
             if getter.is_null() {
                 let _ = dlerror_string();
-                Err(Error::MissingSymbol(name.to_string()))
-            } else {
-                Ok(getter)
             }
-        }
+            getter as usize
+        });
+        if getter == 0 { Err(Error::MissingSymbol(name.to_string())) } else { Ok(getter as *mut c_void) }
     }
 
     /// Whether the library (or one of its dependencies) defines the Fil-C

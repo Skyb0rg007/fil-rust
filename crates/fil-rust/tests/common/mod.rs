@@ -13,6 +13,25 @@ use fil_rust::{Config, Flavor, Runtime};
 
 static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
+/// Child test processes that crash on purpose shouldn't leave core dumps
+/// behind (qemu-user writes them to the working directory): starts `cmd`
+/// with a core size limit of zero.
+pub fn without_core_dumps(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: getrlimit and setrlimit are async-signal-safe and affect only
+    // the child.
+    unsafe {
+        cmd.pre_exec(|| {
+            let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            if libc::getrlimit(libc::RLIMIT_CORE, &mut limit) == 0 {
+                limit.rlim_cur = 0;
+                libc::setrlimit(libc::RLIMIT_CORE, &limit);
+            }
+            Ok(())
+        })
+    }
+}
+
 pub fn flavor() -> Flavor {
     match std::env::var("FILC_FLAVOR").as_deref() {
         Ok("glibc") => Flavor::Glibc,
@@ -97,12 +116,19 @@ pub fn config() -> Config {
 }
 
 /// The runtime, started on first use.
+///
+/// The environment is read once, by the thread that starts the runtime:
+/// starting it rewrites `environ` (see [`Runtime::start`]), so a test thread
+/// reading the configuration meanwhile could miss variables.
 pub fn runtime() -> Runtime {
-    // Debugging aid: let a debugger attach to a hung test process.
-    if std::env::var_os("FIL_RUST_ALLOW_PTRACE").is_some() {
-        unsafe { libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY) };
-    }
-    Runtime::start(config()).expect("starting the Fil-C runtime")
+    static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
+    *RUNTIME.get_or_init(|| {
+        // Debugging aid: let a debugger attach to a hung test process.
+        if std::env::var_os("FIL_RUST_ALLOW_PTRACE").is_some() {
+            unsafe { libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY) };
+        }
+        Runtime::start(config()).expect("starting the Fil-C runtime")
+    })
 }
 
 /// The `basic.c` fixture, loaded once per test process.

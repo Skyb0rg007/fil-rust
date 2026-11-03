@@ -14,7 +14,7 @@ use fil_rust::{Callback, Ptr};
 
 fn run_child(case: &str) -> Output {
     let exe = std::env::current_exe().unwrap();
-    Command::new(exe)
+    common::without_core_dumps(&mut Command::new(exe))
         .args(["child_entry", "--exact", "--nocapture", "--test-threads=1"])
         .env("FIL_RUST_CHILD", case)
         .output()

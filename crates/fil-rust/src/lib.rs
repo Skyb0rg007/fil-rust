@@ -80,6 +80,16 @@
 //! Fil-C `pthread_mutex_lock`, `read`, `sleep`) is fine: Fil-C's own libc
 //! exits the runtime around blocking system calls.
 //!
+//! Some blocking is less obvious. On glibc, the first use on a thread of a
+//! `thread_local!` whose value needs dropping registers its destructor under
+//! the dynamic loader's lock, which `dlopen` holds while library constructors
+//! run; a constructor that creates threads waits for the collector, which
+//! waits for every entered thread. So first touch such thread-locals outside
+//! the runtime (or inside [`Fil::exited`]). The runtime handles the cases it
+//! owns: symbol lookups and library loading run exited, and when the runtime
+//! starts it wraps the panic hook installed at that point so that it runs
+//! exited (a panic hook installed later replaces that wrapper).
+//!
 //! A child process made by `fork()` after the runtime started has none of
 //! its threads, so [`Runtime::run`], [`Runtime::spawn`] and
 //! [`JoinHandle::join`] panic there; values that came from the runtime are

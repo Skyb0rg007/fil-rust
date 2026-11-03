@@ -268,6 +268,12 @@ impl std::fmt::Debug for Runtime {
 impl Runtime {
     /// Starts the Fil-C runtime, or returns the running one if it was started
     /// with an equivalent configuration.
+    ///
+    /// Starting the runtime replaces the process's `environ` with a copy (the
+    /// Fil-C runtime moves the environment out of the way of the process
+    /// title), and it publishes the new array before filling it in. So don't
+    /// read or change environment variables on other threads while this runs;
+    /// read the configuration first, as [`Runtime::start_from_env`] does.
     pub fn start(config: Config) -> Result<Runtime> {
         let _guard = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(inner) = INNER.get() {
@@ -516,6 +522,13 @@ unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) 
     // runs `main` on the boot thread itself; on musl, on a new thread.)
     let name: &CStr = if is_main != 0 { c"fil-c-main" } else { c"fil-c-worker" };
     unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
+    // On the main thread too: it calls into Fil-C (to start executors), and
+    // the code that leaves the runtime before blocking (`outside_runtime`,
+    // `lock_anywhere`) finds the thread to exit here. Without it, the main
+    // thread would look up `pthread_create` with dlsym while entered, and
+    // block a collection behind the loader lock whenever a library
+    // constructor creating threads holds it.
+    set_current_thread(thread);
     if is_main != 0 {
         MAIN_TID.store(unsafe { libc::gettid() }, Ordering::Release);
         // The main Fil-C thread starts the executors, then stays around to
@@ -542,7 +555,6 @@ unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) 
             unsafe { (inner.shim.fr_enter)(thread) };
         }
     }
-    set_current_thread(thread);
     let mut first = true;
     loop {
         unsafe { (inner.shim.fr_exit)(thread) };
@@ -673,6 +685,13 @@ unsafe fn boot(config: Config) -> Result<&'static Inner> {
     }));
     let _ = INNER.set(inner);
     unsafe { libc::pthread_atfork(None, None, Some(mark_forked)) };
+    // Panics in jobs and callbacks happen on entered threads, and the panic
+    // hook blocks: it writes to stderr, and on glibc the thread-locals it
+    // touches first register their destructors under the dynamic loader's
+    // lock (held while library constructors run, which may wait for this
+    // thread). So the hook runs outside the runtime.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| outside_runtime(|| hook(info))));
     unsafe { (shim.fr_init)(thread_main_entry, crate::callback::callback_entry) };
 
     // argv for the Fil-C side; it lives for the rest of the process.

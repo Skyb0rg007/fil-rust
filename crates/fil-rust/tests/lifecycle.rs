@@ -43,7 +43,7 @@ impl Outcome {
 }
 
 fn child(case: &str) -> Outcome {
-    let mut c = Command::new(std::env::current_exe().unwrap())
+    let mut c = common::without_core_dumps(&mut Command::new(std::env::current_exe().unwrap()))
         .args(["child_entry", "--exact", "--nocapture", "--test-threads=1"])
         .env("FIL_RUST_CHILD", case)
         .stdout(Stdio::piped())
@@ -95,6 +95,14 @@ extern "C" fn at_exit() {
 #[test]
 fn child_entry() {
     let Ok(case) = std::env::var("FIL_RUST_CHILD") else { return };
+    if case == "panic-hook-runs-exited" {
+        // Installed before the runtime starts, so the runtime wraps it. A
+        // hook that blocks, like the default one writing to stderr.
+        std::panic::set_hook(Box::new(|info| {
+            std::thread::sleep(Duration::from_millis(600));
+            eprintln!("{info}");
+        }));
+    }
     let rt = runtime();
     let b = basic();
     let lifecycle = rt.load(fixture("lifecycle.c")).unwrap();
@@ -213,6 +221,106 @@ fn child_entry() {
             let s = rt.run(|fil| b.get_kept(fil).unwrap().cast::<c_char>().read_string(fil).unwrap());
             assert_eq!(s, "kept by C");
         }
+        "symbols-looked-up-while-a-constructor-runs" => {
+            // Threads looking up symbols (dlsym takes the loader's lock)
+            // while another thread's dlopen runs a constructor that creates
+            // a thread, and collections run: a collection holds the handshake
+            // lock while it waits for every entered thread, and creating a
+            // thread takes that lock.
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let s = stop.clone();
+            let collector = std::thread::spawn(move || {
+                while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                    rt.run(|fil| fil.collect_garbage().unwrap());
+                }
+            });
+            let lookers: Vec<_> = (0..4)
+                .map(|_| {
+                    let (stop, edges) = (stop.clone(), edges.clone());
+                    std::thread::spawn(move || {
+                        let mut n = 0u64;
+                        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            rt.run(|fil| {
+                                for _ in 0..50 {
+                                    edges.function::<fn(i32) -> i32>(fil, "down").unwrap();
+                                }
+                            });
+                            n += 1;
+                        }
+                        n
+                    })
+                })
+                .collect();
+            std::thread::sleep(Duration::from_millis(50));
+            let slow = rt.load(fixture("ctor_slow.c")).unwrap();
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            for l in lookers {
+                assert!(l.join().unwrap() > 0);
+            }
+            collector.join().unwrap();
+            assert_eq!(rt.run(|fil| slow.function::<fn() -> i32>(fil, "ctor_slow_started").unwrap().call(fil, ()).unwrap()), 1);
+        }
+        "executors-started-while-a-constructor-runs" => {
+            // Busy executors make the pool grow while another thread's
+            // dlopen runs a slow constructor that then creates a thread, and
+            // collections run. Starting executors looks up pthread_create
+            // with dlsym, which waits for the loader's lock; the thread
+            // doing it must not wait entered, or the collection waits for it
+            // while holding the lock that creating a thread needs.
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let s = stop.clone();
+            // One job that keeps collecting, so that it holds an executor
+            // and a collection is under way when the pool grows.
+            let collector = rt.spawn(move |fil| {
+                // Resolved once: looking it up each time (as collect_garbage
+                // does) would wait for the loader's lock too, and no
+                // collection would be under way during the constructor.
+                let gc = fil.runtime_library().function::<fn()>(fil, "zgc_request_and_wait").unwrap();
+                while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                    gc.call(fil, ()).unwrap();
+                }
+            });
+            let grower = std::thread::spawn(move || {
+                // Inside the constructor's sleep: enough jobs that block
+                // (outside the runtime) that every executor is busy.
+                std::thread::sleep(Duration::from_millis(100));
+                let jobs: Vec<_> = (0..24)
+                    .map(|_| rt.spawn(|fil| fil.exited(|| std::thread::sleep(Duration::from_millis(400)))))
+                    .collect();
+                for j in jobs {
+                    j.join();
+                }
+            });
+            let slow = rt.load(fixture("ctor_slow.c")).unwrap();
+            grower.join().unwrap();
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            collector.join();
+            assert_eq!(rt.run(|fil| slow.function::<fn() -> i32>(fil, "ctor_slow_started").unwrap().call(fil, ()).unwrap()), 1);
+        }
+        "panic-hook-runs-exited" => {
+            // A panic inside a job runs the hook on an entered thread; if the
+            // hook ran entered, collections would stall until it returned.
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let collections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (s, c) = (stop.clone(), collections.clone());
+            let collector = rt.spawn(move |fil| {
+                let gc = fil.runtime_library().function::<fn()>(fil, "zgc_request_and_wait").unwrap();
+                while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                    gc.call(fil, ()).unwrap();
+                    c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            let before = collections.load(std::sync::atomic::Ordering::Relaxed);
+            rt.run(|_fil| {
+                let caught = catch_unwind(|| panic!("inside a job"));
+                assert!(caught.is_err());
+            });
+            let during = collections.load(std::sync::atomic::Ordering::Relaxed) - before;
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            collector.join();
+            assert!(during > 10, "only {during} collections finished while the panic hook ran");
+        }
         other => panic!("unknown case {other}"),
     }
     println!("case done");
@@ -284,4 +392,19 @@ fn variadic_misuse_is_stopped() {
 #[test]
 fn pointers_kept_by_c_outlive_the_handle_they_came_from() {
     child("stale-pointer-from-dropped-handle").assert_clean();
+}
+
+#[test]
+fn looking_up_symbols_while_a_constructor_creates_threads() {
+    child("symbols-looked-up-while-a-constructor-runs").assert_clean();
+}
+
+#[test]
+fn panic_hooks_run_outside_the_runtime() {
+    child("panic-hook-runs-exited").assert_clean();
+}
+
+#[test]
+fn starting_executors_while_a_constructor_creates_threads() {
+    child("executors-started-while-a-constructor-runs").assert_clean();
 }
