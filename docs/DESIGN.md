@@ -311,6 +311,11 @@ shim's `fr_worker_function` as the start routine.
   executors, the spawner starts another, up to `Config::max_workers` (256 by
   default). Jobs that wait on each other therefore don't starve.
 - Panics in jobs are caught on the executor and resumed in the joiner.
+- A child made by `fork()` has none of the executors, and locks they held
+  stay held, so a `pthread_atfork` handler marks the child: `run`, `spawn`
+  and `join` panic there instead of waiting forever, and values from the
+  runtime leak when dropped instead of taking those locks. (Fil-C code may
+  still `fork` and continue in C, and `posix_spawn`/`exec` are unaffected.)
 
 ### Never block while entered
 
@@ -510,8 +515,13 @@ cleanly (`misuse.rs`: native and wrong-flavor libraries, lying declarations,
 integers posing as pointers); property tests that compare Rust's view of
 memory, values and arithmetic with C's (`properties.rs`); struct layouts
 checked field by field against C (`layout.rs`); runtime configuration and
-startup in fresh processes (`startup.rs`); and concurrency stress while the
-collector runs (`stress.rs`). Nix runs each configuration as a
+startup in fresh processes (`startup.rs`); concurrency stress while the
+collector runs (`stress.rs`); edge cases such as callbacks dropped mid-call,
+varargs promotions, copies spanning the runtime's copy chunks, objects freed
+during a copy, and libraries reached by several paths (`edges.rs`); and the
+process exiting, forking or crashing while the runtime is busy
+(`lifecycle.rs`). The ELF reader behind the load check is fuzzed with
+mutated real files. Nix runs each configuration as a
 `passthru.tests` derivation (`nix/tests.nix`).
 
 aarch64 is cross-built on an x86-64 host and tested under qemu-user

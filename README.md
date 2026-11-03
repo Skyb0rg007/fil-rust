@@ -166,8 +166,11 @@ machine.
 
 In the shell, the tests, the examples and the target's Fil-C compiler run
 through qemu-user, which needs `binfmt_misc` for the target (on NixOS,
-`boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`). When cross-compiling,
-`tests` is empty.
+`boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`). The Nix test suites
+work the same way, so they need that emulation inside the build sandbox
+(which the NixOS option also sets up):
+
+    nix-build --argstr crossSystem aarch64-unknown-linux-gnu -A tests.musl
 
 ### Bumping Fil-C
 

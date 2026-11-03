@@ -1,16 +1,16 @@
 error[E0277]: `*mut c_void` cannot be sent between threads safely
  --> tests/ui/fail/spawn_returns_ptr.rs:4:18
   |
-4 |     let job = rt.spawn(|fil| fil.c_str("from a job").unwrap());
+4 |     let job = rt.spawn(|fil| fil.alloc_bytes(16).unwrap());
   |                  ^^^^^ `*mut c_void` cannot be sent between threads safely
   |
-  = help: within `FilPtr<'_, i8>`, the trait `Send` is not implemented for `*mut c_void`
+  = help: within `FilPtr<'_, u8>`, the trait `Send` is not implemented for `*mut c_void`
 note: required because it appears within the type `fil_rust_sys::RawPtr`
  --> $WORKSPACE/crates/fil-rust-sys/src/lib.rs
   |
   | pub struct RawPtr {
   |            ^^^^^^
-note: required because it appears within the type `FilPtr<'_, i8>`
+note: required because it appears within the type `FilPtr<'_, u8>`
  --> src/ptr.rs
   |
   | pub struct FilPtr<'f, T: ?Sized = Opaque> {
@@ -24,17 +24,17 @@ note: required by a bound in `Runtime::spawn`
   |         R: Send + 'static,
   |            ^^^^ required by this bound in `Runtime::spawn`
 
-error[E0277]: `*const i8` cannot be sent between threads safely
+error[E0277]: `*const u8` cannot be sent between threads safely
  --> tests/ui/fail/spawn_returns_ptr.rs:4:18
   |
-4 |     let job = rt.spawn(|fil| fil.c_str("from a job").unwrap());
-  |                  ^^^^^ `*const i8` cannot be sent between threads safely
+4 |     let job = rt.spawn(|fil| fil.alloc_bytes(16).unwrap());
+  |                  ^^^^^ `*const u8` cannot be sent between threads safely
   |
-  = help: within `FilPtr<'_, i8>`, the trait `Send` is not implemented for `*const i8`
-  = note: required because it appears within the type `(&(), *const i8)`
-note: required because it appears within the type `PhantomData<(&(), *const i8)>`
+  = help: within `FilPtr<'_, u8>`, the trait `Send` is not implemented for `*const u8`
+  = note: required because it appears within the type `(&(), *const u8)`
+note: required because it appears within the type `PhantomData<(&(), *const u8)>`
  --> $RUST/core/src/marker.rs
-note: required because it appears within the type `FilPtr<'_, i8>`
+note: required because it appears within the type `FilPtr<'_, u8>`
  --> src/ptr.rs
   |
   | pub struct FilPtr<'f, T: ?Sized = Opaque> {

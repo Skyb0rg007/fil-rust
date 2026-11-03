@@ -22,18 +22,10 @@ rec {
 
   env = import ./env.nix pkgs;
 
-  # libclang for the installed fil-rust-bindgen, which runs on the host. When
-  # cross-compiling, it comes from the same nixpkgs built natively for the
-  # host (which the binary cache has), rather than cross-compiling clang.
-  hostLibclang =
-    if isCross then
-      (import pkgs.path { localSystem = stdenv.hostPlatform.system; }).llvmPackages.libclang.lib
-    else
-      pkgs.llvmPackages.libclang.lib;
-
   package = pkgs.callPackage ./package.nix {
     inherit toolchain;
-    libclang = hostLibclang;
+    # For the installed fil-rust-bindgen, which runs on the host.
+    libclang = env.hostLibclang;
     filEnv = env.fil;
   };
 }

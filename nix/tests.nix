@@ -5,8 +5,12 @@
 #   nix-build -A tests.glibc        # one
 #
 # Each rebuilds the workspace from the package's sources and dependencies and
-# runs one configuration of the tests. They exist only when the build machine
-# can run what's built (not when cross-compiling).
+# runs one configuration of the tests. When cross-compiling, the tests (and
+# the target's Fil-C compiler) run under emulation, which needs binfmt_misc
+# for the target on the build machine, available in the sandbox (on NixOS,
+# `boot.binfmt.emulatedSystems = [ "aarch64-linux" ];` does both):
+#
+#   nix-build --argstr crossSystem aarch64-unknown-linux-gnu -A tests.musl
 {
   lib,
   stdenv,
@@ -15,37 +19,43 @@
 
 let
   host = stdenv.hostPlatform;
+  isCross = !stdenv.buildPlatform.canExecute host;
+  # For cargo commands run by hand; cargoCheckHook passes it itself.
+  target = lib.optionalString isCross "--target ${host.rust.rustcTarget}";
 
-  # `package`, running `checkPhase` instead of building and installing.
+  # `package`, running tests (`run`, or `cargo test` with `flags`) instead of
+  # building and installing. They run in the install phase rather than the
+  # check phase, which stdenv skips when cross-compiling, even with emulation.
   mkTest =
     name:
     {
       description,
       flags ? [ "--workspace" ],
       env ? { },
-      checkPhase ? null,
+      run ? "cargoCheckHook",
     }:
-    package.overrideAttrs (
-      old:
-      {
-        pname = "fil-rust-test-${name}";
-        doCheck = true;
-        dontCargoBuild = true;
-        # Debug builds, as `cargo test` makes them: with debug assertions.
-        cargoCheckType = "debug";
-        cargoTestFlags = flags;
-        env = old.env // env;
-        dontCargoInstall = true;
-        installPhase = "touch $out";
-        postInstall = "";
-        dontFixup = true;
-        passthru = { };
-        meta = old.meta // {
-          inherit description;
-        };
-      }
-      // lib.optionalAttrs (checkPhase != null) { inherit checkPhase; }
-    );
+    package.overrideAttrs (old: {
+      pname = "fil-rust-test-${name}";
+      doCheck = false;
+      dontCargoBuild = true;
+      # Debug builds, as `cargo test` makes them: with debug assertions.
+      cargoCheckType = "debug";
+      cargoTestFlags = flags;
+      env = old.env // env;
+      dontCargoInstall = true;
+      installPhase = ''
+        runHook preInstall
+        ${run}
+        touch $out
+        runHook postInstall
+      '';
+      postInstall = "";
+      dontFixup = true;
+      passthru = { };
+      meta = old.meta // {
+        inherit description;
+      };
+    });
 
   # The configurations, by name.
   suites = {
@@ -86,26 +96,22 @@ let
 
     examples = {
       description = "Runs every example and the bindgen demo";
-      checkPhase = ''
-        runHook preCheck
+      run = ''
         for example in crates/fil-rust/examples/*.rs; do
           example=$(basename "$example" .rs)
           echo "=== example $example"
-          cargo run --offline --example "$example"
+          cargo run --offline ${target} --example "$example"
         done
         echo "=== bindgen-demo"
-        cargo run --offline -p bindgen-demo
-        runHook postCheck
+        cargo run --offline ${target} -p bindgen-demo
       '';
     };
 
     clippy = {
       description = "Clippy on every crate and target, with warnings as errors";
-      checkPhase = ''
-        runHook preCheck
-        cargo clippy --offline --workspace --all-targets \
+      run = ''
+        cargo clippy --offline ${target} --workspace --all-targets \
           ${lib.optionalString host.isx86_64 "--features fil-rust/glibc"} -- -D warnings
-        runHook postCheck
       '';
     };
   }
@@ -122,4 +128,4 @@ let
     };
   };
 in
-lib.optionalAttrs (stdenv.buildPlatform.canExecute host) (lib.mapAttrs mkTest suites)
+lib.mapAttrs mkTest suites
