@@ -312,8 +312,16 @@ static int fr_check_access(filc_ptr ptr, size_t size, int write)
     uintptr_t p = (uintptr_t)filc_ptr_ptr(ptr);
     uintptr_t lower = (uintptr_t)filc_ptr_lower(ptr);
     uintptr_t upper = (uintptr_t)filc_object_upper(object);
-    if (p < lower || p > upper || size > upper - p)
+    if (p < lower || p > upper || size > upper - p) {
+        /* free() shrinks the object to empty before it sets the free flag,
+           so an access racing with it can see the new bounds first. Look at
+           the flag again: if the free has finished by now, say so. (Until it
+           has, the access is reported out of bounds, as Fil-C's own checks
+           would.) */
+        if (filc_object_get_flags(object) & FILC_OBJECT_FLAG_FREE)
+            return FR_FREED;
         return FR_OUT_OF_BOUNDS;
+    }
     if (write && (flags & FILC_OBJECT_FLAG_READONLY))
         return FR_READONLY;
     return FR_OK;

@@ -159,6 +159,9 @@ fn copies_across_chunk_boundaries() {
 
 #[test]
 fn long_strings_are_read_whole() {
+    // Outside the job: waiting for another test to finish loading basic.c
+    // would block a thread inside the runtime.
+    let b = basic();
     runtime().run(|fil| {
         let lib = edges(fil);
         let long_string = lib.function::<fn(usize) -> Ptr<c_char>>(fil, "long_string").unwrap();
@@ -169,7 +172,7 @@ fn long_strings_are_read_whole() {
         }
         // And from Rust to C.
         let big = "xyz".repeat(3 * CHUNK);
-        let strlen = basic().library().function::<fn(Ptr<c_char>) -> usize>(fil, "my_strlen").unwrap();
+        let strlen = b.library().function::<fn(Ptr<c_char>) -> usize>(fil, "my_strlen").unwrap();
         assert_eq!(strlen.call(fil, (fil.c_str(&big).unwrap(),)).unwrap(), big.len());
     });
 }
@@ -193,19 +196,20 @@ fn freeing_an_object_during_a_large_copy() {
             f2.store(true, Ordering::SeqCst);
         });
         let data = vec![round as u8; SIZE];
-        let mut results = Vec::new();
         loop {
             let done = freed.load(Ordering::SeqCst);
             let r = rt.run(|fil| h.get(fil).write_bytes(fil, &data));
-            // Every copy either completes or reports the free; never anything else.
-            assert!(matches!(r, Ok(()) | Err(Error::Freed)), "{r:?}");
-            results.push(r);
+            // Every copy either completes or is refused. `free` shrinks the
+            // object before marking it freed, so a copy that races with it
+            // can be refused as out of bounds rather than freed.
+            assert!(matches!(r, Ok(()) | Err(Error::Freed | Error::OutOfBounds)), "{r:?}");
             if done {
                 break;
             }
         }
         freer.join().unwrap();
-        assert_eq!(results.last().unwrap(), &Err(Error::Freed));
+        // Once the free has finished, every access reports it.
+        assert_eq!(rt.run(|fil| h.get(fil).write_bytes(fil, &data)).unwrap_err(), Error::Freed);
         assert_eq!(rt.run(|fil| h.get(fil).read_vec(fil, 1)).unwrap_err(), Error::Freed);
     }
 }
@@ -312,6 +316,13 @@ fn constructors_may_start_threads() {
 
 #[test]
 fn child_programs_can_be_started() {
+    // qemu-user emulates fork, and the vfork-style clone behind posix_spawn,
+    // by stopping every emulated thread; with the runtime's threads busy,
+    // that can freeze or crash the process. Native runs cover this.
+    if std::env::var_os("FIL_RUST_EMULATED").is_some() {
+        eprintln!("skipping: starting processes under qemu-user emulation");
+        return;
+    }
     let rt = runtime();
     // From a plain thread.
     assert!(std::process::Command::new("true").status().unwrap().success());
@@ -324,5 +335,6 @@ fn child_programs_can_be_started() {
     let status = rt.run(|fil| edges(fil).function::<fn(i32) -> i32>(fil, "fork_and_exit").unwrap().call(fil, (7,)).unwrap());
     assert_eq!(status, 7);
     // And the runtime goes on.
-    assert_eq!(rt.run(|fil| basic().add(fil, 1, 1).unwrap()), 2);
+    let b = basic();
+    assert_eq!(rt.run(|fil| b.add(fil, 1, 1).unwrap()), 2);
 }
