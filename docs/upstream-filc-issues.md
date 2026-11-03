@@ -45,5 +45,11 @@ newenv[i] = NULL;
 __atomic_store_n(&environ, newenv, __ATOMIC_RELEASE);
 ```
 
+A fix is on the `publish-environ-after-copy` branch of the fork
+(`~/Projects/Forks/fil-c`, commit `18e1e2475c99`, based on `upstream/deluge`
+at `fa2e66b3d25d`). Compiled on its own into a harness that reads the
+environment from a second thread during the call, the original code misses
+on most reads that land during the copy and the fix on none.
+
 Related, minor: the same function sets `argv[1] = NULL` on the caller's
 `argv`, which an embedder passing its own array may not expect.
