@@ -191,6 +191,32 @@ fn build_stub(cc: &str, arch: &str, list: &Path, out_dir: &Path, stem: &str) {
     run(&mut cmd);
 }
 
+/// Builds the part of the runtime that's Fil-C code itself, from the objects
+/// `libpizlo.a` has for it. Nothing here comes from libpas, and it has no
+/// constructors, so loading it costs nothing. Without an archive, as the glibc
+/// flavor is, this writes an empty file and the runtime goes without.
+fn build_support(cc: &str, archive: Option<PathBuf>, out_dir: &Path, stem: &str) {
+    let output = out_dir.join(format!("{stem}.so"));
+    let Some(archive) = archive.filter(|archive| archive.exists()) else {
+        std::fs::write(&output, []).unwrap();
+        return;
+    };
+    println!("cargo:rerun-if-changed={}", archive.display());
+    let ar = env_or("AR", "ar");
+    let members = Command::new(&ar).arg("t").arg(&archive).output().expect("running ar");
+    let members = String::from_utf8(members.stdout).unwrap();
+    let objects: Vec<&str> = members.lines().filter(|member| member.starts_with("fil-pizlo-")).collect();
+    let directory = out_dir.join(stem);
+    std::fs::create_dir_all(&directory).unwrap();
+    run(Command::new(&ar).arg("x").arg(&archive).args(&objects).current_dir(&directory));
+    let mut cmd = Command::new(cc);
+    cmd.args(["-shared", "-nostdlib", "-Wl,-soname,libfilrust_support.so", "-Wl,-z,noexecstack", "-o"]).arg(&output);
+    for object in &objects {
+        cmd.arg(directory.join(object));
+    }
+    run(&mut cmd);
+}
+
 struct ShimInputs {
     clang: String,
     resource_dir: PathBuf,
@@ -281,6 +307,9 @@ fn main() {
             None,
         );
         build_stub(&cc, &arch, Path::new("abi/runtime_symbols_musl.txt"), &out_dir, "stub_musl");
+        println!("cargo:rerun-if-env-changed=FILC_ROOT");
+        let archive = env::var_os("FILC_ROOT").map(|root| Path::new(&root).join("pizfix/lib/libpizlo.a"));
+        build_support(&cc, archive, &out_dir, "support_musl");
         let musl_include = env_path("FILC_MUSL_INCLUDE");
         build_shim(
             &inputs,

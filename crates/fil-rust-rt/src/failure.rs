@@ -17,7 +17,7 @@ fn text(pointer: *const c_char) -> String {
     unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned()
 }
 
-fn write_stderr(mut bytes: &[u8]) {
+pub fn write_stderr(mut bytes: &[u8]) {
     while !bytes.is_empty() {
         let written = unsafe { libc::write(2, bytes.as_ptr().cast(), bytes.len()) };
         if written <= 0 {
@@ -68,6 +68,12 @@ fn finish(mut report: String, kind: &str) -> ! {
 #[cold]
 pub fn safety_panic(args: fmt::Arguments<'_>) -> ! {
     finish(format!("filc safety error: {args}\n"), "thwarted a futile attempt to violate memory safety.")
+}
+
+/// Fil-C code asked to stop, with `zerror`.
+#[cold]
+pub fn user_panic(args: fmt::Arguments<'_>) -> ! {
+    finish(format!("filc user error: {args}\n"), "user thwarted themselves.")
 }
 
 /// The runtime can't go on. Nothing Fil-C code does should lead here.

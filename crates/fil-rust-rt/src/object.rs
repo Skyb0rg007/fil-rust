@@ -64,11 +64,26 @@ pub unsafe fn free(ptr: Ptr) {
     if ptr.ptr.is_null() {
         return;
     }
-    let object = ptr.object();
-    if object.is_null() {
+    let object = unsafe { object_for_deallocate(ptr) };
+    object.upper.store(ptr.lower, Ordering::Relaxed);
+    loop {
+        let aux = object.aux.load(Ordering::Relaxed);
+        if aux_flags(aux) & FLAG_FREE != 0 {
+            safety_panic(format_args!("cannot free already free object (ptr = {:p}).", ptr.ptr));
+        }
+        let freed = aux | (FLAG_FREE << AUX_FLAGS_SHIFT);
+        if object.aux.compare_exchange_weak(aux, freed, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            return;
+        }
+    }
+}
+
+/// The object `ptr` frees, if it's allowed to.
+unsafe fn object_for_deallocate<'a>(ptr: Ptr) -> &'a Object {
+    if ptr.lower.is_null() {
         safety_panic(format_args!("cannot free ptr with no object (ptr = {:p}).", ptr.ptr));
     }
-    let object = unsafe { &*object };
+    let object = unsafe { &*ptr.object() };
     let flags = object.flags();
     if flags & FLAGS_SPECIAL_MASK != 0 {
         safety_panic(format_args!("cannot free special object (ptr = {:p}).", ptr.ptr));
@@ -82,17 +97,20 @@ pub unsafe fn free(ptr: Ptr) {
     if ptr.ptr != ptr.lower {
         safety_panic(format_args!("cannot free ptr with ptr != lower (ptr = {:p}).", ptr.ptr));
     }
-    object.upper.store(ptr.lower, Ordering::Relaxed);
-    loop {
-        let aux = object.aux.load(Ordering::Relaxed);
-        if aux_flags(aux) & FLAG_FREE != 0 {
-            safety_panic(format_args!("cannot free already free object (ptr = {:p}).", ptr.ptr));
-        }
-        let freed = aux | (FLAG_FREE << AUX_FLAGS_SHIFT);
-        if object.aux.compare_exchange_weak(aux, freed, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-            return;
-        }
+    object
+}
+
+/// A new object holding as much of the old one as fits. The old one is freed.
+pub unsafe fn reallocate(thread: *mut Thread, old: Ptr, size: usize, alignment: usize) -> Ptr {
+    let object = unsafe { object_for_deallocate(old) };
+    let new = Ptr::for_object(unsafe { allocate_aligned(thread, size, alignment, 0) });
+    let new_size = unsafe { (*new.object()).size() };
+    let count = new_size.min(object.size());
+    unsafe {
+        crate::memops::move_checked(thread, new, old, count);
+        free(old);
     }
+    new
 }
 
 /// The object's aux array, created if it doesn't have one yet. Doesn't reach a
@@ -213,17 +231,22 @@ pub fn check_word_access(ptr: Ptr, access: Access) {
 
 /// Fails unless `ptr` can be called.
 pub fn check_function_call(ptr: Ptr) {
+    check_special(ptr, SPECIAL_FUNCTION, "function");
+}
+
+/// Fails unless `ptr` is the start of a special object of the given type.
+pub fn check_special(ptr: Ptr, special: usize, name: &str) {
     if ptr.lower.is_null() {
-        safety_panic(format_args!("cannot access special pointer with null object."));
+        safety_panic(format_args!("cannot access pointer with null object (ptr = {:p}).", ptr.ptr));
     }
     let object = unsafe { &*ptr.object() };
-    if object.flags() & FLAG_FREE != 0 {
-        safety_panic(format_args!("cannot access special pointer to free object."));
+    if !object.is_special() {
+        safety_panic(format_args!("cannot access pointer as {name}, object isn't even special (ptr = {:p}).", ptr.ptr));
     }
-    if object.special_type() != SPECIAL_FUNCTION {
-        safety_panic(format_args!("cannot call pointer that isn't a function."));
+    if object.special_type() != special {
+        safety_panic(format_args!("cannot access pointer as {name}, object has wrong special type (ptr = {:p}).", ptr.ptr));
     }
     if ptr.ptr != object.aux_ptr() {
-        safety_panic(format_args!("cannot call pointer that isn't the start of a function."));
+        safety_panic(format_args!("cannot access pointer as {name} with ptr != aux (ptr = {:p}).", ptr.ptr));
     }
 }

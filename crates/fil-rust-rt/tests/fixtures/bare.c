@@ -19,3 +19,4 @@ long use_after_free(void) { long* volatile p = malloc(sizeof(long)); *p = 1; fre
 void double_free(void) { void* volatile p = malloc(8); free(p); free(p); }
 long wild_pointer(long address) { return *(long* volatile)address; }
 long wrong_signature(void) { long (*volatile f)(long, long, long) = (long (*)(long, long, long))add; return f == 0 ? 0 : ((long (*)(long))f)(1); }
+long recurse(long n) { volatile long frame[64]; frame[0] = n; return n ? recurse(n - 1) + frame[0] : 0; }

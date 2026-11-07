@@ -68,6 +68,7 @@ fn failing_child() {
         "double free" => call_long("double_free", &[]),
         "wild" => call_long("wild_pointer", &[int(0x1000)]),
         "signature" => call_long("wrong_signature", &[]),
+        "overflow" => call_long("recurse", &[int(1 << 40)]),
         case => panic!("unknown case {case}"),
     };
 }
@@ -102,4 +103,11 @@ fn wild_pointer_is_stopped() {
 fn wrong_signature_is_stopped() {
     let report = failure_of("signature");
     assert!(report.contains("argument size mismatch"), "{report}");
+}
+
+/// The report runs on the failure stack: this thread's is used up.
+#[test]
+fn stack_overflow_is_stopped() {
+    let report = failure_of("overflow");
+    assert!(report.contains("filc safety error: stack overflow."), "{report}");
 }

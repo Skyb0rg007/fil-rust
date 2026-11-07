@@ -191,7 +191,7 @@ per the commit rule). No pushing without being asked.
   non-collecting path, as must the inline allocator.
 - The trapping stub moved to M1, since it is the same artifact as the real stub.
 
-**M1. Object model and bare calls** (`crates/fil-rust-rt`, stub generator)
+**M1. Object model and bare calls** (`crates/fil-rust-rt`, stub generator): done on musl x86-64.
 - `#[repr(C)]` thread, object, frame, origin with compile-time asserts and a C `offsetof`
   cross-check against the pinned headers.
 - Failure paths, access checks, `filc_memmove`/`memset` family, ptr atomics and boxes, aux
@@ -200,6 +200,12 @@ per the commit rule). No pushing without being asked.
 - Allocator with `Collection::Never`.
 - Bare fixtures built with `-nodefaultlibs`, plus existing fixtures with no libc imports.
   Safety failures must match: OOB, UAF, double free, wild pointer, wrong signature.
+
+Results: compiled libraries run with no libpizlo, libpas or libc loaded, and the support
+library's `zasprintf` runs on Rust natives. `tests/layout.rs` has a C compiler assert every
+layout against the pinned headers. The aarch64 and glibc builds of this code are not run yet;
+the 16-byte atomics for aarch64 are written but untested. Helpers for unwinding and `setjmp`
+still report their name, and most natives are still missing, as planned for M5.
 
 **M2. Backend seam**
 - `fr_*` in Rust, `Config::runtime`, `Libc`, name-only stand-ins, bare threads, callbacks with

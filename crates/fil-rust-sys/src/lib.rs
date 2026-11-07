@@ -256,6 +256,18 @@ impl Flavor {
         }
     }
 
+    /// The Fil-C-compiled part of the runtime, if this flavor's distribution
+    /// has it in a form that can be linked apart from libpas.
+    pub fn support_library(self) -> Option<SupportLib> {
+        let bytes: &'static [u8] = match self {
+            #[cfg(feature = "musl")]
+            Flavor::Musl => include_bytes!(concat!(env!("OUT_DIR"), "/support_musl.so")),
+            #[allow(unreachable_patterns)]
+            _ => &[],
+        };
+        (!bytes.is_empty()).then_some(SupportLib { soname: "libfilrust_support.so", bytes })
+    }
+
     /// Imports of libpizlo to redirect from the host libc to a function of
     /// a compat library: `(imported symbol, replacement)`, the replacement
     /// living in the compat library at [`Flavor::stand_in_index`]. These are

@@ -22,6 +22,7 @@ mod globals;
 pub mod heap;
 mod helpers;
 mod memops;
+mod natives;
 pub mod object;
 pub mod ptrs;
 pub mod thread;
@@ -49,25 +50,38 @@ fn load_stub(flavor: Flavor) -> Result<(), String> {
     }
     let stub = flavor.runtime_stub().ok_or_else(|| format!("{flavor:?} has no runtime stub"))?;
     let handle = unsafe { dlopen_bytes(stub.soname, stub.bytes, flags) }?;
-    unsafe { fill_stub(handle) }
+    // The support library binds to the stub, but runs nothing as it loads.
+    let support = match flavor.support_library() {
+        Some(lib) => unsafe { dlopen_bytes(lib.soname, lib.bytes, libc::RTLD_NOW | libc::RTLD_LOCAL) }?,
+        None => std::ptr::null_mut(),
+    };
+    unsafe { fill_stub(handle, support) }
 }
 
-/// Points the stub's slots at the helpers.
-unsafe fn fill_stub(handle: *mut c_void) -> Result<(), String> {
+/// Points the stub's slots at what implements them: the helpers and natives
+/// here, or the support library. That one goes through the stub as well, since
+/// the stub comes first in the search order even for the library's own uses.
+unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), String> {
     unsafe {
-        let table = dlsym_checked(handle, "fr_stub_table\0")?.cast::<*const ()>();
-        let names = dlsym_checked(handle, "fr_stub_names\0")?.cast::<*const c_char>();
-        let count = *dlsym_checked(handle, "fr_stub_count\0")?.cast::<usize>();
-        let helper_slot = dlsym_checked(handle, "fr_stub_missing_helper\0")?.cast::<*const ()>();
-        let native_slot = dlsym_checked(handle, "fr_stub_missing_native\0")?.cast::<*const ()>();
+        let table = dlsym_checked(stub, "fr_stub_table\0")?.cast::<*const ()>();
+        let names = dlsym_checked(stub, "fr_stub_names\0")?.cast::<*const c_char>();
+        let count = *dlsym_checked(stub, "fr_stub_count\0")?.cast::<usize>();
+        let helper_slot = dlsym_checked(stub, "fr_stub_missing_helper\0")?.cast::<*const ()>();
+        let native_slot = dlsym_checked(stub, "fr_stub_missing_native\0")?.cast::<*const ()>();
         helper_slot.write(missing_helper as *const ());
         native_slot.write(missing_native as *const ());
-        let helpers: std::collections::HashMap<_, _> = helpers::table().into_iter().collect();
+        let mut implemented: std::collections::HashMap<_, _> = helpers::table().into_iter().collect();
+        implemented.extend(natives::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
-            let name = name.to_str().map_err(|e| e.to_string())?;
-            if let Some(&function) = helpers.get(name) {
+            let text = name.to_str().map_err(|e| e.to_string())?;
+            if let Some(&function) = implemented.get(text) {
                 table.add(index).write(function);
+            } else if !support.is_null() {
+                let symbol = libc::dlsym(support, name.as_ptr());
+                if !symbol.is_null() {
+                    table.add(index).write(symbol.cast());
+                }
             }
         }
     }

@@ -171,7 +171,7 @@ pub struct Function {
     pub signature: u64,
 }
 
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct FunctionObject {
     pub object: Object,
     pub function: Function,
