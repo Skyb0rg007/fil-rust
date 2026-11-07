@@ -236,8 +236,8 @@ are pointers. That's exact: compiled callers zero their aux words for the whole 
 
 `crates/fil-rust-rt/src/gc.rs` stops the world, marks precisely, and sweeps. `tests/rt_gc.rs` has a
 case per row of the tracking table that exists so far. Each root and edge kind the marker follows
-was checked by disabling it and watching a test fail, except the thread cookie and deferred
-constructors, which libc-free fixtures never reach. Those get checked in M4. Some findings:
+was checked by disabling it and watching a test fail, except deferred constructors, which are
+compiled global function objects: marking them can't change what a test sees. Some findings:
 
 - Compiled callers keep every pointer's lower in a frame slot, even ones just loaded, so tracking
   callback arguments at entry only matters for callers in Rust. `tests/collector.rs` covers that.
@@ -246,17 +246,44 @@ constructors, which libc-free fixtures never reach. Those get checked in M4. Som
 - `free` doesn't drop what a tombstone's aux refers to until the object is marked, and a `Ptr` in
   Rust's hands keeps a tombstone in place. Heap references are redirected.
 
-Not done here: census, revive and destruct. Nothing needs a destructor until threads and tables
-exist, so they come with their first user in M4 or M5. Roots for argv, environ, auxv, the signal
-table, and errno and dlerror handlers do too. `tests/properties.rs` joins with the ported suites in
-M4, since it needs libc.
+Not done here: census, revive and destruct. Threads turned out not to need them, since a thread
+record is an ordinary block with no destructor (see M4), so they come with their first user in M5,
+along with the signal table's roots.
 
-**M4. Libc mode on musl x86-64, with threads**
+**M4. Libc mode on musl x86-64, with threads**: done.
 - ELF import scan, `Auto` upgrade, ctor gate, boot, errno and dlerror handlers.
 - `zthread_*`, futex and multi-threaded libc, which boot itself needs (`spawn_workers`).
 - `dlopen`/`dlsym`, syscall groups A and B from tables, `writev` and iovec natives.
 - Port suites: `smoke`, `calls`, `memory`, `layout`, `threads`, `lifecycle`, `stress`,
   `startup`. Mark what stays out until M5, such as the Fil-C `fork` case in `edges.rs`.
+
+`crates/fil-rust-rt/src/start.rs` boots the libc, `zthread.rs` has threads and `sys.rs` the system
+calls. `tests/rt_libc.rs` covers each way of getting the libc, and refusing it. `tests/sys.rs` runs
+a C program through the system calls on either backend and has to get the same results. Beyond the
+planned suites, `callbacks`, `embedded`, `process`, `properties`, `misuse`, `bindgen` and the `ui`
+tests pass too. Under `FIL_RUST_GC_STRESS`, the libc suites stay green. Some findings:
+
+- A thread record is a heap block, allocated while holding the thread list so a collection can't
+  sweep it before it's listed. `scan` keeps the cookie and result flights of one that finished, for
+  whoever joins it.
+- A new thread must not register a TLS destructor before it's running: glibc takes the loader lock
+  to do that, and a constructor can be holding it while waiting for that thread.
+- `zthread_exit` can't use the host's `pthread_exit`, whose forced unwinding would walk compiled
+  frames. It escapes to the thread's entry through `fr_call_escapable`. That assembly exists for
+  aarch64 too, but hasn't run there.
+- Bound as `RTLD_GLOBAL`, the real `libc.so` coexists with the name-only stand-in: libraries that
+  need it find its symbols in the global scope. `Library::getter` falls back to the handle kept by
+  the runtime, since `dlsym` on a handle only looks at that library and what it depends on.
+
+Out until M5, failing by name when called: sockets, the `mmap` family, `sigaction`, `sigsuspend`,
+`sigwait`, `epoll`, `fork`, `execve`, `wait*`, timers, SysV IPC, `mount`, `prctl`, `zlongjmp`, and
+exceptions. So `cxx`, `signals` and `abi_audit` stay on libpizlo for now, and `edges.rs` skips its
+Fil-C `fork` case on the Rust backend. `tests/boot.rs` checks each backend for what it should map.
+
+The roots for the errno and dlerror handlers and for argv, environ and auxv are what upstream has,
+but disabling them changes nothing a test can see: the handlers are global function objects, and
+the vectors stay in `__libc_start_main`'s frame for as long as the process runs. Tracking the
+function and argument in `zthread_create` is redundant the same way, with the compiled caller's frame.
 
 **M5. The rest of musl**
 - `setjmp`/`zlongjmp`, `_Unwind_RaiseException`, landing pads, deferred signals with an

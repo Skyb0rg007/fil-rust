@@ -19,7 +19,7 @@ pub mod abi;
 mod cc;
 pub mod failure;
 pub mod gc;
-mod globals;
+pub mod globals;
 pub mod heap;
 mod helpers;
 mod memops;
@@ -27,7 +27,10 @@ mod natives;
 pub mod object;
 pub mod ptrs;
 pub mod shim;
+pub mod start;
+pub mod sys;
 pub mod thread;
+pub mod zthread;
 
 use std::ffi::{c_char, c_void};
 use std::path::Path;
@@ -91,6 +94,8 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
         native_slot.write(missing_native as *const ());
         let mut implemented: std::collections::HashMap<_, _> = helpers::table().into_iter().collect();
         implemented.extend(natives::table());
+        implemented.extend(sys::table());
+        implemented.extend(zthread::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;

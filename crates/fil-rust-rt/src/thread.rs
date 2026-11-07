@@ -1,14 +1,15 @@
 //! Threads.
 //!
-//! A `Thread` is `filc_thread` as compiled code sees it, with a header in front
-//! so `zthread_self` can hand out a real capability to it. Compiled code gets
+//! A `Thread` is `filc_thread` as compiled code sees it. Each is a block in the
+//! heap, since Fil-C code can hold a capability to one for longer than the
+//! thread runs: `pthread_t` is built on that. What's left of a thread that's
+//! gone is inert, so it goes the way of any other object. Compiled code gets
 //! it as an argument. The few helpers that don't are the reason `current`
 //! exists.
 
-use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::Cell;
 use std::ptr::{self, null, null_mut};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::sync::atomic::Ordering;
 
 use crate::abi::*;
@@ -16,8 +17,6 @@ use crate::abi::*;
 /// How close to the end of the stack compiled code may get before it fails with
 /// a stack overflow. Runtime helpers run in this space.
 const STACK_SLACK: usize = 1 << 16;
-/// How much memory precedes a `Thread`: room for its header, keeping alignment.
-const THREAD_PREFIX: usize = 64;
 
 /// The runtime's per-thread state, reached from `Thread::extra`.
 pub struct ThreadExtra {
@@ -29,6 +28,8 @@ pub struct ThreadExtra {
     pub base_frame: Box<Frame>,
     /// Objects of thread-local variables, which live as long as the thread.
     pub thread_locals: Vec<*mut Object>,
+    /// Where `zthread_exit` goes, for threads that started with one.
+    pub escape: usize,
 }
 
 /// Roots for what a stretch of native code allocates or loads.
@@ -77,8 +78,8 @@ pub fn require_current() -> *mut Thread {
     thread
 }
 
-/// The usable low end of this thread's stack.
-fn stack_low_end() -> usize {
+/// The low and high ends of this thread's stack.
+fn stack_bounds() -> (usize, usize) {
     unsafe {
         let mut attr: libc::pthread_attr_t = std::mem::zeroed();
         if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
@@ -88,7 +89,7 @@ fn stack_low_end() -> usize {
         let mut size = 0;
         libc::pthread_attr_getstack(&attr, &mut address, &mut size);
         libc::pthread_attr_destroy(&mut attr);
-        address as usize
+        (address as usize, address as usize + size)
     }
 }
 
@@ -101,6 +102,36 @@ static THREADS: Mutex<ThreadList> = Mutex::new(ThreadList(Vec::new()));
 /// nothing that holds it may wait for a collection or reach a safepoint.
 pub fn lock_threads() -> MutexGuard<'static, ThreadList> {
     THREADS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+static LIFECYCLE: Mutex<()> = Mutex::new(());
+static FINISHED: Condvar = Condvar::new();
+
+/// Keeps a thread from finishing, for whoever is about to signal it. Blocks, so
+/// only for exited threads.
+pub fn lock_lifecycle() -> MutexGuard<'static, ()> {
+    LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Returns once `thread` has finished. The caller has to be exited.
+pub unsafe fn wait_until_finished(thread: *mut Thread) {
+    let waited = FINISHED.wait_while(lock_lifecycle(), |_| unsafe { !(*thread).stopped });
+    drop(waited.unwrap_or_else(|e| e.into_inner()));
+}
+
+/// The calling thread is done with Fil-C for good. It's exited, with no frames
+/// left, and it won't touch `thread` after this.
+pub unsafe fn finish_current(thread: *mut Thread) {
+    {
+        let _guard = lock_lifecycle();
+        unsafe {
+            (*thread).host = 0;
+            (*thread).stopped = true;
+        }
+    }
+    FINISHED.notify_all();
+    CURRENT.with(|current| current.set(null_mut()));
+    unsafe { detach(thread) };
 }
 
 /// Lets a `Thread` go when its OS thread does.
@@ -119,8 +150,10 @@ thread_local! {
     static DETACH: Detach = const { Detach };
 }
 
-/// Frees a thread. Nothing it allocated goes with it: its blocks stay in their
-/// chunks, reachable or not.
+/// Frees what a thread doesn't need once it's gone, and stops treating it as a
+/// root. Nothing it allocated goes with it: its blocks stay in their chunks,
+/// reachable or not, and so does the `Thread`, which may be collected as soon
+/// as the lock is released.
 unsafe fn detach(thread: *mut Thread) {
     // A collection needs the slots to be flushed, or not in the list.
     let mut threads = lock_threads();
@@ -130,39 +163,47 @@ unsafe fn detach(thread: *mut Thread) {
         for slot in &mut this.slots {
             crate::heap::heap().flush_slot(slot);
         }
-        drop(threads);
         crate::cc::release_outline(thread);
         drop(Box::from_raw(this.extra));
-        dealloc(thread.cast::<u8>().wrapping_sub(THREAD_PREFIX), thread_layout());
+        this.extra = null_mut();
+        drop(threads);
     }
 }
 
-fn thread_layout() -> Layout {
-    Layout::from_size_align(size_of::<Thread>() + THREAD_PREFIX, 64).unwrap()
-}
-
-/// Makes a `Thread` for the calling OS thread, starting out exited.
+/// Makes a `Thread` for the calling OS thread, starting out exited, to go when
+/// the thread does.
 pub fn attach_current() -> *mut Thread {
     let existing = current();
     if !existing.is_null() {
         return existing;
     }
-    // The header goes in the padding in front, so the thread keeps its
-    // alignment.
-    let layout = thread_layout();
-    let memory = unsafe { alloc_zeroed(layout) };
-    if memory.is_null() {
-        std::alloc::handle_alloc_error(layout);
-    }
-    let thread = memory.wrapping_add(THREAD_PREFIX).cast::<Thread>();
-    let lower = thread.cast::<u8>();
-    let object = object_for_lower(lower);
-    unsafe {
+    let thread = attach();
+    // If the thread is on its way out, this does nothing, and the `Thread`
+    // stays around: destructors of Fil-C libraries can run that late.
+    let _ = DETACH.try_with(|_| ());
+    thread
+}
+
+/// [`attach_current`] for a thread that calls [`finish_current`] itself.
+/// Registering a thread-local destructor takes the loader's lock on glibc, so a
+/// constructor that waits for a new thread needs the thread not to.
+pub fn attach_new_thread() -> *mut Thread {
+    attach()
+}
+
+fn attach() -> *mut Thread {
+    let (low, top) = stack_bounds();
+    // A collection can't see the block until it's in the list.
+    let mut threads = lock_threads();
+    let thread = unsafe {
+        let object = crate::object::allocate_aligned(null_mut(), size_of::<Thread>(), align_of::<Thread>(), 0);
+        let lower = lower_for_object(object);
         // No size: nothing may read or write a thread through a capability.
         ptr::write(object, Object {
             upper: lower.into(),
-            aux: aux_create(FLAG_GLOBAL | FLAG_READONLY | object_flags(SPECIAL_THREAD, 0), lower).into(),
+            aux: aux_create(FLAG_READONLY | object_flags(SPECIAL_THREAD, 0), lower).into(),
         });
+        let thread = lower.cast::<Thread>();
         let base_frame = Box::new(Frame {
             parent: null_mut(),
             origin: &BASE_ORIGIN.0,
@@ -174,19 +215,22 @@ pub fn attach_current() -> *mut Thread {
             tracked: Vec::new(),
             base_frame,
             thread_locals: Vec::new(),
+            escape: 0,
         }));
-        this.stack_limit = (stack_low_end() + STACK_SLACK) as *mut u8;
+        this.stack_limit = (low + STACK_SLACK) as *mut u8;
+        this.stack_low = low as *mut u8;
+        this.stack_top = top as *mut u8;
         this.tid = libc::gettid() as u32;
+        this.host = libc::pthread_self() as usize;
         for (class, slot) in this.slots.iter_mut().enumerate() {
             slot.class = class;
         }
-    }
+        thread
+    };
+    threads.0.push(thread as usize);
+    drop(threads);
     CURRENT.with(|current| current.set(thread));
     unsafe { crate::gc::rearm_under_stress(thread) };
-    lock_threads().0.push(thread as usize);
-    // If the thread is on its way out, this does nothing, and the `Thread`
-    // stays around: destructors of Fil-C libraries can run that late.
-    let _ = DETACH.try_with(|_| ());
     thread
 }
 

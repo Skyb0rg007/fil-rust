@@ -117,11 +117,15 @@ let
   }
   // lib.optionalAttrs host.isx86_64 {
     rust-rt = {
-      description = "The Rust runtime's tests, and the libc-free suites on both backends";
+      description = "The Rust runtime's tests, and what's neutral about the backends on both";
       run = ''
         cargo test --offline ${target} -p fil-rust-rt
-        FIL_RUST_RUNTIME=rust cargo test --offline ${target} -p fil-rust --test rt_bare --test rt_gc --test layout
-        FIL_RUST_RUNTIME=pizlo cargo test --offline ${target} -p fil-rust --test rt_bare
+        FIL_RUST_RUNTIME=rust cargo test --offline ${target} -p fil-rust \
+          --test rt_bare --test rt_gc --test rt_libc --test sys --test layout --test boot --test edges \
+          --test smoke --test calls --test memory --test threads --test lifecycle --test stress \
+          --test startup --test callbacks --test embedded --test process --test properties \
+          --test misuse --test bindgen --test ui
+        FIL_RUST_RUNTIME=pizlo cargo test --offline ${target} -p fil-rust --test rt_bare --test sys --test boot
       '';
     };
 
@@ -131,7 +135,9 @@ let
         FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust-rt
         FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust --test rt_gc --test layout
         # Every 8th: with threads, each collection waits for all of them.
-        FIL_RUST_GC_STRESS=8 cargo test --offline ${target} -p fil-rust --test rt_bare
+        FIL_RUST_GC_STRESS=8 cargo test --offline ${target} -p fil-rust --test rt_bare --test rt_libc --test sys \
+          --test smoke --test calls --test memory --test threads --test callbacks --test properties \
+          --test process --test startup
       '';
     };
 

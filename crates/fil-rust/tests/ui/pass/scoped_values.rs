@@ -32,7 +32,8 @@ fn main() {
     });
 
     // Library functions outlive scopes and threads.
-    let strlen = rt.run(|fil| fil.libc().function::<fn(Ptr<c_char>) -> usize>(fil, "strlen").unwrap());
+    let libc = rt.libc();
+    let strlen = rt.run(|fil| libc.function::<fn(Ptr<c_char>) -> usize>(fil, "strlen").unwrap());
     std::thread::spawn(move || {
         let rt = fil_rust::Runtime::get().unwrap();
         rt.run(|fil| strlen.call(fil, (fil.c_str("x").unwrap(),)).unwrap());

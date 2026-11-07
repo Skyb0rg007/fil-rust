@@ -247,13 +247,43 @@ pub unsafe fn for_each_root(mut visit: impl FnMut(*mut Object)) {
     }
 }
 
-const CTORS_DEFERRED: u8 = 0;
-const CTORS_RUN_NOW: u8 = 1;
+/// Constructors run as they turn up, in a process with no libc.
+const CTORS_BARE: u8 = 0;
+/// They wait for the libc to reach `__libc_start_main`.
+const CTORS_DEFERRED: u8 = 1;
+/// That happened, and any more run as they turn up.
+const CTORS_DONE: u8 = 2;
 
-/// Whether constructors run as they turn up (bare), or wait for the user libc
-/// to reach `__libc_start_main`.
-static CTOR_MODE: AtomicU8 = AtomicU8::new(CTORS_RUN_NOW);
+static CTOR_MODE: AtomicU8 = AtomicU8::new(CTORS_BARE);
 static DEFERRED_CTORS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+/// Holds back constructors until the libc that's about to load is ready.
+/// Constructors from before this have already run.
+pub fn defer_ctors() {
+    CTOR_MODE.store(CTORS_DEFERRED, Ordering::Release);
+}
+
+/// Whether Fil-C code may create threads. Until the libc has set itself up,
+/// it can't.
+pub fn ctors_started() -> bool {
+    CTOR_MODE.load(Ordering::Acquire) != CTORS_DEFERRED
+}
+
+/// `__libc_start_main` got to the point of running constructors. They run in
+/// the order they were deferred, which is what preserves their priorities.
+pub unsafe fn run_deferred_ctors(me: *mut Thread) {
+    if CTOR_MODE.swap(CTORS_DONE, Ordering::AcqRel) != CTORS_DEFERRED {
+        crate::failure::safety_panic(format_args!("cannot run deferred global constructors twice."));
+    }
+    let mut index = 0;
+    loop {
+        let next = DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner()).get(index).copied();
+        let Some((ptr, lower)) = next else { break };
+        unsafe { run_ctor(me, Ptr { ptr: ptr as *mut u8, lower: lower as *mut u8 }) };
+        index += 1;
+    }
+    DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
 
 /// Empty, null-terminated argv and environ, for constructors in a process
 /// that has no Fil-C `main`. Both are the same read-only word.
@@ -274,8 +304,13 @@ fn empty_vector(me: *mut Thread) -> Ptr {
 }
 
 unsafe fn run_ctor(me: *mut Thread, ctor: Ptr) {
-    let vector = empty_vector(me);
-    let args = [Ptr { ptr: std::ptr::null_mut(), lower: std::ptr::null_mut() }, vector, vector];
+    let args = crate::start::user_environment().map_or_else(
+        || {
+            let vector = empty_vector(me);
+            [Ptr::NULL, vector, vector]
+        },
+        |user| [Ptr { ptr: user.argc as *mut u8, lower: std::ptr::null_mut() }, user.argv, user.environ],
+    );
     unsafe { crate::call(me, ctor, &args, &mut []) };
 }
 

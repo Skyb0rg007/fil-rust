@@ -25,7 +25,7 @@ use crate::abi::*;
 use crate::failure::internal_panic;
 use crate::heap::heap;
 use crate::thread::{self, extra};
-use crate::{globals, ptrs, shim};
+use crate::{globals, ptrs, shim, start};
 
 /// When collections happen. A collection is the only thing that gives memory
 /// back, `free` included.
@@ -418,6 +418,17 @@ impl Marker {
                 }
                 return;
             }
+            SPECIAL_THREAD => {
+                // This much of a thread is still of use once it's gone. A
+                // running thread gets the rest from `mark_thread`.
+                let thread = lower_for_object(object).cast::<Thread>();
+                unsafe {
+                    self.mark_or_free_flight(&raw mut (*thread).cookie);
+                    self.mark_or_free_flight(&raw mut (*thread).result);
+                }
+                return;
+            }
+            SPECIAL_DL_HANDLE => return,
             special => internal_panic(format_args!("the collector can't scan special objects of type {special}")),
         }
         let aux = this.aux_ptr();
@@ -471,7 +482,7 @@ impl Marker {
             for index in 0..extra.thread_locals.len() {
                 self.mark(extra.thread_locals[index]);
             }
-            self.mark_or_free_flight(&raw mut (*thread).cookie);
+            self.mark(object_for_lower(thread.cast()));
         }
     }
 
@@ -492,7 +503,7 @@ unsafe fn verify_object(object: *mut Object, block: usize, size: usize) {
     let good = (object as usize) >= block
         && upper >= lower
         && upper <= block + size
-        && matches!(this.special_type(), 0 | SPECIAL_FUNCTION | SPECIAL_THREAD)
+        && matches!(this.special_type(), 0 | SPECIAL_FUNCTION | SPECIAL_THREAD | SPECIAL_DL_HANDLE)
         && (aux == 0 || heap().contains(aux) || this.special_type() != 0);
     if !good {
         internal_panic(format_args!(
@@ -514,6 +525,7 @@ fn run(collector: &mut Collector) {
     unsafe {
         globals::for_each_root(|object| marker.root(object));
         shim::for_each_root(|object| marker.mark(object));
+        start::for_each_root(|object| marker.mark(object));
         for &entry in &threads.0 {
             marker.mark_thread(thread_at(entry));
         }

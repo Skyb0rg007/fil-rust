@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
-use fil_rust::{Config, Flavor, Runtime};
+use fil_rust::{Config, Flavor, Libc, Runtime};
 
 static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -127,7 +127,7 @@ pub fn runtime() -> Runtime {
         if std::env::var_os("FIL_RUST_ALLOW_PTRACE").is_some() {
             unsafe { libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY) };
         }
-        Runtime::start(config()).expect("starting the Fil-C runtime")
+        Runtime::start(config().libc(Libc::Always)).expect("starting the Fil-C runtime")
     })
 }
 

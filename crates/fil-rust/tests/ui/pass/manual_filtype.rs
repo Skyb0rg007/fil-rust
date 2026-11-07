@@ -62,10 +62,11 @@ impl FilType for Range {
 
 fn main() {
     let rt = fil_rust::Runtime::start_from_env().unwrap();
+    let libc = rt.libc();
     rt.run(|fil| {
         let p = fil.alloc::<Range>(&(Celsius(-5), Celsius(30))).unwrap();
         assert_eq!(p.read(fil).unwrap(), (Celsius(-5), Celsius(30)));
-        let abs = fil.libc().function::<fn(Celsius) -> Celsius>(fil, "abs").unwrap();
+        let abs = libc.function::<fn(Celsius) -> Celsius>(fil, "abs").unwrap();
         assert_eq!(abs.call(fil, (Celsius(-3),)).unwrap(), Celsius(3));
         let _ = abs.dyn_call(fil).arg(Celsius(-4)).call::<Celsius>();
     });

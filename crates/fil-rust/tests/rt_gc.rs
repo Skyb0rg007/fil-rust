@@ -61,13 +61,40 @@ fn what_compiled_frames_hold_survives() {
     let _serial = serial();
     runtime().run(|fil| {
         let collect = collector(fil);
-        for name in ["frame_slot", "escaping_local", "atomic_box", "closure_data", "thread_local", "aligned"] {
+        for name in ["frame_slot", "escaping_local", "atomic_box", "closure_data", "thread_local", "thread_cookie", "aligned"] {
             let function = library().function::<fn(Collect, i64) -> i64>(fil, name).unwrap();
             assert_eq!(function.call(fil, (collect.get(fil), 1234)).unwrap(), 1234, "{name}");
         }
         let stack_aux = library().function::<fn(Collect, i64, i32) -> i64>(fil, "stack_aux").unwrap();
         assert_eq!(stack_aux.call(fil, (collect.get(fil), 1000, 8)).unwrap(), 8028);
     });
+}
+
+#[test]
+fn a_finished_thread_keeps_what_it_returned() {
+    let _serial = serial();
+    runtime().run(|fil| {
+        let collect = collector(fil);
+        let result = library().function::<fn(Collect, i64, i32) -> i64>(fil, "thread_result").unwrap();
+        assert_eq!(result.call(fil, (collect.get(fil), 1234, 0)).unwrap(), 1234);
+        assert_eq!(result.call(fil, (collect.get(fil), 1234, 1)).unwrap(), 1234);
+        let identity = library().function::<fn(Collect) -> bool>(fil, "finished_thread_keeps_its_identity").unwrap();
+        assert!(identity.call(fil, (collect.get(fil),)).unwrap());
+    });
+}
+
+#[test]
+fn finished_threads_go_away() {
+    let _serial = serial();
+    let rt = runtime();
+    let churn = |count: i64| {
+        rt.run(|fil| library().function::<fn(i64)>(fil, "churn_threads").unwrap().call(fil, (count,)).unwrap());
+    };
+    churn(1);
+    let baseline = live_after_collecting();
+    churn(100);
+    let after = live_after_collecting();
+    assert!(after <= baseline + (1 << 12), "{baseline} became {after}");
 }
 
 #[test]

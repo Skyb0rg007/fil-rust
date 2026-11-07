@@ -36,6 +36,10 @@ impl Clone for Library {
 }
 
 impl Library {
+    pub(crate) fn handle(&self) -> *mut c_void {
+        self.handle
+    }
+
     pub(crate) fn from_handle(handle: *mut c_void, path: PathBuf) -> Library {
         Library { handle, path }
     }
@@ -53,9 +57,14 @@ impl Library {
         // threads, for one, waits for every entered thread). So never wait
         // for it while entered.
         let handle = self.handle as usize;
+        let libc = crate::runtime::loaded_libc_handle() as usize;
         let getter = crate::runtime::outside_runtime(|| unsafe {
             libc::dlerror();
-            let getter = libc::dlsym(handle as *mut c_void, symbol.as_ptr());
+            let mut getter = libc::dlsym(handle as *mut c_void, symbol.as_ptr());
+            // A library loaded before the libc depends on its stand-in.
+            if getter.is_null() && libc != 0 {
+                getter = libc::dlsym(libc as *mut c_void, symbol.as_ptr());
+            }
             if getter.is_null() {
                 let _ = dlerror_string();
             }
@@ -100,9 +109,10 @@ impl Library {
 
 /// Fails if the process has mapped what fil-rust means to stand in for. The
 /// real yolo libc would put two C libraries in one address space. On the Rust
-/// backend, the same goes for libpizlo and the Fil-C libc, which would bring a
-/// second runtime and a libc with no thread to run on.
-pub(crate) fn check_no_foreign_runtime(config: &Config) -> Result<()> {
+/// backend, the same goes for libpizlo, which would bring a second runtime, and
+/// for a Fil-C libc that wasn't loaded through here, which would have no thread
+/// to run on.
+pub(crate) fn check_no_foreign_runtime(config: &Config, has_libc: bool) -> Result<()> {
     let flavor = config.flavor();
     for name in loaded_objects() {
         if name.starts_with("/proc/self/fd/") {
@@ -115,15 +125,78 @@ pub(crate) fn check_no_foreign_runtime(config: &Config) -> Result<()> {
                  Fil-C objects must only be loaded through fil-rust"
             )));
         }
-        if config.backend() == Backend::Rust
-            && (base == "libpizlo.so" || flavor.libc_stand_ins().iter().any(|lib| lib.soname == base))
-        {
+        let foreign_libc = !has_libc && flavor.libc_stand_ins().iter().any(|lib| lib.soname == base);
+        if config.backend() == Backend::Rust && (base == "libpizlo.so" || foreign_libc) {
             return Err(Error::Load(format!(
                 "{name} was loaded into the process, but the Rust runtime stands in for it"
             )));
         }
     }
     Ok(())
+}
+
+/// The first thing `data`, a library, needs from the Fil-C libc, if anything:
+/// a function nothing else in the process can give it, by name, as that's what
+/// tells. Every Fil-C library is linked against the libc whether it uses it or
+/// not.
+pub(crate) fn libc_import(inner: &Inner, data: &[u8]) -> Option<String> {
+    let mut seen = Vec::new();
+    let mut wanted = Vec::new();
+    let mut defined = std::collections::HashSet::new();
+    let mut loaded = Vec::new();
+    let mut pending = vec![data.to_vec()];
+    while let Some(object) = pending.pop() {
+        for symbol in elf::symbols(&object) {
+            if symbol.defined {
+                defined.insert(symbol.name);
+            } else if !symbol.weak && symbol.name.starts_with("pizlonated_") {
+                wanted.push(symbol.name);
+            }
+        }
+        for name in elf::needed(&object) {
+            if seen.contains(&name) || RUNTIME_LIBRARIES.contains(&name.as_str()) {
+                continue;
+            }
+            seen.push(name.clone());
+            if let Some(handle) = open_if_loaded(&name) {
+                loaded.push(handle as usize);
+            } else if let Some(contents) = inner
+                .config
+                .search_dirs()
+                .iter()
+                .map(|dir| dir.join(&name))
+                .find(|path| path.is_file())
+                .and_then(|path| std::fs::read(path).ok())
+            {
+                pending.push(contents);
+            }
+        }
+    }
+    let runtime = inner.runtime_lib.handle() as usize;
+    wanted.into_iter().find(|symbol| {
+        !defined.contains(symbol) && {
+            let name = CString::new(symbol.as_str()).unwrap_or_default();
+            !std::iter::once(runtime)
+                .chain(loaded.iter().copied())
+                .any(|handle| !unsafe { libc::dlsym(handle as *mut c_void, name.as_ptr()) }.is_null())
+        }
+    })
+}
+
+/// What every Fil-C library is linked against, and says nothing of what it uses.
+const RUNTIME_LIBRARIES: [&str; 3] = ["libc.so", "libpizlo.so", "libyoloc.so"];
+
+fn open_if_loaded(name: &str) -> Option<*mut c_void> {
+    let c = CString::new(name).ok()?;
+    unsafe {
+        let handle = libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_NOLOAD);
+        if handle.is_null() {
+            libc::dlerror();
+            None
+        } else {
+            Some(handle)
+        }
+    }
 }
 
 fn is_loaded(name: &str) -> bool {
@@ -217,7 +290,7 @@ pub(crate) fn open(inner: &Inner, path: &Path) -> Result<Library> {
     let mut visited = Vec::new();
     preload_dependencies(&inner.config.search_dirs(), path, &mut visited)?;
     let handle = unsafe { dlopen_path(path, libc::RTLD_NOW | libc::RTLD_LOCAL) }.map_err(Error::Load)?;
-    check_no_foreign_runtime(&inner.config)?;
+    check_no_foreign_runtime(&inner.config, inner.has_libc())?;
     Ok(Library::from_handle(handle, path.to_path_buf()))
 }
 
@@ -328,6 +401,57 @@ pub(crate) mod elf {
     }
     fn u64_at(d: &[u8], o: usize) -> Option<u64> {
         Some(u64::from_le_bytes(d.get(o..o.checked_add(8)?)?.try_into().ok()?))
+    }
+
+    const SHT_DYNSYM: u32 = 11;
+    const SHN_UNDEF: u16 = 0;
+    const STB_WEAK: u8 = 2;
+    const SYMBOL_SIZE: usize = 24;
+
+    /// A name in the dynamic symbol table.
+    pub struct Symbol {
+        pub name: String,
+        pub defined: bool,
+        pub weak: bool,
+    }
+
+    /// The dynamic symbols of a 64-bit little-endian ELF file (empty if it isn't
+    /// one), by way of its section headers, which every Fil-C library has.
+    pub fn symbols(d: &[u8]) -> Vec<Symbol> {
+        parse_symbols(d).unwrap_or_default()
+    }
+
+    fn parse_symbols(d: &[u8]) -> Option<Vec<Symbol>> {
+        if d.get(0..4)? != b"\x7fELF" || *d.get(4)? != 2 || *d.get(5)? != 1 {
+            return None;
+        }
+        let shoff = usize::try_from(u64_at(d, 0x28)?).ok()?;
+        let shentsize = u16_at(d, 0x3a)? as usize;
+        let shnum = u16_at(d, 0x3c)? as usize;
+        let section = |index: usize| shoff.checked_add(index.checked_mul(shentsize)?);
+        for index in 0..shnum {
+            let header = section(index)?;
+            if u32_at(d, header.checked_add(4)?)? != SHT_DYNSYM {
+                continue;
+            }
+            let offset = usize::try_from(u64_at(d, header.checked_add(24)?)?).ok()?;
+            let size = usize::try_from(u64_at(d, header.checked_add(32)?)?).ok()?;
+            let strings_header = section(u32_at(d, header.checked_add(40)?)? as usize)?;
+            let strings = usize::try_from(u64_at(d, strings_header.checked_add(24)?)?).ok()?;
+            return (0..size / SYMBOL_SIZE)
+                .map(|entry| {
+                    let symbol = offset.checked_add(entry.checked_mul(SYMBOL_SIZE)?)?;
+                    let start = strings.checked_add(u32_at(d, symbol)? as usize)?;
+                    let end = start.checked_add(d.get(start..)?.iter().position(|&b| b == 0)?)?;
+                    Some(Symbol {
+                        name: String::from_utf8_lossy(&d[start..end]).into_owned(),
+                        defined: u16_at(d, symbol.checked_add(6)?)? != SHN_UNDEF,
+                        weak: *d.get(symbol.checked_add(4)?)? >> 4 == STB_WEAK,
+                    })
+                })
+                .collect();
+        }
+        None
     }
 
     const PT_LOAD: u32 = 1;

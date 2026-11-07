@@ -27,6 +27,7 @@ pub const FLAGS_ALIGN_SHIFT: u32 = 11;
 
 pub const SPECIAL_FUNCTION: usize = 1;
 pub const SPECIAL_THREAD: usize = 2;
+pub const SPECIAL_DL_HANDLE: usize = 6;
 
 /// Marks an aux word that holds a box pointer rather than a `lower`.
 pub const ATOMIC_BOX_BIT: usize = 1;
@@ -292,7 +293,18 @@ pub struct Thread {
     pub cc_outline_size: usize,
     /// The runtime's own per-thread state.
     pub extra: *mut crate::thread::ThreadExtra,
-    _pad3: [u8; ALLOCATOR_SLOTS_OFFSET - 672],
+    /// Where the thread's stack ends and begins, kept for after it's gone.
+    pub stack_low: *mut u8,
+    pub stack_top: *mut u8,
+    /// What it passed to `zthread_exit`, for whoever joins it.
+    pub result: Ptr,
+    /// The `pthread_t`, while the thread is running.
+    pub host: usize,
+    /// Set by a thread that's finished, under `thread::lock_lifecycle`.
+    pub stopped: bool,
+    /// How many `zincrement_signal_deferral_depth` calls are in effect.
+    pub signal_deferral_depth: u64,
+    _pad3: [u8; ALLOCATOR_SLOTS_OFFSET - 728],
     pub slots: [AllocatorSlot; NUM_ALLOCATOR_SLOTS],
 }
 

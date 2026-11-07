@@ -123,8 +123,8 @@ fn child_entry() {
         "argv" => {
             let (user, dir) = user_library();
             let rt = Runtime::start(config().args(["custom-name", "--flag"]).search_path(dir)).unwrap();
+            let lib = rt.load(&user).unwrap();
             let name = rt.run(|fil| {
-                let lib = fil.load(&user).unwrap();
                 let argv0 = lib.function::<fn() -> Ptr<c_char>>(fil, "argv0").unwrap();
                 argv0.call(fil, ()).unwrap().read_string(fil).unwrap()
             });
@@ -133,8 +133,8 @@ fn child_entry() {
         "search-path" => {
             let (user, dir) = user_library();
             let rt = Runtime::start(config().search_path(&dir)).unwrap();
+            let lib = rt.load(&user).unwrap();
             let v = rt.run(|fil| {
-                let lib = fil.load(&user).unwrap();
                 lib.function::<fn(i32) -> i32>(fil, "use_dep").unwrap().call(fil, (2,)).unwrap()
             });
             assert_eq!(v, 1007);

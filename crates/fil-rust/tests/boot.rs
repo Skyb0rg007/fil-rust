@@ -6,7 +6,7 @@ mod common;
 use std::ffi::c_char;
 
 use common::{flavor, runtime};
-use fil_rust::{Flavor, Ptr};
+use fil_rust::{Backend, Flavor, Ptr};
 
 fn thread_name(tid: &str) -> String {
     std::fs::read_to_string(format!("/proc/self/task/{tid}/comm")).unwrap_or_default().trim().to_string()
@@ -52,9 +52,15 @@ fn the_yolo_libc_is_replaced_by_stand_ins() {
     }
     // The stand-ins are loaded from memory.
     assert!(paths.iter().any(|p| *p == format!("/memfd:{}", real_yolo[0])), "no stand-in for {}", real_yolo[0]);
-    // And the runtime comes from the configured distribution.
-    let lib_dir = rt.config().lib_dir();
-    assert!(paths.iter().any(|p| *p == lib_dir.join("libpizlo.so").to_str().unwrap()));
+    // And the runtime comes from the configured distribution, or from memory
+    // if it's the one in this process.
+    let libpizlo = rt.config().lib_dir().join("libpizlo.so");
+    let real = paths.iter().any(|p| *p == libpizlo.to_str().unwrap());
+    let stub = paths.contains(&"/memfd:libpizlo.so");
+    match rt.config().backend() {
+        Backend::Pizlo => assert!(real && !stub),
+        Backend::Rust => assert!(stub && !real),
+    }
 }
 
 #[test]

@@ -11,13 +11,13 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use crate::abi::*;
 use crate::failure::{safety_panic, user_panic};
 use crate::object::{self, Access};
-use crate::thread::{self, NativeFrame};
+use crate::thread;
 use crate::{cc, memops};
 
 /// A cursor over the argument buffer.
 pub struct Args {
-    offset: usize,
-    size: usize,
+    pub(crate) offset: usize,
+    pub(crate) size: usize,
 }
 
 impl Args {
@@ -90,6 +90,31 @@ impl Value for Ptr {
     }
 }
 
+/// The arguments of a variadic function, past the named ones.
+pub struct Rest {
+    args: Args,
+}
+
+impl Rest {
+    pub fn has_next(&self) -> bool {
+        self.args.offset < self.args.size
+    }
+
+    pub unsafe fn next<T: Value>(&mut self, thread: *mut Thread) -> T {
+        unsafe { T::take(thread, &mut self.args) }
+    }
+}
+
+impl Value for Rest {
+    unsafe fn take(_: *mut Thread, args: &mut Args) -> Rest {
+        Rest { args: Args { offset: args.offset, size: args.size } }
+    }
+
+    unsafe fn give(self, _: *mut Thread) -> usize {
+        crate::failure::internal_panic(format_args!("variadic arguments can't be returned"));
+    }
+}
+
 impl Value for () {
     unsafe fn take(_: *mut Thread, _: &mut Args) {}
 
@@ -133,7 +158,13 @@ macro_rules! natives {
         $(
             #[allow(non_snake_case)]
             mod $name {
+                #[allow(unused_imports)]
                 use super::*;
+                use std::ptr::null_mut;
+                use std::sync::atomic::AtomicPtr;
+                use $crate::abi::{FunctionObject, Origin, Ptr, ReturnValue, Thread};
+                use $crate::natives::{Args, Value, function_object};
+                use $crate::thread::NativeFrame;
 
                 pub unsafe extern "C" fn entry(thread: *mut Thread, _: *mut u8, size: usize) -> ReturnValue {
                     let frame = unsafe { NativeFrame::push(thread) };
@@ -146,8 +177,8 @@ macro_rules! natives {
                     ReturnValue { has_exception: false, return_size }
                 }
 
-                #[allow(unused_variables, clippy::unused_unit)]
-                unsafe fn body($thread: *mut Thread $(, $arg: $ty)*) -> $ret $body
+                #[allow(unused_variables, clippy::unused_unit, unused_mut)]
+                unsafe fn body($thread: *mut Thread $(, mut $arg: $ty)*) -> $ret $body
 
                 pub unsafe extern "C" fn getter(_: *mut Thread, _: *const Origin) -> Ptr {
                     static CELL: AtomicPtr<FunctionObject> = AtomicPtr::new(null_mut());
@@ -156,15 +187,17 @@ macro_rules! natives {
             }
         )*
 
-        /// Stub slots for every native so far, keyed by symbol.
+        /// Stub slots for the natives here, keyed by symbol.
         pub fn table() -> Vec<(&'static str, *const ())> {
             vec![$((concat!("pizlonated_", stringify!($name)), $name::getter as *const ())),*]
         }
     };
 }
 
+pub(crate) use natives;
+
 /// Copies out a null-terminated string that the access checks allow.
-unsafe fn string_of(ptr_: Ptr) -> Vec<u8> {
+pub unsafe fn string_of(ptr_: Ptr) -> Vec<u8> {
     object::check_access(ptr_, 1, Access::Read);
     let available = unsafe { (*ptr_.object()).upper() } as usize - ptr_.ptr as usize;
     let bytes = unsafe { std::slice::from_raw_parts(ptr_.ptr, available) };
@@ -308,5 +341,30 @@ natives! {
 
     fn zis_runtime_testing_enabled(thread: *mut Thread) -> bool {
         false
+    }
+
+    fn zcall(thread: *mut Thread, callee: Ptr, arguments: Ptr) -> Ptr {
+        unsafe {
+            let size = cc::demote_from_heap(thread, arguments);
+            object::check_function_call(callee);
+            let function = &*callee.ptr.cast::<Function>();
+            let result = (function.generic_entrypoint)(thread, callee.lower, size);
+            if result.has_exception {
+                crate::failure::internal_panic(format_args!("Fil-C exceptions aren't supported yet"));
+            }
+            cc::promote_to_heap(thread, result.return_size)
+        }
+    }
+
+    fn zrun_deferred_global_ctors(thread: *mut Thread) -> () {
+        unsafe { crate::globals::run_deferred_ctors(thread) };
+    }
+
+    fn zregister_sys_errno_handler(thread: *mut Thread, handler: Ptr) -> () {
+        crate::start::register_errno_handler(handler);
+    }
+
+    fn zregister_sys_dlerror_handler(thread: *mut Thread, handler: Ptr) -> () {
+        crate::start::register_dlerror_handler(handler);
     }
 }

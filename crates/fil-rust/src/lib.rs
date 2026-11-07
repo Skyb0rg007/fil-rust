@@ -14,8 +14,9 @@
 //! # fn main() -> fil_rust::Result<()> {
 //! let rt = Runtime::start_from_env()?;
 //! let lib = rt.load("libdemo.so")?;
+//! let libc = rt.libc();
 //! let n = rt.run(|fil| -> fil_rust::Result<usize> {
-//!     let strlen = fil.libc().function::<fn(Ptr<c_char>) -> usize>(fil, "strlen")?;
+//!     let strlen = libc.function::<fn(Ptr<c_char>) -> usize>(fil, "strlen")?;
 //!     let s = fil.c_str("hello")?;
 //!     strlen.call(fil, (s,))
 //! })?;

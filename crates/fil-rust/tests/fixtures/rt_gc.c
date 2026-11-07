@@ -151,6 +151,81 @@ int64_t thread_local(collect_fn collect, int64_t value)
     return per_thread->value;
 }
 
+/* The libc keeps its thread structure here. */
+void* zthread_self_cookie(void);
+void zthread_set_self_cookie(void* cookie);
+
+__attribute__((noinline)) static void set_cookie(int64_t value)
+{
+    zthread_set_self_cookie(make(value, NULL));
+}
+
+int64_t thread_cookie(collect_fn collect, int64_t value)
+{
+    set_cookie(value);
+    collect();
+    return ((struct node*)zthread_self_cookie())->value;
+}
+
+/* Threads, which run with no libc here, as nothing stops them. */
+void* zthread_create(void* (*callback)(void* arg), void* arg);
+_Bool zthread_join(void* thread, void** result);
+unsigned zthread_get_id(void* thread);
+void zthread_exit(void* result);
+
+static void* return_node(void* value)
+{
+    return make((int64_t)value, NULL);
+}
+
+__attribute__((noinline)) static void exit_deep_down(int64_t depth, int64_t value)
+{
+    if (depth)
+        exit_deep_down(depth - 1, value);
+    zthread_exit(make(value, NULL));
+}
+
+static void* exit_with_node(void* value)
+{
+    exit_deep_down(16, (int64_t)value);
+    return NULL;
+}
+
+static void* do_nothing(void* unused)
+{
+    return unused;
+}
+
+/* All a finished thread is good for is what it returned. */
+int64_t thread_result(collect_fn collect, int64_t value, int by_exiting)
+{
+    void* thread = zthread_create(by_exiting ? exit_with_node : return_node, (void*)value);
+    zthread_join(thread, NULL);
+    collect();
+    void* result = NULL;
+    zthread_join(thread, &result);
+    return ((struct node*)result)->value;
+}
+
+/* A capability to a thread that's gone is still a capability. If the memory
+   behind it had been reused, this would be some other thread. */
+_Bool finished_thread_keeps_its_identity(collect_fn collect)
+{
+    void* thread = zthread_create(do_nothing, NULL);
+    zthread_join(thread, NULL);
+    unsigned id = zthread_get_id(thread);
+    collect();
+    void* other = zthread_create(do_nothing, NULL);
+    zthread_join(other, NULL);
+    return zthread_get_id(thread) == id;
+}
+
+void churn_threads(int64_t count)
+{
+    for (int64_t index = 0; index < count; ++index)
+        zthread_join(zthread_create(do_nothing, NULL), NULL);
+}
+
 /* A global, and what it refers to. */
 static struct node* volatile global;
 

@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use common::{fixture, flavor};
-use fil_rust::{Backend, Config, Error, FilHandle, FilPtr, Libc, Library, Ptr, Runtime};
+use fil_rust::{Backend, Config, Error, FilHandle, FilPtr, Library, Ptr, Runtime};
 
 fn backend() -> Backend {
     match std::env::var("FIL_RUST_RUNTIME").as_deref() {
@@ -78,10 +78,6 @@ fn child() {
             let mappings = distribution_mappings();
             assert!(mappings.is_empty(), "{mappings:#?}");
         }
-        "unsupported_libc" => {
-            let started = Runtime::start(config().libc(Libc::Always));
-            assert!(matches!(started, Err(Error::Unsupported(_))), "{started:?}");
-        }
         "past_the_end" => runtime().run(|fil| {
             let read = library().function::<fn() -> i32>(fil, "read_past_end").unwrap();
             let _ = read.call(fil, ());
@@ -99,32 +95,12 @@ fn starts_nothing_and_maps_nothing_of_the_distribution() {
 }
 
 #[test]
-fn asking_for_a_libc_is_refused_until_there_is_one() {
-    if backend() == Backend::Rust {
-        let output = run_child("unsupported_libc");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    }
-}
-
-#[test]
 fn safety_failures_stop_the_process() {
     let output = run_child("past_the_end");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("filc panic"), "{stderr}");
     assert!(stderr.contains("read_past_end"), "{stderr}");
-}
-
-#[test]
-fn a_library_that_needs_libc_is_rejected_by_name() {
-    if backend() != Backend::Rust {
-        return;
-    }
-    let path = fixture("rt_needs_libc.c");
-    match runtime().load(path) {
-        Err(Error::Load(message)) => assert!(message.contains("pizlonated_getpid"), "{message}"),
-        other => panic!("{other:?}"),
-    }
 }
 
 #[test]
@@ -283,6 +259,6 @@ fn the_runtime_library_answers_without_a_libc() {
         fil.collect_garbage().unwrap();
         fil.flush().unwrap();
     });
-    assert_eq!(rt.libc().has_symbol("strlen"), backend() == Backend::Pizlo);
+    rt.run(|fil| assert_eq!(fil.libc().has_symbol("strlen"), backend() == Backend::Pizlo));
 }
 
