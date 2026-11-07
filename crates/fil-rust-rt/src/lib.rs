@@ -22,6 +22,7 @@ pub mod gc;
 pub mod globals;
 pub mod heap;
 mod helpers;
+mod jump;
 mod memops;
 mod natives;
 pub mod object;
@@ -96,6 +97,7 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
         implemented.extend(natives::table());
         implemented.extend(sys::table());
         implemented.extend(zthread::table());
+        implemented.extend(jump::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;

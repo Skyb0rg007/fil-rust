@@ -75,6 +75,20 @@ pub unsafe fn allocate_aligned(thread: *mut Thread, size: usize, alignment: usiz
 /// collection finds nothing refers to it. The header has to stay as it is
 /// until then, because compiled code relies on `upper == lower` for bounds
 /// checks and on the flag for the rest.
+/// An object that compiled code can hold a capability for and do nothing else
+/// with: it can't be read or written, and only a runtime function can tell what
+/// it is. `size` bytes of the runtime's own follow the header.
+pub unsafe fn allocate_special(thread: *mut Thread, size: usize, special: usize) -> *mut Object {
+    unsafe {
+        let block = heap().allocate(thread, OBJECT_SIZE + size);
+        let object = block.cast::<Object>();
+        let lower = lower_for_object(object);
+        (*object).upper.store(lower, Ordering::Relaxed);
+        (*object).aux.store(aux_create(FLAG_READONLY | object_flags(special, 0), lower), Ordering::Release);
+        object
+    }
+}
+
 pub unsafe fn free(ptr: Ptr) {
     if ptr.ptr.is_null() {
         return;

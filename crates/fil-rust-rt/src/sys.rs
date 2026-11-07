@@ -253,12 +253,8 @@ unsafe fn futex_timed_wait(address: *mut u8, value: c_int, clock: c_int, at: *co
 /// `dlopen` hands out a capability for the handle.
 unsafe fn dl_handle_object(thread: *mut Thread, handle: *mut c_void) -> Ptr {
     unsafe {
-        let block = crate::heap::heap().allocate(thread, OBJECT_SIZE + MIN_ALIGN);
-        let object = block.cast::<Object>();
-        let lower = lower_for_object(object);
-        (*object).upper.store(lower, Ordering::Relaxed);
-        (*object).aux.store(aux_create(FLAG_READONLY | object_flags(SPECIAL_DL_HANDLE, 0), lower), Ordering::Release);
-        lower.cast::<*mut c_void>().write(handle);
+        let object = object::allocate_special(thread, size_of::<*mut c_void>(), SPECIAL_DL_HANDLE);
+        lower_for_object(object).cast::<*mut c_void>().write(handle);
         Ptr::for_object(object)
     }
 }

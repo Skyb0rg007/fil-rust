@@ -28,6 +28,7 @@ pub const FLAGS_ALIGN_SHIFT: u32 = 11;
 pub const SPECIAL_FUNCTION: usize = 1;
 pub const SPECIAL_THREAD: usize = 2;
 pub const SPECIAL_DL_HANDLE: usize = 6;
+pub const SPECIAL_JMP_BUF: usize = 7;
 
 /// Marks an aux word that holds a box pointer rather than a `lower`.
 pub const ATOMIC_BOX_BIT: usize = 1;

@@ -429,6 +429,11 @@ impl Marker {
                 return;
             }
             SPECIAL_DL_HANDLE => return,
+            SPECIAL_JMP_BUF => {
+                let buffer = lower_for_object(object).cast::<crate::jump::JmpBuf>();
+                unsafe { crate::jump::for_each_lower(buffer, |lower| self.mark(object_for_lower(lower))) };
+                return;
+            }
             special => internal_panic(format_args!("the collector can't scan special objects of type {special}")),
         }
         let aux = this.aux_ptr();
@@ -503,7 +508,7 @@ unsafe fn verify_object(object: *mut Object, block: usize, size: usize) {
     let good = (object as usize) >= block
         && upper >= lower
         && upper <= block + size
-        && matches!(this.special_type(), 0 | SPECIAL_FUNCTION | SPECIAL_THREAD | SPECIAL_DL_HANDLE)
+        && matches!(this.special_type(), 0 | SPECIAL_FUNCTION | SPECIAL_THREAD | SPECIAL_DL_HANDLE | SPECIAL_JMP_BUF)
         && (aux == 0 || heap().contains(aux) || this.special_type() != 0);
     if !good {
         internal_panic(format_args!(

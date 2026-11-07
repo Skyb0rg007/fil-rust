@@ -7,7 +7,7 @@
 //! Nothing here is allowed to start a collection, other than the functions the
 //! compiled caller treats as a safepoint (see `gc`).
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, c_char, c_int};
 use std::sync::atomic::Ordering;
 
 use crate::abi::*;
@@ -665,6 +665,15 @@ unsafe extern "C" fn filc_run_global_dtor(p: *mut u8, l: *mut u8) {
     unsafe { globals::run_dtor(flight(p, l)) };
 }
 
+unsafe extern "C" fn filc_jmp_buf_recreate(
+    thread: *mut Thread,
+    slot: *mut *mut crate::jump::JmpBuf,
+    kind: c_int,
+    value: c_int,
+) -> *mut crate::jump::JmpBuf {
+    unsafe { crate::jump::recreate(thread, slot, kind, value) }
+}
+
 macro_rules! helpers {
     ($($name:ident),* $(,)?) => {
         /// Every helper with an implementation so far. A slot with no entry
@@ -697,6 +706,7 @@ helpers! {
     filc_execute_constant_relocations,
     filc_exit,
     filc_expand_read_check_fail,
+    filc_jmp_buf_recreate,
     filc_finish_memmove_small_1,
     filc_finish_memmove_small_2,
     filc_finish_memmove_small_3,
