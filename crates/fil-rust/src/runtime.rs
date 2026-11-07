@@ -12,6 +12,7 @@ use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+pub use fil_rust_rt::gc::{Collection, HeapStats};
 use fil_rust_sys::{FilcThread, Flavor, RawPtr, Shim, StartProgramFn};
 
 use crate::callback::Registry;
@@ -57,6 +58,7 @@ pub struct Config {
     search_path: Vec<PathBuf>,
     backend: Backend,
     libc: Libc,
+    collection: Collection,
 }
 
 impl Config {
@@ -77,6 +79,7 @@ impl Config {
             search_path: Vec::new(),
             backend: Backend::default(),
             libc: Libc::default(),
+            collection: Collection::default(),
         }
     }
 
@@ -96,7 +99,9 @@ impl Config {
     /// * `FILC_MUSL_ROOT` (or `FILC_ROOT`) / `FILC_GLIBC_ROOT`: the
     ///   distribution root for the chosen flavor;
     /// * `FIL_RUST_WORKERS`: number of executor threads (optional);
-    /// * `FIL_RUST_RUNTIME`: `pizlo` (default) or `rust`.
+    /// * `FIL_RUST_RUNTIME`: `pizlo` (default) or `rust`;
+    /// * `FIL_RUST_GC_STRESS`: on `rust`, collect at every nth safepoint and
+    ///   scribble over swept memory, to find references the collector missed.
     pub fn from_env() -> Result<Config> {
         let flavor = match std::env::var("FILC_FLAVOR").as_deref() {
             Err(_) | Ok("musl") | Ok("") => Flavor::Musl,
@@ -131,6 +136,13 @@ impl Config {
     /// The runtime that hosts Fil-C code.
     pub fn runtime(mut self, backend: Backend) -> Config {
         self.backend = backend;
+        self
+    }
+
+    /// When collections happen on [`Backend::Rust`]. libpizlo has its own
+    /// collector and takes no such setting.
+    pub fn collection(mut self, collection: Collection) -> Config {
+        self.collection = collection;
         self
     }
 
@@ -460,6 +472,33 @@ impl Runtime {
     pub fn flush(&self) -> Result<()> {
         self.run(|fil| fil.flush())
     }
+
+    /// Collects garbage now, and returns when that's done. See
+    /// [`Fil::collect_garbage`].
+    pub fn collect(&self) -> Result<()> {
+        self.run(|fil| fil.collect_garbage())
+    }
+
+    /// Changes when collections happen on [`Backend::Rust`].
+    pub fn set_collection(&self, collection: Collection) -> Result<()> {
+        self.require_rust_collector()?;
+        fil_rust_rt::gc::set_collection(collection);
+        Ok(())
+    }
+
+    /// The state of the heap on [`Backend::Rust`].
+    pub fn heap_stats(&self) -> Result<HeapStats> {
+        self.require_rust_collector()?;
+        Ok(fil_rust_rt::gc::stats())
+    }
+
+    fn require_rust_collector(&self) -> Result<()> {
+        if self.inner.bare {
+            Ok(())
+        } else {
+            Err(Error::Unsupported("libpizlo's collector runs on its own terms".into()))
+        }
+    }
 }
 
 /// The result of [`Runtime::spawn`].
@@ -712,6 +751,9 @@ unsafe fn boot(config: Config) -> Result<&'static Inner> {
     if config.libc == Libc::Never {
         return Err(Error::Unsupported("libpizlo can't run without the Fil-C libc".into()));
     }
+    if config.collection != Collection::default() {
+        return Err(Error::Unsupported("libpizlo's collector runs on its own terms".into()));
+    }
     let flavor = config.flavor;
     let unsupported = || {
         Error::Unsupported(format!(
@@ -876,6 +918,7 @@ fn boot_bare(config: Config) -> Result<&'static Inner> {
         return Err(Error::Unsupported(format!("the Rust runtime doesn't support the {flavor:?} flavor yet")));
     }
     let installed = fil_rust_rt::install(flavor).map_err(Error::Load)?;
+    fil_rust_rt::gc::set_collection(config.collection);
     crate::library::check_no_foreign_runtime(&config)?;
     let shim = fil_rust_rt::shim::table();
     let _ = SHIM.set(shim);
@@ -1057,8 +1100,16 @@ impl<'f> Fil<'f> {
         Ok(self.bytes(s.to_bytes_with_nul())?.cast())
     }
 
-    /// Requests a garbage collection cycle and waits for it to finish.
+    /// Requests a garbage collection cycle and waits for it to finish. With
+    /// [`Backend::Rust`], this thread is the one collecting, unless the
+    /// [`Collection`] is [`Collection::Never`]. Every thread has to reach a
+    /// safepoint first, so one that's entered and never calls into Fil-C or
+    /// [`Fil::pollcheck`] holds this up.
     pub fn collect_garbage(&self) -> Result<()> {
+        if self.inner.bare {
+            unsafe { fil_rust_rt::gc::collect(self.thread.cast()) };
+            return Ok(());
+        }
         let gc = self.runtime_library().function::<fn()>(self, "zgc_request_and_wait")?;
         gc.call(self, ())
     }

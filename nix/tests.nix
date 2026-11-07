@@ -120,8 +120,18 @@ let
       description = "The Rust runtime's tests, and the libc-free suites on both backends";
       run = ''
         cargo test --offline ${target} -p fil-rust-rt
-        FIL_RUST_RUNTIME=rust cargo test --offline ${target} -p fil-rust --test rt_bare --test layout
+        FIL_RUST_RUNTIME=rust cargo test --offline ${target} -p fil-rust --test rt_bare --test rt_gc --test layout
         FIL_RUST_RUNTIME=pizlo cargo test --offline ${target} -p fil-rust --test rt_bare
+      '';
+    };
+
+    rust-rt-gc-stress = {
+      description = "The same with the Rust collector running constantly and scribbling over swept memory";
+      run = ''
+        FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust-rt
+        FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust --test rt_gc --test layout
+        # Every 8th: with threads, each collection waits for all of them.
+        FIL_RUST_GC_STRESS=8 cargo test --offline ${target} -p fil-rust --test rt_bare
       '';
     };
 

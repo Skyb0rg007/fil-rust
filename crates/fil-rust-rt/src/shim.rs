@@ -38,6 +38,14 @@ const ROOT_CAPACITY: usize = 1 << 32;
 
 unsafe impl Send for Ptr {}
 
+/// Calls `visit` on every object Rust holds a reference to.
+pub unsafe fn for_each_root(mut visit: impl FnMut(*mut Object)) {
+    let roots = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
+    for root in roots.iter() {
+        visit(root.object());
+    }
+}
+
 unsafe extern "C" fn fr_abi_version() -> u32 {
     SHIM_ABI_VERSION
 }
@@ -79,12 +87,7 @@ unsafe extern "C" fn fr_is_entered(t: *mut FilcThread) -> c_int {
 }
 
 unsafe extern "C" fn fr_pollcheck(t: *mut FilcThread) {
-    let thread = to_thread(t);
-    unsafe {
-        if (*thread).state.load(Ordering::Relaxed) & (STATE_CHECK_REQUESTED | STATE_STOP_REQUESTED | STATE_DEFERRED_SIGNAL) != 0 {
-            thread::safepoint(thread);
-        }
-    }
+    unsafe { thread::poll(to_thread(t)) };
 }
 
 unsafe extern "C" fn fr_with_native_frame(t: *mut FilcThread, body: unsafe extern "C" fn(*mut c_void), arg: *mut c_void) {
@@ -192,6 +195,7 @@ unsafe extern "C" fn fr_check(raw: RawPtr, size: usize, write: c_int) -> c_int {
 unsafe extern "C" fn fr_allocate(t: *mut FilcThread, size: usize, alignment: usize) -> RawPtr {
     let thread = to_thread(t);
     unsafe {
+        thread::poll(thread);
         let object = object::allocate_aligned(thread, size, alignment, 0);
         thread::track(thread, object);
         to_raw(Ptr::for_object(object))

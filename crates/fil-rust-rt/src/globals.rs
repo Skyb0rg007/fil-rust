@@ -234,6 +234,19 @@ pub unsafe fn execute_relocations(
     }
 }
 
+/// Calls `visit` on every object global state refers to.
+pub unsafe fn for_each_root(mut visit: impl FnMut(*mut Object)) {
+    let roots = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
+    for &object in roots.iter() {
+        visit(object as *mut Object);
+    }
+    drop(roots);
+    let ctors = DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner());
+    for &(_, lower) in ctors.iter() {
+        visit(object_for_lower(lower as *mut u8));
+    }
+}
+
 const CTORS_DEFERRED: u8 = 0;
 const CTORS_RUN_NOW: u8 = 1;
 

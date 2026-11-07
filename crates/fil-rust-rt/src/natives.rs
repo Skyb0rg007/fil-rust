@@ -299,10 +299,11 @@ natives! {
     }
 
     fn zgc_request_fresh(thread: *mut Thread) -> u64 {
-        0
+        crate::gc::request_fresh()
     }
 
     fn zgc_wait(thread: *mut Thread, cycle: u64) -> () {
+        unsafe { crate::gc::wait_for(thread, cycle) };
     }
 
     fn zis_runtime_testing_enabled(thread: *mut Thread) -> bool {

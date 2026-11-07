@@ -18,6 +18,7 @@
 pub mod abi;
 mod cc;
 pub mod failure;
+pub mod gc;
 mod globals;
 pub mod heap;
 mod helpers;
@@ -109,6 +110,7 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
 /// Makes the process ready to load compiled libraries.
 pub fn install(flavor: Flavor) -> Result<Installed, String> {
     static INSTALLED: OnceLock<Result<Installed, String>> = OnceLock::new();
+    gc::configure_from_env();
     INSTALLED.get_or_init(|| load_stub(flavor)).clone()
 }
 

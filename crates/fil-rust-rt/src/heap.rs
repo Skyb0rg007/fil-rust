@@ -319,7 +319,8 @@ impl Heap {
 
     #[inline]
     fn note_allocation(&self, size: usize) {
-        self.counters.allocated_since_collection.fetch_add(size, Ordering::Relaxed);
+        let before = self.counters.allocated_since_collection.fetch_add(size, Ordering::Relaxed);
+        crate::gc::note_allocated(before + size);
     }
 
     /// Records how far a slot got into its chunk and detaches it.

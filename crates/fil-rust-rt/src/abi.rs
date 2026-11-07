@@ -225,6 +225,17 @@ pub struct Origin {
     pub column: u32,
 }
 
+/// The function an origin is in, however many inlined calls deep.
+pub unsafe fn function_origin(mut origin: *const Origin) -> *const FunctionOrigin {
+    loop {
+        let node = unsafe { (*origin).origin_node };
+        if unsafe { (*node).num_lowers_ish } != u32::MAX {
+            return node.cast();
+        }
+        origin = unsafe { &raw const (*node.cast::<InlineFrame>()).caller };
+    }
+}
+
 #[repr(C)]
 pub struct InlineFrame {
     pub base: OriginNode,

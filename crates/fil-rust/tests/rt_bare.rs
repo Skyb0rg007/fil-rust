@@ -33,6 +33,10 @@ fn library() -> &'static Library {
     LIBRARY.get_or_init(|| runtime().load(fixture("rt_bare.c")).unwrap())
 }
 
+// Tests get these before `run`, as nothing may block inside it: a thread waiting
+// for one of these while entered would hold up a collection another test wants,
+// and whoever is loading the library needs that to end before it can go on.
+
 /// Whether this process is the child some test started, and which part to run.
 const CHILD: &str = "FIL_RUST_RT_BARE_CHILD";
 
@@ -125,9 +129,10 @@ fn a_library_that_needs_libc_is_rejected_by_name() {
 
 #[test]
 fn libraries_run_their_constructors_once() {
+    let library = library();
     let again = runtime().load(fixture("rt_bare.c")).unwrap();
     runtime().run(|fil| {
-        let value = library().function::<fn() -> i32>(fil, "constructed_value").unwrap();
+        let value = library.function::<fn() -> i32>(fil, "constructed_value").unwrap();
         assert_eq!(value.call(fil, ()).unwrap(), 42);
         assert!(again.has_symbol("constructed_value"));
     });
@@ -135,18 +140,20 @@ fn libraries_run_their_constructors_once() {
 
 #[test]
 fn calls_and_strings() {
+    let library = library();
     runtime().run(|fil| {
-        let add = library().function::<fn(i32, i32) -> i32>(fil, "add").unwrap();
+        let add = library.function::<fn(i32, i32) -> i32>(fil, "add").unwrap();
         assert_eq!(add.call(fil, (40, 2)).unwrap(), 42);
-        let greeting = library().function::<fn() -> Ptr<c_char>>(fil, "greeting").unwrap();
+        let greeting = library.function::<fn() -> Ptr<c_char>>(fil, "greeting").unwrap();
         assert_eq!(greeting.call(fil, ()).unwrap().read_string(fil).unwrap(), "hello from Fil-C");
     });
 }
 
 #[test]
 fn callbacks_get_and_return_pointers() {
+    let library = library();
     runtime().run(|fil| {
-        let pass = library()
+        let pass = library
             .function::<fn(fn(Ptr<c_char>) -> Ptr<c_char>, Ptr<c_char>) -> Ptr<c_char>>(fil, "pass_through")
             .unwrap();
         let upper = fil
@@ -162,8 +169,9 @@ fn callbacks_get_and_return_pointers() {
 
 #[test]
 fn closures_carry_and_replace_their_data() {
+    let library = library();
     runtime().run(|fil| {
-        let call = library().function::<fn(Ptr<i32>, Ptr<i32>, i32) -> i32>(fil, "call_closure").unwrap();
+        let call = library.function::<fn(Ptr<i32>, Ptr<i32>, i32) -> i32>(fil, "call_closure").unwrap();
         let (first, second) = (fil.alloc::<i32>(&5).unwrap(), fil.alloc::<i32>(&6).unwrap());
         assert_eq!(call.call(fil, (first, second, 1)).unwrap(), 6007);
     });
@@ -171,12 +179,13 @@ fn closures_carry_and_replace_their_data() {
 
 #[test]
 fn memory_errors_come_back_to_rust() {
+    let library = library();
     runtime().run(|fil| {
         let block = fil.alloc_zeroed::<i32>(4).unwrap();
-        let literal = library().function::<fn() -> Ptr<u8>>(fil, "greeting").unwrap().call(fil, ()).unwrap();
-        let function = library().symbol(fil, "add").unwrap();
-        let push = library().function::<fn(Ptr<u8>, i64) -> Ptr<u8>>(fil, "push").unwrap();
-        let release = library().function::<fn(Ptr<u8>)>(fil, "release").unwrap();
+        let literal = library.function::<fn() -> Ptr<u8>>(fil, "greeting").unwrap().call(fil, ()).unwrap();
+        let function = library.symbol(fil, "add").unwrap();
+        let push = library.function::<fn(Ptr<u8>, i64) -> Ptr<u8>>(fil, "push").unwrap();
+        let release = library.function::<fn(Ptr<u8>)>(fil, "release").unwrap();
         let freed = push.call(fil, (FilPtr::null(), 1)).unwrap();
         release.call(fil, (freed,)).unwrap();
 

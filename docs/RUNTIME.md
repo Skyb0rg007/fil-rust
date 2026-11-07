@@ -217,9 +217,9 @@ fixtures with no libc imports need the `fil-rust` API, so they run from M2.
 of the distribution mapped; `rt_bare.rs` also passes on libpizlo, apart from what's specific to
 bare threads. A library that imports from libc fails to load, naming the symbol, until M4 adds the
 import scan. Callback entry tracks every aux word of the argument buffer, since it can't tell which
-are pointers. M3 has to check those before marking, in case an integer slot holds a stale lower.
+are pointers. That's exact: compiled callers zero their aux words for the whole call.
 
-**M3. Tracing GC, multi-mutator**
+**M3. Tracing GC, multi-mutator**: done on musl x86-64, except as noted below.
 - Stop-the-world across bare threads.
 - All roots from `filc_mark_global_roots` and the thread root walk: frames with stack auxes
   and setjmp slots, native frames, globals, ifunc `root_ptrs`, deferred ctors, errno and
@@ -233,6 +233,23 @@ are pointers. M3 has to check those before marking, in case an integer slot hold
   from a callback and a pollcheck, and its contents stay intact. After return, a Rust-driven
   collection reclaims it. A loop of escaping allocas, varargs and byval calls with periodic
   `Runtime::collect` stays flat in `HeapStats`, and grows under `Never`.
+
+`crates/fil-rust-rt/src/gc.rs` stops the world, marks precisely, and sweeps. `tests/rt_gc.rs` has a
+case per row of the tracking table that exists so far. Each root and edge kind the marker follows
+was checked by disabling it and watching a test fail, except the thread cookie and deferred
+constructors, which libc-free fixtures never reach. Those get checked in M4. Some findings:
+
+- Compiled callers keep every pointer's lower in a frame slot, even ones just loaded, so tracking
+  callback arguments at entry only matters for callers in Rust. `tests/collector.rs` covers that.
+- A `volatile` pointer field is atomic, so it has a box. A plain field has a lower in its aux entry.
+- A local array zeroed in a loop got a stack aux; the same array with `= { NULL }` didn't.
+- `free` doesn't drop what a tombstone's aux refers to until the object is marked, and a `Ptr` in
+  Rust's hands keeps a tombstone in place. Heap references are redirected.
+
+Not done here: census, revive and destruct. Nothing needs a destructor until threads and tables
+exist, so they come with their first user in M4 or M5. Roots for argv, environ, auxv, the signal
+table, and errno and dlerror handlers do too. `tests/properties.rs` joins with the ported suites in
+M4, since it needs libc.
 
 **M4. Libc mode on musl x86-64, with threads**
 - ELF import scan, `Auto` upgrade, ctor gate, boot, errno and dlerror handlers.

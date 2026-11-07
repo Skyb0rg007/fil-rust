@@ -8,7 +8,7 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::Cell;
 use std::ptr::{self, null, null_mut};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::sync::atomic::Ordering;
 
 use crate::abi::*;
@@ -93,9 +93,15 @@ fn stack_low_end() -> usize {
 }
 
 /// Every `Thread`, for the collector to stop.
-struct ThreadList(Vec<usize>);
+pub struct ThreadList(pub Vec<usize>);
 
 static THREADS: Mutex<ThreadList> = Mutex::new(ThreadList(Vec::new()));
+
+/// Keeps threads from coming and going. The collector holds this throughout, so
+/// nothing that holds it may wait for a collection or reach a safepoint.
+pub fn lock_threads() -> MutexGuard<'static, ThreadList> {
+    THREADS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Lets a `Thread` go when its OS thread does.
 struct Detach;
@@ -116,14 +122,15 @@ thread_local! {
 /// Frees a thread. Nothing it allocated goes with it: its blocks stay in their
 /// chunks, reachable or not.
 unsafe fn detach(thread: *mut Thread) {
-    let mut threads = THREADS.lock().unwrap_or_else(|e| e.into_inner());
+    // A collection needs the slots to be flushed, or not in the list.
+    let mut threads = lock_threads();
     threads.0.retain(|&entry| entry != thread as usize);
-    drop(threads);
     unsafe {
         let this = &mut *thread;
         for slot in &mut this.slots {
             crate::heap::heap().flush_slot(slot);
         }
+        drop(threads);
         crate::cc::release_outline(thread);
         drop(Box::from_raw(this.extra));
         dealloc(thread.cast::<u8>().wrapping_sub(THREAD_PREFIX), thread_layout());
@@ -175,7 +182,8 @@ pub fn attach_current() -> *mut Thread {
         }
     }
     CURRENT.with(|current| current.set(thread));
-    THREADS.lock().unwrap_or_else(|e| e.into_inner()).0.push(thread as usize);
+    unsafe { crate::gc::rearm_under_stress(thread) };
+    lock_threads().0.push(thread as usize);
     // If the thread is on its way out, this does nothing, and the `Thread`
     // stays around: destructors of Fil-C libraries can run that late.
     let _ = DETACH.try_with(|_| ());
@@ -184,21 +192,52 @@ pub fn attach_current() -> *mut Thread {
 
 /// The thread is now running Fil-C code and must reach safepoints.
 pub unsafe fn enter(thread: *mut Thread) {
-    unsafe { (*thread).state.fetch_or(STATE_ENTERED, Ordering::AcqRel) };
+    let state = unsafe { &(*thread).state };
+    loop {
+        let current = state.load(Ordering::Acquire);
+        if current & STATE_STOP_REQUESTED != 0 {
+            unsafe { crate::gc::wait_for_resume(thread) };
+        } else if state
+            .compare_exchange_weak(current, current | STATE_ENTERED, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
 }
 
 /// The thread is at a safepoint until it enters again.
 pub unsafe fn exit(thread: *mut Thread) {
-    unsafe { (*thread).state.fetch_and(!STATE_ENTERED, Ordering::AcqRel) };
+    let before = unsafe { (*thread).state.fetch_and(!STATE_ENTERED, Ordering::AcqRel) };
+    if before & STATE_STOP_REQUESTED != 0 {
+        crate::gc::note_stopped();
+    }
 }
 
-/// Compiled code reached a pollcheck with a state bit set. There's nothing to
-/// do here until the collector can request one.
-pub unsafe fn safepoint(thread: *mut Thread) {
-    unsafe {
-        exit(thread);
-        enter(thread);
+/// The thread can't go on until it's dealt with these.
+const SAFEPOINT_BITS: u8 = STATE_CHECK_REQUESTED | STATE_STOP_REQUESTED | STATE_DEFERRED_SIGNAL;
+
+/// A safepoint in code that isn't compiled: Rust's calls to a pollcheck, and
+/// helpers that compiled code treats as one.
+pub unsafe fn poll(thread: *mut Thread) {
+    if unsafe { (*thread).state.load(Ordering::Acquire) } & SAFEPOINT_BITS != 0 {
+        unsafe { safepoint(thread) };
     }
+}
+
+/// A pollcheck found a state bit set.
+pub unsafe fn safepoint(thread: *mut Thread) {
+    let state = unsafe { &(*thread).state };
+    if state.fetch_and(!STATE_CHECK_REQUESTED, Ordering::AcqRel) & STATE_CHECK_REQUESTED != 0 {
+        unsafe { crate::gc::check(thread) };
+    }
+    if state.load(Ordering::Acquire) & STATE_STOP_REQUESTED != 0 {
+        unsafe {
+            exit(thread);
+            enter(thread);
+        }
+    }
+    unsafe { crate::gc::rearm_under_stress(thread) };
 }
 
 pub unsafe fn extra<'a>(thread: *mut Thread) -> &'a mut ThreadExtra {

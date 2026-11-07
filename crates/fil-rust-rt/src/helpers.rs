@@ -328,7 +328,10 @@ unsafe extern "C" fn filc_get_next_ptr_bytes_for_va_arg(p: *mut u8, l: *mut u8, 
 }
 
 unsafe extern "C" fn filc_allocate(t: *mut Thread, size: usize) -> *mut Object {
-    unsafe { object::allocate(t, size, 0) }
+    unsafe {
+        thread::poll(t);
+        object::allocate(t, size, 0)
+    }
 }
 
 unsafe extern "C" fn filc_allocate_without_exiting(t: *mut Thread, size: usize) -> *mut Object {
@@ -336,7 +339,10 @@ unsafe extern "C" fn filc_allocate_without_exiting(t: *mut Thread, size: usize) 
 }
 
 unsafe extern "C" fn filc_allocate_with_alignment(t: *mut Thread, size: usize, alignment: usize) -> *mut Object {
-    unsafe { object::allocate_aligned(t, size, alignment, 0) }
+    unsafe {
+        thread::poll(t);
+        object::allocate_aligned(t, size, alignment, 0)
+    }
 }
 
 unsafe extern "C" fn filc_allocate_with_alignment_without_exiting(t: *mut Thread, size: usize, alignment: usize) -> *mut Object {

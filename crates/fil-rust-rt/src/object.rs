@@ -1,7 +1,8 @@
 //! The object model: making objects, freeing them, and checking accesses.
 
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use crate::abi::*;
 use crate::failure::safety_panic;
@@ -17,6 +18,20 @@ fn check_size(size: usize) -> usize {
         safety_panic(format_args!("attempt to allocate object that is too big (size = {size})."));
     }
     round_up(size, MIN_ALIGN)
+}
+
+/// Where references to freed objects go, so the objects themselves can too:
+/// it's as free as they were, and it never goes away.
+pub fn free_singleton() -> *mut Object {
+    static SINGLETON: OnceLock<usize> = OnceLock::new();
+    *SINGLETON.get_or_init(|| {
+        let object = Box::into_raw(Box::new(Object {
+            upper: AtomicPtr::new(null_mut()),
+            aux: AtomicUsize::new(aux_create(FLAG_FREE | FLAG_GLOBAL | FLAG_READONLY, null_mut())),
+        }));
+        unsafe { (*object).upper.store(lower_for_object(object), Ordering::Relaxed) };
+        object as usize
+    }) as *mut Object
 }
 
 unsafe fn initialize(object: *mut Object, size: usize, flags: usize) {
