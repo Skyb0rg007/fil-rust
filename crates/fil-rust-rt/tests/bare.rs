@@ -1,61 +1,22 @@
 //! Fil-C libraries running on the Rust runtime, with no libpizlo, no libc and
 //! no thread but the caller's.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod support;
+
 use std::sync::OnceLock;
 
+use fil_rust_rt::Library;
 use fil_rust_rt::abi::Ptr;
-use fil_rust_rt::{Library, call, install, run};
-use fil_rust_sys::{Flavor, loaded_objects};
-
-/// Compiles a fixture the way a libc-free library is built: without the default
-/// libraries, so it keeps `NEEDED libpizlo.so` but not `libc.so`.
-fn fixture(file: &str) -> PathBuf {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(file);
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rt-fixtures");
-    std::fs::create_dir_all(&out).unwrap();
-    let library = out.join(file).with_extension("so");
-    let modified = |path: &Path| std::fs::metadata(path).and_then(|metadata| metadata.modified());
-    if let (Ok(source_time), Ok(library_time)) = (modified(&source), modified(&library))
-        && library_time >= source_time
-    {
-        return library;
-    }
-    // Every child process of the failure tests gets here too, and may be
-    // loading the library, so it has to appear whole.
-    let building = library.with_extension(format!("so.{}", std::process::id()));
-    let compiler = std::env::var("FILC_CC").expect("FILC_CC must be set (run the tests in nix-shell)");
-    let status = Command::new(compiler)
-        .args(["-shared", "-fPIC", "-O1", "-g", "-nodefaultlibs", "-o"])
-        .arg(&building)
-        .arg(&source)
-        .status()
-        .expect("running the Fil-C compiler");
-    assert!(status.success(), "compiling {file} failed");
-    std::fs::rename(&building, &library).unwrap();
-    library
-}
+use fil_rust_sys::loaded_objects;
+use support::{call_in, failure_of, int, open};
 
 fn bare() -> &'static Library {
     static LIBRARY: OnceLock<Library> = OnceLock::new();
-    LIBRARY.get_or_init(|| {
-        install(Flavor::Musl).unwrap();
-        unsafe { Library::open(&fixture("bare.c")).unwrap() }
-    })
-}
-
-fn int(value: i64) -> Ptr {
-    Ptr { ptr: value as *mut u8, lower: std::ptr::null_mut() }
+    LIBRARY.get_or_init(|| open("bare.c"))
 }
 
 fn call_long(name: &str, args: &[Ptr]) -> i64 {
-    run(|thread| unsafe {
-        let function = bare().symbol(thread, name).unwrap();
-        let mut returned = [Ptr::NULL];
-        call(thread, function, args, &mut returned);
-        returned[0].ptr as i64
-    })
+    call_in(bare(), name, args)
 }
 
 #[test]
@@ -98,25 +59,10 @@ fn nothing_else_is_loaded() {
     assert!(!libc_loaded, "{objects:?}");
 }
 
-/// Runs one of the fixture's failing functions in a child process, and returns
-/// what it reported.
-fn failure_of(case: &str) -> String {
-    let test = std::env::current_exe().unwrap();
-    let output = Command::new(test)
-        .args(["--exact", "failing_child", "--nocapture", "--ignored"])
-        .env("FIL_RUST_RT_FAILING_CASE", case)
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "{case} didn't fail");
-    assert_eq!(std::os::unix::process::ExitStatusExt::signal(&output.status), Some(libc::SIGABRT), "{case}");
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
 #[test]
 #[ignore = "run by failure_of in a child process"]
 fn failing_child() {
-    unsafe { libc::setrlimit(libc::RLIMIT_CORE, &libc::rlimit { rlim_cur: 0, rlim_max: 0 }) };
-    match std::env::var("FIL_RUST_RT_FAILING_CASE").unwrap().as_str() {
+    match support::failing_case().unwrap().as_str() {
         "oob" => call_long("oob_read", &[int(4)]),
         "uaf" => call_long("use_after_free", &[]),
         "double free" => call_long("double_free", &[]),
