@@ -10,7 +10,7 @@
 
 use std::ffi::{CString, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use crate::abi::*;
 use crate::failure::safety_panic;
@@ -39,13 +39,9 @@ pub fn is_internal_signal(signal: c_int) -> bool {
     matches!(signal, SIGTIMER | SIGCANCEL | SIGSYNCCALL)
 }
 
-/// Set once a signal handler that can interrupt a wait exists: until then, an
-/// `EINTR` from a futex is a kernel bug, as musl sees it.
-static INTERRUPTING_HANDLERS: AtomicBool = AtomicBool::new(false);
-
 /// Makes a call that may block, with the thread exited. Anything it leaves in
 /// `errno` goes to the libc.
-unsafe fn sys<R>(thread: *mut Thread, call: impl FnOnce() -> R) -> R {
+pub(crate) unsafe fn sys<R>(thread: *mut Thread, call: impl FnOnce() -> R) -> R {
     unsafe {
         thread::exit(thread);
         *libc::__errno_location() = 0;
@@ -59,8 +55,16 @@ unsafe fn sys<R>(thread: *mut Thread, call: impl FnOnce() -> R) -> R {
     }
 }
 
+/// What a call made without exiting left in `errno`, for the libc.
+pub(crate) unsafe fn sys_result(thread: *mut Thread, result: c_int) -> c_int {
+    if result < 0 {
+        unsafe { set_errno(thread, *libc::__errno_location()) };
+    }
+    result
+}
+
 /// [`sys`] for calls that can't fail.
-unsafe fn plain<R>(thread: *mut Thread, call: impl FnOnce() -> R) -> R {
+pub(crate) unsafe fn plain<R>(thread: *mut Thread, call: impl FnOnce() -> R) -> R {
     unsafe {
         thread::exit(thread);
         let result = call();
@@ -81,19 +85,19 @@ fn output<T>(ptr: Ptr, size: usize) -> *mut T {
     ptr.ptr.cast()
 }
 
-fn one_in<T>(ptr: Ptr) -> *const T {
+pub(crate) fn one_in<T>(ptr: Ptr) -> *const T {
     input(ptr, size_of::<T>())
 }
 
-fn one_out<T>(ptr: Ptr) -> *mut T {
+pub(crate) fn one_out<T>(ptr: Ptr) -> *mut T {
     output(ptr, size_of::<T>())
 }
 
-fn maybe_in<T>(ptr: Ptr) -> *const T {
+pub(crate) fn maybe_in<T>(ptr: Ptr) -> *const T {
     if ptr.ptr.is_null() { null() } else { one_in(ptr) }
 }
 
-fn maybe_out<T>(ptr: Ptr) -> *mut T {
+pub(crate) fn maybe_out<T>(ptr: Ptr) -> *mut T {
     if ptr.ptr.is_null() { null_mut() } else { one_out(ptr) }
 }
 
@@ -130,7 +134,7 @@ fn fd_set_size(count: c_int) -> usize {
 }
 
 /// Lets go of the signals that aren't the program's to touch.
-unsafe fn user_sigset(user: Ptr) -> libc::sigset_t {
+pub(crate) unsafe fn user_sigset(user: Ptr) -> libc::sigset_t {
     unsafe {
         let mut set = one_in::<libc::sigset_t>(user).read();
         for signal in [SIGTIMER, SIGCANCEL, SIGSYNCCALL] {
@@ -244,7 +248,7 @@ unsafe fn futex_timed_wait(address: *mut u8, value: c_int, clock: c_int, at: *co
     }
     let result = -(unsafe { futex(address, operation, value as usize, timeout as usize, 0) }) as c_int;
     match result {
-        libc::EINTR if INTERRUPTING_HANDLERS.load(Ordering::Relaxed) => libc::EINTR,
+        libc::EINTR if crate::signal::INTERRUPTING_HANDLERS.load(Ordering::Relaxed) => libc::EINTR,
         libc::ETIMEDOUT | libc::ECANCELED => result,
         _ => 0,
     }

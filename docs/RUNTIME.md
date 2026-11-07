@@ -275,10 +275,10 @@ tests pass too. Under `FIL_RUST_GC_STRESS`, the libc suites stay green. Some fin
   need it find its symbols in the global scope. `Library::getter` falls back to the handle kept by
   the runtime, since `dlsym` on a handle only looks at that library and what it depends on.
 
-Out until M5, failing by name when called: sockets, the `mmap` family, `sigaction`, `sigsuspend`,
-`sigwait`, `epoll`, `fork`, `execve`, `wait*`, timers, SysV IPC, `mount`, `prctl`, `zlongjmp`, and
-exceptions. So `cxx`, `signals` and `abi_audit` stay on libpizlo for now, and `edges.rs` skips its
-Fil-C `fork` case on the Rust backend. `tests/boot.rs` checks each backend for what it should map.
+Out until M5, failing by name when called: sockets, the `mmap` family, `epoll`, `fork`, `execve`,
+`wait*`, timers, SysV IPC, `mount` and `prctl`. So `abi_audit` stays on libpizlo for now, and
+`edges.rs` skips its Fil-C `fork` case on the Rust backend. `tests/boot.rs` checks each backend for
+what it should map.
 
 The roots for the errno and dlerror handlers and for argv, environ and auxv are what upstream has,
 but disabling them changes nothing a test can see: the handlers are global function objects, and
@@ -294,6 +294,21 @@ function and argument in `zthread_create` is redundant the same way, with the co
 - Assess the two suspected upstream bugs, `filc_runtime.c:1811` (thread dereferenced before
   its null check) and `:8866` (compares `act_ptr`, not the handler). Don't copy them, and
   record real ones in `docs/upstream-filc-issues.md`.
+
+Done so far: `jump.rs` has `setjmp`, `eh.rs` exceptions and `signal.rs` signals, and `tests/jumps.rs`,
+`tests/cxx.rs` and `tests/signals.rs` pass on both backends. Notes from those:
+
+- Every lock an exited thread can hold has signals blocked around it, as a handler could want it
+  too. That includes a whole collection, which runs exited: a handler landing on one would wait
+  for the collection under it to end. Joining a thread uses a futex, not a lock, so a signal can
+  run a handler during a join.
+- Restoring a frame's lowers in `zlongjmp` is ported but untested: disabling it changes nothing a
+  test can see, as no fixture gets a compiler to change a frame slot between `setjmp` and `longjmp`.
+  The same goes for rooting the exception object while unwinding, which compiled frames also hold,
+  and a handler's function, which is global.
+- `:8866` and a third bug, a signal queued across `sigaction`, are real, and both are in
+  `docs/upstream-filc-issues.md`. `:1811` is only reachable from a thread that isn't Fil-C's, which
+  a pure Fil-C process doesn't have. Here it's why such signals are forwarded, so it isn't reported.
 
 **M6. glibc flavor and aarch64**
 - The larger `zsys_*` set, per-flavor struct layouts for Rust natives (musl layouts on a glibc

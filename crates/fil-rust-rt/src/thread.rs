@@ -9,7 +9,7 @@
 
 use std::cell::Cell;
 use std::ptr::{self, null, null_mut};
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 use std::sync::atomic::Ordering;
 
 use crate::abi::*;
@@ -32,6 +32,8 @@ pub struct ThreadExtra {
     pub escape: usize,
     /// The exception on its way up this thread, if any.
     pub unwinding: crate::eh::Unwinding,
+    /// Signals on their way to this thread's next safepoint.
+    pub signals: crate::signal::Queue,
 }
 
 /// Roots for what a stretch of native code allocates or loads.
@@ -64,6 +66,11 @@ static BASE_ORIGIN: SyncFrameOrigin = SyncFrameOrigin(Origin {
 
 thread_local! {
     static CURRENT: Cell<*mut Thread> = const { Cell::new(null_mut()) };
+}
+
+/// For frames the runtime pushes, which can't catch anything.
+pub fn base_origin() -> *const Origin {
+    &BASE_ORIGIN.0
 }
 
 /// This OS thread's `Thread`, or null.
@@ -107,31 +114,38 @@ pub fn lock_threads() -> MutexGuard<'static, ThreadList> {
 }
 
 static LIFECYCLE: Mutex<()> = Mutex::new(());
-static FINISHED: Condvar = Condvar::new();
 
 /// Keeps a thread from finishing, for whoever is about to signal it. Blocks, so
-/// only for exited threads.
+/// only for exited threads, and they have to hold signals back while they have
+/// it: a handler can get here too.
 pub fn lock_lifecycle() -> MutexGuard<'static, ()> {
     LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Returns once `thread` has finished. The caller has to be exited.
+/// Returns once `thread` has finished. The caller has to be exited. A signal
+/// can land here, so this holds no lock.
 pub unsafe fn wait_until_finished(thread: *mut Thread) {
-    let waited = FINISHED.wait_while(lock_lifecycle(), |_| unsafe { !(*thread).stopped });
-    drop(waited.unwrap_or_else(|e| e.into_inner()));
+    let stopped = unsafe { &(*thread).stopped };
+    while stopped.load(Ordering::Acquire) == 0 {
+        unsafe {
+            libc::syscall(libc::SYS_futex, stopped.as_ptr(), libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG, 0, null::<libc::timespec>());
+        }
+    }
 }
 
 /// The calling thread is done with Fil-C for good. It's exited, with no frames
 /// left, and it won't touch `thread` after this.
 pub unsafe fn finish_current(thread: *mut Thread) {
+    let _blocked = crate::signal::Blocked::all();
     {
         let _guard = lock_lifecycle();
-        unsafe {
-            (*thread).host = 0;
-            (*thread).stopped = true;
-        }
+        unsafe { (*thread).host = 0 };
     }
-    FINISHED.notify_all();
+    unsafe {
+        let stopped = &(*thread).stopped;
+        stopped.store(1, Ordering::Release);
+        libc::syscall(libc::SYS_futex, stopped.as_ptr(), libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG, i32::MAX);
+    }
     CURRENT.with(|current| current.set(null_mut()));
     unsafe { detach(thread) };
 }
@@ -218,7 +232,8 @@ fn attach() -> *mut Thread {
             base_frame,
             thread_locals: Vec::new(),
             escape: 0,
-            unwinding: crate::eh::Unwinding::new(),
+            unwinding: Default::default(),
+            signals: Default::default(),
         }));
         this.stack_limit = (low + STACK_SLACK) as *mut u8;
         this.stack_low = low as *mut u8;
@@ -255,7 +270,19 @@ pub unsafe fn enter(thread: *mut Thread) {
 
 /// The thread is at a safepoint until it enters again.
 pub unsafe fn exit(thread: *mut Thread) {
-    let before = unsafe { (*thread).state.fetch_and(!STATE_ENTERED, Ordering::AcqRel) };
+    let state = unsafe { &(*thread).state };
+    let before = loop {
+        let current = state.load(Ordering::Acquire);
+        // A handler has to run while the thread is still at a safepoint.
+        if current & STATE_DEFERRED_SIGNAL != 0 {
+            unsafe { crate::signal::handle_deferred(thread) };
+        } else if state
+            .compare_exchange_weak(current, current & !STATE_ENTERED, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            break current;
+        }
+    };
     if before & STATE_STOP_REQUESTED != 0 {
         crate::gc::note_stopped();
     }
@@ -284,6 +311,7 @@ pub unsafe fn safepoint(thread: *mut Thread) {
             enter(thread);
         }
     }
+    unsafe { crate::signal::handle_deferred(thread) };
     unsafe { crate::gc::rearm_under_stress(thread) };
 }
 

@@ -26,6 +26,7 @@ mod helpers;
 mod jump;
 mod memops;
 mod natives;
+pub mod signal;
 pub mod object;
 pub mod ptrs;
 pub mod shim;
@@ -100,6 +101,7 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
         implemented.extend(zthread::table());
         implemented.extend(jump::table());
         implemented.extend(eh::table());
+        implemented.extend(signal::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;

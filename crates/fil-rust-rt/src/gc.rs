@@ -220,11 +220,15 @@ unsafe fn collect_if(thread: *mut Thread, wanted: impl FnOnce(&Collector) -> boo
     if entered {
         unsafe { thread::exit(thread) };
     }
+    // This thread looks exited to a signal, but a handler on top of a collection
+    // would wait for the collection to end.
+    let blocked = crate::signal::Blocked::all();
     let mut collector = lock_collector();
     if wanted(&collector) {
         on_collector_stack(&mut collector);
     }
     drop(collector);
+    drop(blocked);
     if entered {
         unsafe { thread::enter(thread) };
     }
@@ -299,6 +303,7 @@ fn resume_the_world(threads: &[usize]) {
 
 /// A thread that was stopping exited.
 pub fn note_stopped() {
+    let _blocked = crate::signal::Blocked::all();
     let world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
     drop(world);
     STOPPED.notify_all();
@@ -306,6 +311,7 @@ pub fn note_stopped() {
 
 /// Waits for the end of the collection that stopped `thread`.
 pub unsafe fn wait_for_resume(thread: *mut Thread) {
+    let _blocked = crate::signal::Blocked::all();
     let mut world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
     while unsafe { (*thread).state.load(Ordering::Acquire) } & STATE_STOP_REQUESTED != 0 {
         world = RESUMED.wait(world).unwrap_or_else(|e| e.into_inner());
@@ -429,6 +435,11 @@ impl Marker {
                 return;
             }
             SPECIAL_DL_HANDLE => return,
+            SPECIAL_SIGNAL_HANDLER => {
+                let handler = lower_for_object(object).cast::<crate::signal::Handler>();
+                unsafe { self.mark_or_free_flight(&raw mut (*handler).function) };
+                return;
+            }
             SPECIAL_JMP_BUF => {
                 let buffer = lower_for_object(object).cast::<crate::jump::JmpBuf>();
                 unsafe { crate::jump::for_each_lower(buffer, |lower| self.mark(object_for_lower(lower))) };
@@ -513,7 +524,7 @@ unsafe fn verify_object(object: *mut Object, block: usize, size: usize) {
     let good = (object as usize) >= block
         && upper >= lower
         && upper <= block + size
-        && matches!(this.special_type(), 0 | SPECIAL_FUNCTION | SPECIAL_THREAD | SPECIAL_DL_HANDLE | SPECIAL_JMP_BUF)
+        && matches!(this.special_type(), 0 | SPECIAL_FUNCTION | SPECIAL_THREAD | SPECIAL_DL_HANDLE | SPECIAL_JMP_BUF | SPECIAL_SIGNAL_HANDLER)
         && (aux == 0 || heap().contains(aux) || this.special_type() != 0);
     if !good {
         internal_panic(format_args!(
@@ -536,6 +547,7 @@ fn run(collector: &mut Collector) {
         globals::for_each_root(|object| marker.root(object));
         shim::for_each_root(|object| marker.mark(object));
         start::for_each_root(|object| marker.mark(object));
+        crate::signal::for_each_root(|object| marker.mark(object));
         for &entry in &threads.0 {
             marker.mark_thread(thread_at(entry));
         }

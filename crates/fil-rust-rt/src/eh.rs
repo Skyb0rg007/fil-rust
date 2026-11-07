@@ -55,8 +55,8 @@ pub struct Unwinding {
     pub stop_argument: Ptr,
 }
 
-impl Unwinding {
-    pub const fn new() -> Unwinding {
+impl Default for Unwinding {
+    fn default() -> Unwinding {
         Unwinding {
             forced: false,
             found_frame: null_mut(),

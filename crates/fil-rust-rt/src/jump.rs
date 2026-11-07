@@ -131,6 +131,7 @@ natives! {
                 }
             }
             (*thread).signal_deferral_depth = (*buffer).saved_signal_deferral_depth;
+            crate::signal::after_deferral_decrease(thread);
             if (*buffer).did_save_sigmask {
                 libc::pthread_sigmask(libc::SIG_SETMASK, &(*buffer).sigmask, std::ptr::null_mut());
             }

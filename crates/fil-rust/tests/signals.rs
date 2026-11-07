@@ -15,6 +15,18 @@ fil_rust::foreign! {
         fn wait_usr1(count: i32, ms: i32) -> i32;
         fn interval_timer(n: i32) -> i32;
         fn recurse_forever(depth: i32) -> i32;
+        fn signal_while_running() -> i32;
+        fn signals_held_back(count: i32) -> i32;
+        fn collection_in_handler(collect: fn()) -> i32;
+        fn jump_out_of_handler() -> i32;
+        fn handler_sees_siginfo(value: i32) -> i32;
+        fn handler_mask_applies() -> i32;
+        fn sigaction_reports_the_old_handler() -> i32;
+        fn sigwait_takes_a_blocked_signal() -> i32;
+        fn sigsuspend_waits_for_a_handler() -> i32;
+        fn faults_can_be_left_at_default() -> i32;
+        fn disposition_changes_under_a_queued_signal() -> i32;
+        fn queued_signal_reaches_the_old_handler() -> i32;
     }
 }
 
@@ -28,7 +40,7 @@ fn signals() -> &'static Signals {
 }
 
 fn run_child(case: &str) -> Output {
-    Command::new(std::env::current_exe().unwrap())
+    common::without_core_dumps(&mut Command::new(std::env::current_exe().unwrap()))
         .args(["child_entry", "--exact", "--nocapture", "--test-threads=1"])
         .env("FIL_RUST_CHILD", case)
         .output()
@@ -136,4 +148,72 @@ fn signals_from_outside_reach_fil_c_handlers() {
     // And from a Rust thread spawned after the handler was installed.
     std::thread::spawn(|| unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGUSR1) }).join().unwrap();
     assert_eq!(rt.run(|fil| s.wait_usr1(fil, seen + 2, 5000).unwrap()), seen + 2);
+}
+
+/// SIGUSR2's handler changes in each of these, and it's process-wide.
+static HANDLER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn handlers<R>(body: impl FnOnce(&fil_rust::Fil<'_>, &Signals) -> R + Send) -> R
+where
+    R: Send,
+{
+    let _guard = HANDLER.lock().unwrap_or_else(|e| e.into_inner());
+    let s = signals();
+    runtime().run(|fil| body(fil, s))
+}
+
+#[test]
+fn a_running_thread_takes_a_signal_at_its_next_safepoint() {
+    assert_eq!(handlers(|fil, s| s.signal_while_running(fil).unwrap()), 1);
+}
+
+#[test]
+fn signals_held_back_all_arrive() {
+    assert_eq!(handlers(|fil, s| s.signals_held_back(fil, 300).unwrap()), 300);
+}
+
+#[test]
+fn a_handler_can_allocate_and_collect() {
+    let value = handlers(|fil, s| {
+        let collect = fil.callback::<fn(), _>(|fil, ()| fil.collect_garbage().unwrap()).unwrap();
+        s.collection_in_handler(fil, collect.get(fil)).unwrap()
+    });
+    assert_eq!(value, 42);
+}
+
+#[test]
+fn a_handler_can_jump_out() {
+    assert_eq!(handlers(|fil, s| s.jump_out_of_handler(fil).unwrap()), libc::SIGUSR2);
+}
+
+#[test]
+fn a_handler_sees_what_was_sent() {
+    assert_eq!(handlers(|fil, s| s.handler_sees_siginfo(fil, 1234).unwrap()), 1234);
+}
+
+#[test]
+fn a_handler_runs_under_its_mask() {
+    assert_eq!(handlers(|fil, s| s.handler_mask_applies(fil).unwrap()), 3);
+}
+
+#[test]
+fn sigaction_reports_what_it_replaced() {
+    assert_eq!(handlers(|fil, s| s.sigaction_reports_the_old_handler(fil).unwrap()), 1);
+}
+
+#[test]
+fn waiting_for_signals() {
+    assert_eq!(handlers(|fil, s| s.sigwait_takes_a_blocked_signal(fil).unwrap()), libc::SIGUSR2);
+    assert_eq!(handlers(|fil, s| s.sigsuspend_waits_for_a_handler(fil).unwrap()), 1);
+}
+
+/// Both of these are upstream bugs: docs/upstream-filc-issues.md.
+#[test]
+fn dispositions_the_rust_runtime_gets_right() {
+    if runtime().config().backend() != fil_rust::Backend::Rust {
+        return;
+    }
+    assert_eq!(handlers(|fil, s| s.faults_can_be_left_at_default(fil).unwrap()), 1);
+    assert_eq!(handlers(|fil, s| s.disposition_changes_under_a_queued_signal(fil).unwrap()), 1);
+    assert_eq!(handlers(|fil, s| s.queued_signal_reaches_the_old_handler(fil).unwrap()), 1);
 }

@@ -280,10 +280,12 @@ natives! {
         let target = zthread.ptr.cast::<Thread>();
         unsafe {
             thread::exit(thread);
+            let blocked = crate::signal::Blocked::all();
             let guard = thread::lock_lifecycle();
             let host = (*target).host;
             let error = if host != 0 { libc::pthread_kill(host as libc::pthread_t, signal) } else { libc::ESRCH };
             drop(guard);
+            drop(blocked);
             thread::enter(thread);
             if error != 0 {
                 set_errno(thread, error);
@@ -293,7 +295,7 @@ natives! {
     }
 
     fn zincrement_signal_deferral_depth(thread: *mut Thread) -> () {
-        unsafe { (*thread).signal_deferral_depth += 1 };
+        unsafe { crate::signal::hold_deferred(thread) };
     }
 
     fn zdecrement_signal_deferral_depth(thread: *mut Thread) -> () {
@@ -301,7 +303,7 @@ natives! {
             if (*thread).signal_deferral_depth == 0 {
                 safety_panic(format_args!("attempt to decrement the signal deferral depth below zero."));
             }
-            (*thread).signal_deferral_depth -= 1;
+            crate::signal::allow_deferred(thread);
             thread::poll(thread);
         }
     }

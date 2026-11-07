@@ -53,3 +53,59 @@ on most reads that land during the copy and the fix on none.
 
 Related, minor: the same function sets `argv[1] = NULL` on the caller's
 `argv`, which an embedder passing its own array may not expect.
+
+## 2. `sigaction` refuses every fault signal, even to set `SIG_DFL`
+
+`filc_native_zsys_sigaction`, `filc_runtime.c:8866`:
+
+```c
+filc_ptr user_handler = filc_load_ptr_at(my_thread, act_ptr, &user_act->sa_handler);
+if (is_unsafe_signal_for_handlers(signum) && filc_ptr_ptr(act_ptr) != SIG_DFL) {
+    filc_set_errno(ENOSYS);
+    return -1;
+}
+```
+
+This compares `act_ptr`, the pointer to the `struct sigaction`, which can't be
+null here, instead of `user_handler`. So asking for the default action of
+`SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL` or `SIGTRAP`, which is already what's in
+effect and is plainly allowed, fails:
+
+```c
+signal(SIGSEGV, SIG_DFL);  /* returns SIG_ERR, errno = ENOSYS */
+```
+
+Programs that reset dispositions at startup, as sandboxes and crash reporters
+do, see an error. The fix is to compare `filc_ptr_ptr(user_handler)`. On the
+next branch, `is_special_signal_handler` then already takes the right path.
+`faults_can_be_left_at_default` in `crates/fil-rust/tests/fixtures/signals.c`
+reproduces it, returning -1 on libpizlo.
+
+## 3. Changing a disposition with a signal queued fails an assertion
+
+`lookup_and_call_signal_handler_with_mask`, `filc_runtime.c:1180`, asserts that
+the signal's table entry is set:
+
+```c
+filc_signal_handler* handler = filc_signal_table[info->si_signo];
+PAS_ASSERT(handler);
+```
+
+`filc_native_zsys_sigaction` sets that entry to `NULL` for `SIG_DFL` and
+`SIG_IGN`, and doesn't deal with signals already queued. It even makes that
+more likely: `filc_increase_special_signal_deferral_depth` moves a pending
+`FILC_THREAD_STATE_DEFERRED_SIGNAL` into `have_deferred_signal_special`, so the
+`filc_exit` inside `sigaction` doesn't run the old handler, and the bit comes
+back once the table has changed. The next pollcheck then panics:
+
+```
+filc panic: src/libpas/filc_runtime.c:1180: void lookup_and_call_signal_handler_with_mask(filc_thread *, siginfo_t *): assertion handler failed
+```
+
+A signal only has to land on an entered thread just before it calls `signal()`,
+so this is a narrow race in an ordinary program. To reproduce it reliably,
+`disposition_changes_under_a_queued_signal` in the same fixture holds the signal
+back with `zincrement_signal_deferral_depth` across the `signal()` call. Running
+the handlers before raising the depth, as `zsys_sigaction` in
+`crates/fil-rust-rt/src/signal.rs` does, covers what's already queued. For what arrives during the call, a null
+entry needs to mean the signal is dropped rather than a failed assertion.

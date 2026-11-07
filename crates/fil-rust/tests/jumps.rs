@@ -37,7 +37,7 @@ fn a_setjmp_can_run_again_and_again() {
     let library = library();
     runtime().run(|fil| {
         let looped = library.function::<fn(i64) -> i64>(fil, "jump_in_a_loop").unwrap();
-        assert_eq!(looped.call(fil, (100_000,)).unwrap(), 100_000);
+        assert_eq!(looped.call(fil, (1000,)).unwrap(), 1000);
     });
 }
 

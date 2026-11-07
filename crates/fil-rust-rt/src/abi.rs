@@ -6,7 +6,7 @@
 //! headers. Written against Fil-C 0.687, whose ABI upstream calls `fil1`.
 
 use std::mem::{offset_of, size_of};
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering, AtomicU32};
 
 pub const WORD_SIZE: usize = 8;
 /// Objects are aligned to this, and it's the granule of the mark bitmap.
@@ -27,6 +27,7 @@ pub const FLAGS_ALIGN_SHIFT: u32 = 11;
 
 pub const SPECIAL_FUNCTION: usize = 1;
 pub const SPECIAL_THREAD: usize = 2;
+pub const SPECIAL_SIGNAL_HANDLER: usize = 3;
 pub const SPECIAL_DL_HANDLE: usize = 6;
 pub const SPECIAL_JMP_BUF: usize = 7;
 
@@ -309,7 +310,7 @@ pub struct Thread {
     /// The `pthread_t`, while the thread is running.
     pub host: usize,
     /// Set by a thread that's finished, under `thread::lock_lifecycle`.
-    pub stopped: bool,
+    pub stopped: AtomicU32,
     /// How many `zincrement_signal_deferral_depth` calls are in effect.
     pub signal_deferral_depth: u64,
     _pad3: [u8; ALLOCATOR_SLOTS_OFFSET - 728],
