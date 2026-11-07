@@ -205,12 +205,19 @@ Results: compiled libraries run with no libpizlo, libpas or libc loaded, and the
 library's `zasprintf` runs on Rust natives. `tests/layout.rs` has a C compiler assert every
 layout against the pinned headers. The aarch64 and glibc builds of this code are not run yet;
 the 16-byte atomics for aarch64 are written but untested. Helpers for unwinding and `setjmp`
-still report their name, and most natives are still missing, as planned for M5.
+still report their name, and most natives are still missing, as planned for M5. Existing
+fixtures with no libc imports need the `fil-rust` API, so they run from M2.
 
-**M2. Backend seam**
+**M2. Backend seam**: done on musl x86-64.
 - `fr_*` in Rust, `Config::runtime`, `Libc`, name-only stand-ins, bare threads, callbacks with
   CC tracking, `zclosure_new`, handles. A set `has_exception` is fatal until M5.
 - `tests/rt_bare.rs`, including `run` from several Rust threads.
+
+`Backend::Rust` runs `tests/rt_bare.rs` and `tests/layout.rs` with no thread started and no file
+of the distribution mapped; `rt_bare.rs` also passes on libpizlo, apart from what's specific to
+bare threads. A library that imports from libc fails to load, naming the symbol, until M4 adds the
+import scan. Callback entry tracks every aux word of the argument buffer, since it can't tell which
+are pointers. M3 has to check those before marking, in case an integer slot holds a stale lower.
 
 **M3. Tracing GC, multi-mutator**
 - Stop-the-world across bare threads.

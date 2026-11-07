@@ -5,9 +5,10 @@
 //! it as an argument. The few helpers that don't are the reason `current`
 //! exists.
 
-use std::alloc::{Layout, alloc_zeroed};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::Cell;
 use std::ptr::{self, null, null_mut};
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 use crate::abi::*;
@@ -15,6 +16,8 @@ use crate::abi::*;
 /// How close to the end of the stack compiled code may get before it fails with
 /// a stack overflow. Runtime helpers run in this space.
 const STACK_SLACK: usize = 1 << 16;
+/// How much memory precedes a `Thread`: room for its header, keeping alignment.
+const THREAD_PREFIX: usize = 64;
 
 /// The runtime's per-thread state, reached from `Thread::extra`.
 pub struct ThreadExtra {
@@ -89,6 +92,48 @@ fn stack_low_end() -> usize {
     }
 }
 
+/// Every `Thread`, for the collector to stop.
+struct ThreadList(Vec<usize>);
+
+static THREADS: Mutex<ThreadList> = Mutex::new(ThreadList(Vec::new()));
+
+/// Lets a `Thread` go when its OS thread does.
+struct Detach;
+
+impl Drop for Detach {
+    fn drop(&mut self) {
+        let thread = CURRENT.with(|current| current.replace(null_mut()));
+        if !thread.is_null() {
+            unsafe { detach(thread) };
+        }
+    }
+}
+
+thread_local! {
+    static DETACH: Detach = const { Detach };
+}
+
+/// Frees a thread. Nothing it allocated goes with it: its blocks stay in their
+/// chunks, reachable or not.
+unsafe fn detach(thread: *mut Thread) {
+    let mut threads = THREADS.lock().unwrap_or_else(|e| e.into_inner());
+    threads.0.retain(|&entry| entry != thread as usize);
+    drop(threads);
+    unsafe {
+        let this = &mut *thread;
+        for slot in &mut this.slots {
+            crate::heap::heap().flush_slot(slot);
+        }
+        crate::cc::release_outline(thread);
+        drop(Box::from_raw(this.extra));
+        dealloc(thread.cast::<u8>().wrapping_sub(THREAD_PREFIX), thread_layout());
+    }
+}
+
+fn thread_layout() -> Layout {
+    Layout::from_size_align(size_of::<Thread>() + THREAD_PREFIX, 64).unwrap()
+}
+
 /// Makes a `Thread` for the calling OS thread, starting out exited.
 pub fn attach_current() -> *mut Thread {
     let existing = current();
@@ -97,12 +142,12 @@ pub fn attach_current() -> *mut Thread {
     }
     // The header goes in the padding in front, so the thread keeps its
     // alignment.
-    let layout = Layout::from_size_align(size_of::<Thread>() + 64, 64).unwrap();
+    let layout = thread_layout();
     let memory = unsafe { alloc_zeroed(layout) };
     if memory.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
-    let thread = memory.wrapping_add(64).cast::<Thread>();
+    let thread = memory.wrapping_add(THREAD_PREFIX).cast::<Thread>();
     let lower = thread.cast::<u8>();
     let object = object_for_lower(lower);
     unsafe {
@@ -130,6 +175,10 @@ pub fn attach_current() -> *mut Thread {
         }
     }
     CURRENT.with(|current| current.set(thread));
+    THREADS.lock().unwrap_or_else(|e| e.into_inner()).0.push(thread as usize);
+    // If the thread is on its way out, this does nothing, and the `Thread`
+    // stays around: destructors of Fil-C libraries can run that late.
+    let _ = DETACH.try_with(|_| ());
     thread
 }
 

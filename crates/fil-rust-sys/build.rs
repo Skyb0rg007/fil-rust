@@ -6,7 +6,9 @@
 //! * the **runtime shim**, compiled against the flavor's libc headers and the
 //!   Fil-C runtime headers so that it agrees with libpizlo on struct layouts, and
 //! * the **runtime stub**, a `libpizlo.so` of jump slots that the Rust runtime
-//!   fills in, generated from `abi/runtime_symbols_*.txt`.
+//!   fills in, generated from `abi/runtime_symbols_*.txt`, and
+//! * **name-only** libraries with the sonames of the Fil-C libc, for running
+//!   libraries that link against it but import nothing from it.
 //!
 //! Inputs come from environment variables that `shell.nix` sets.
 
@@ -60,6 +62,18 @@ fn build_compat(cc: &str, src: &Path, out: &Path, soname: &str, version_script: 
         cmd.arg(format!("-Wl,--version-script={}", script.display()));
     }
     cmd.arg("-lm");
+    run(&mut cmd);
+}
+
+/// Builds a library with a soname and nothing else. Compiled libraries list
+/// the Fil-C libc as a dependency even when they import nothing from it, and a
+/// loaded library with its soname keeps the loader from finding the real one.
+fn build_name_only(cc: &str, out: &Path, soname: &str) {
+    let mut cmd = Command::new(cc);
+    cmd.args(["-shared", "-nostdlib", "-x", "c", "/dev/null"])
+        .arg(format!("-Wl,-soname,{soname}"))
+        .arg("-o")
+        .arg(out);
     run(&mut cmd);
 }
 
@@ -307,6 +321,7 @@ fn main() {
             None,
         );
         build_stub(&cc, &arch, Path::new("abi/runtime_symbols_musl.txt"), &out_dir, "stub_musl");
+        build_name_only(&cc, &out_dir.join("name_only_libc.so"), "libc.so");
         println!("cargo:rerun-if-env-changed=FILC_ROOT");
         let archive = env::var_os("FILC_ROOT").map(|root| Path::new(&root).join("pizfix/lib/libpizlo.a"));
         build_support(&cc, archive, &out_dir, "support_musl");
@@ -343,6 +358,14 @@ fn main() {
             None,
         );
         build_stub(&cc, &arch, Path::new("abi/runtime_symbols_glibc.txt"), &out_dir, "stub_glibc");
+        for (out, soname) in [
+            ("name_only_libc_6666.so", "libc.so.6666"),
+            ("name_only_libm_6666.so", "libm.so.6666"),
+            ("name_only_libdl_6662.so", "libdl.so.6662"),
+            ("name_only_libpthread_6660.so", "libpthread.so.6660"),
+        ] {
+            build_name_only(&cc, &out_dir.join(out), soname);
+        }
         // The glibc flavor of the runtime is built against (yolo) glibc headers,
         // which the host glibc's headers match. Ask the host compiler for them.
         let glibc_include = env_path("FILC_GLIBC_INCLUDE");

@@ -14,7 +14,7 @@ fil-rust = { path = "crates/fil-rust" }
 fil-rust-bindgen = { path = "crates/fil-rust-bindgen" }
 fil-rust-build = { path = "crates/fil-rust-build" }
 fil-rust-macros = { path = "crates/fil-rust-macros" }
-fil-rust-rt = { path = "crates/fil-rust-rt" }
+fil-rust-rt = { path = "crates/fil-rust-rt", default-features = false }
 fil-rust-sys = { path = "crates/fil-rust-sys", default-features = false }
 
 # External crates.

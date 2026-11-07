@@ -99,7 +99,7 @@ impl Value for () {
 }
 
 /// Makes the function object once. Natives never go away, so it can leak.
-fn function_object(cell: &AtomicPtr<FunctionObject>, entry: PizlonatedFn) -> Ptr {
+pub fn function_object(cell: &AtomicPtr<FunctionObject>, entry: PizlonatedFn) -> Ptr {
     let mut existing = cell.load(Ordering::Acquire);
     if existing.is_null() {
         let object = Box::into_raw(Box::new(FunctionObject {
@@ -181,7 +181,49 @@ unsafe fn realloc(thread: *mut Thread, old: Ptr, size: usize, alignment: usize) 
     unsafe { object::reallocate(thread, old, size, alignment) }
 }
 
+/// A function object like `function`, with `data` to go with it.
+pub unsafe fn closure_new(thread: *mut Thread, function: Ptr, data: Ptr) -> Ptr {
+    object::check_function_call(function);
+    unsafe {
+        let block = crate::heap::heap().allocate(thread, OBJECT_SIZE + size_of::<Closure>());
+        let object = block.cast::<Object>();
+        let lower = lower_for_object(object);
+        let closure = lower.cast::<Closure>();
+        let base = &*function.ptr.cast::<Function>();
+        (&raw mut (*closure).function).write(Function {
+            fast_entrypoint: base.fast_entrypoint,
+            generic_entrypoint: base.generic_entrypoint,
+            signature: base.signature,
+        });
+        (&raw mut (*closure).data).write(data);
+        (*object).upper.store(lower, Ordering::Relaxed);
+        (*object).aux.store(aux_create(object_flags(SPECIAL_FUNCTION, 0), lower), Ordering::Release);
+        Ptr { ptr: lower, lower }
+    }
+}
+
+/// The closure `function` points at, if it's one.
+unsafe fn closure_of(function: Ptr) -> *mut Closure {
+    object::check_function_call(function);
+    if unsafe { (*function.object()).flags() } & FLAG_READONLY != 0 {
+        safety_panic(format_args!("object {:p} is not a closure.", function.object()));
+    }
+    function.ptr.cast()
+}
+
 natives! {
+    fn zclosure_new(thread: *mut Thread, function: Ptr, data: Ptr) -> Ptr {
+        unsafe { closure_new(thread, function, data) }
+    }
+
+    fn zclosure_get_data(thread: *mut Thread, function: Ptr) -> Ptr {
+        unsafe { crate::ptrs::atomic16::load(&raw mut (*closure_of(function)).data) }
+    }
+
+    fn zclosure_set_data(thread: *mut Thread, function: Ptr, data: Ptr) -> () {
+        unsafe { crate::ptrs::atomic16::store(&raw mut (*closure_of(function)).data, data) };
+    }
+
     fn zgc_alloc(thread: *mut Thread, size: usize) -> Ptr {
         Ptr::for_object(unsafe { object::allocate(thread, size, 0) })
     }

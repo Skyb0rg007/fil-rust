@@ -53,6 +53,8 @@ fn layouts_match_the_runtime_headers() {
         ("offsetof(filc_function, generic_entrypoint)", offset_of!(Function, generic_entrypoint)),
         ("sizeof(filc_function)", size_of::<Function>()),
         ("offsetof(filc_function_object, function)", offset_of!(FunctionObject, function)),
+        ("offsetof(filc_closure, data_ptr)", offset_of!(Closure, data)),
+        ("sizeof(filc_closure)", size_of::<Closure>()),
         ("offsetof(filc_origin_node, num_lowers_ish)", offset_of!(OriginNode, num_lowers_ish)),
         ("offsetof(filc_function_origin, personality_getter)", offset_of!(FunctionOrigin, personality_getter)),
         ("offsetof(filc_function_origin, num_setjmps)", offset_of!(FunctionOrigin, num_setjmps)),

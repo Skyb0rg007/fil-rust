@@ -6,12 +6,13 @@ description = "A Rust FFI for Fil-C shared libraries"
 
 [features]
 default = ["musl", "derive"]
-musl = ["fil-rust-sys/musl"]
-glibc = ["fil-rust-sys/glibc"]
+musl = ["fil-rust-sys/musl", "fil-rust-rt/musl"]
+glibc = ["fil-rust-sys/glibc", "fil-rust-rt/glibc"]
 derive = ["dep:fil-rust-macros"]
 
 [dependencies]
 fil-rust-sys = { workspace = true }
+fil-rust-rt = { workspace = true }
 fil-rust-macros = { workspace = true, optional = true }
 libc = { workspace = true }
 

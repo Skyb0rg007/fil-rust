@@ -7,7 +7,7 @@ use fil_rust_sys::{Flavor, RawPtr, dlerror_string, dlopen_path, loaded_objects};
 
 use crate::call::{FilFn, FilSig, Function};
 use crate::ptr::{FilPtr, Opaque};
-use crate::runtime::Inner;
+use crate::runtime::{Backend, Config, Inner};
 use crate::types::FilType;
 use crate::{Error, Fil, Result};
 
@@ -98,9 +98,12 @@ impl Library {
     }
 }
 
-/// Fails if the real yolo libc of the distribution got mapped into the
-/// process. That would put two C libraries in one address space.
-pub(crate) fn check_no_real_yolo_libc(flavor: Flavor) -> Result<()> {
+/// Fails if the process has mapped what fil-rust means to stand in for. The
+/// real yolo libc would put two C libraries in one address space. On the Rust
+/// backend, the same goes for libpizlo and the Fil-C libc, which would bring a
+/// second runtime and a libc with no thread to run on.
+pub(crate) fn check_no_foreign_runtime(config: &Config) -> Result<()> {
+    let flavor = config.flavor();
     for name in loaded_objects() {
         if name.starts_with("/proc/self/fd/") {
             continue;
@@ -110,6 +113,13 @@ pub(crate) fn check_no_real_yolo_libc(flavor: Flavor) -> Result<()> {
             return Err(Error::Load(format!(
                 "the distribution's own yolo libc ({name}) was loaded into the process; \
                  Fil-C objects must only be loaded through fil-rust"
+            )));
+        }
+        if config.backend() == Backend::Rust
+            && (base == "libpizlo.so" || flavor.libc_stand_ins().iter().any(|lib| lib.soname == base))
+        {
+            return Err(Error::Load(format!(
+                "{name} was loaded into the process, but the Rust runtime stands in for it"
             )));
         }
     }
@@ -207,7 +217,7 @@ pub(crate) fn open(inner: &Inner, path: &Path) -> Result<Library> {
     let mut visited = Vec::new();
     preload_dependencies(&inner.config.search_dirs(), path, &mut visited)?;
     let handle = unsafe { dlopen_path(path, libc::RTLD_NOW | libc::RTLD_LOCAL) }.map_err(Error::Load)?;
-    check_no_real_yolo_libc(inner.config.flavor())?;
+    check_no_foreign_runtime(&inner.config)?;
     Ok(Library::from_handle(handle, path.to_path_buf()))
 }
 

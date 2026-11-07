@@ -21,10 +21,7 @@ pub unsafe fn ensure_outline(thread: *mut Thread, size: usize) {
     }
     let size = (size + CC_ALIGNMENT - 1) & !(CC_ALIGNMENT - 1);
     unsafe {
-        if this.cc_outline_size != 0 {
-            dealloc(this.cc_outline, outline_layout(this.cc_outline_size));
-            dealloc(this.cc_outline_aux, outline_layout(this.cc_outline_size));
-        }
+        release_outline(thread);
         this.cc_outline = alloc_zeroed(outline_layout(size));
         this.cc_outline_aux = alloc_zeroed(outline_layout(size));
     }
@@ -32,6 +29,17 @@ pub unsafe fn ensure_outline(thread: *mut Thread, size: usize) {
         std::alloc::handle_alloc_error(outline_layout(size));
     }
     this.cc_outline_size = size;
+}
+
+pub unsafe fn release_outline(thread: *mut Thread) {
+    let this = unsafe { &mut *thread };
+    if this.cc_outline_size != 0 {
+        unsafe {
+            dealloc(this.cc_outline, outline_layout(this.cc_outline_size));
+            dealloc(this.cc_outline_aux, outline_layout(this.cc_outline_size));
+        }
+        this.cc_outline_size = 0;
+    }
 }
 
 pub unsafe fn ensure_total(thread: *mut Thread, size: usize) {

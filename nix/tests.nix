@@ -116,6 +116,15 @@ let
     };
   }
   // lib.optionalAttrs host.isx86_64 {
+    rust-rt = {
+      description = "The Rust runtime's tests, and the libc-free suites on both backends";
+      run = ''
+        cargo test --offline ${target} -p fil-rust-rt
+        FIL_RUST_RUNTIME=rust cargo test --offline ${target} -p fil-rust --test rt_bare --test layout
+        FIL_RUST_RUNTIME=pizlo cargo test --offline ${target} -p fil-rust --test rt_bare
+      '';
+    };
+
     glibc = {
       description = "fil-rust's tests against the glibc distribution";
       flags = [

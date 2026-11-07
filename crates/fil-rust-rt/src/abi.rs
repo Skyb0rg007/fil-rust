@@ -177,6 +177,17 @@ pub struct FunctionObject {
     pub function: Function,
 }
 
+/// A function object that carries a pointer along. It's reachable from the
+/// object's `lower`, which is the only argument its entry point gets for it.
+#[repr(C, align(16))]
+pub struct Closure {
+    pub function: Function,
+    /// `Ptr` is aligned like its fields, so it can pass by value the same way
+    /// on every target. `filc_ptr` is aligned to 16.
+    _padding: u64,
+    pub data: Ptr,
+}
+
 /// Returned in two registers: the flag and how much of the CC buffers holds
 /// return values.
 #[repr(C)]

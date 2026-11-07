@@ -186,6 +186,7 @@ version = "0.1.0"
 dependencies = [
  "fil-rust-build",
  "fil-rust-macros",
+ "fil-rust-rt",
  "fil-rust-sys",
  "libc",
  "proptest",

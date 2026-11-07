@@ -179,6 +179,7 @@ The tests are separate derivations in `passthru.tests` (`nix/tests.nix`):
     nix-build -A tests.musl         # the whole workspace, musl flavor
     nix-build -A tests.glibc        # fil-rust against the glibc flavor (x86-64)
     nix-build -A tests.gc-stress    # memory/thread/property/stress tests, constant GC
+    nix-build -A tests.rust-rt      # the Rust runtime (x86-64)
     nix-build -A tests.examples     # runs every example and bindgen-demo
     nix-build -A tests.clippy       # clippy, warnings as errors
 

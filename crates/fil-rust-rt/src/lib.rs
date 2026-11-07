@@ -25,6 +25,7 @@ mod memops;
 mod natives;
 pub mod object;
 pub mod ptrs;
+pub mod shim;
 pub mod thread;
 
 use std::ffi::{c_char, c_void};
@@ -42,11 +43,27 @@ unsafe extern "C" fn missing_native(_: *mut Thread, _: *const Origin, name: *con
     failure::missing(&unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy());
 }
 
-fn load_stub(flavor: Flavor) -> Result<(), String> {
+/// What [`install`] loaded, for looking symbols up in.
+#[derive(Clone, Copy, Debug)]
+pub struct Installed {
+    /// The stub, which has every symbol the runtime defines.
+    pub runtime: usize,
+    /// The empty library that took the place of the Fil-C libc.
+    pub libc: usize,
+}
+
+fn load_stub(flavor: Flavor) -> Result<Installed, String> {
     let compat = flavor.compat_libs().ok_or_else(|| format!("{flavor:?} support wasn't built"))?;
     let flags = libc::RTLD_NOW | libc::RTLD_GLOBAL;
     for lib in compat.iter().filter(|lib| lib.soname != "libpizlo.so") {
         unsafe { dlopen_bytes(lib.soname, lib.bytes, flags) }?;
+    }
+    let mut libc = std::ptr::null_mut();
+    for (index, lib) in flavor.libc_stand_ins().iter().enumerate() {
+        let handle = unsafe { dlopen_bytes(lib.soname, lib.bytes, flags) }?;
+        if index == 0 {
+            libc = handle;
+        }
     }
     let stub = flavor.runtime_stub().ok_or_else(|| format!("{flavor:?} has no runtime stub"))?;
     let handle = unsafe { dlopen_bytes(stub.soname, stub.bytes, flags) }?;
@@ -55,7 +72,8 @@ fn load_stub(flavor: Flavor) -> Result<(), String> {
         Some(lib) => unsafe { dlopen_bytes(lib.soname, lib.bytes, libc::RTLD_NOW | libc::RTLD_LOCAL) }?,
         None => std::ptr::null_mut(),
     };
-    unsafe { fill_stub(handle, support) }
+    unsafe { fill_stub(handle, support) }?;
+    Ok(Installed { runtime: handle as usize, libc: libc as usize })
 }
 
 /// Points the stub's slots at what implements them: the helpers and natives
@@ -89,8 +107,8 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
 }
 
 /// Makes the process ready to load compiled libraries.
-pub fn install(flavor: Flavor) -> Result<(), String> {
-    static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
+pub fn install(flavor: Flavor) -> Result<Installed, String> {
+    static INSTALLED: OnceLock<Result<Installed, String>> = OnceLock::new();
     INSTALLED.get_or_init(|| load_stub(flavor)).clone()
 }
 
