@@ -38,6 +38,34 @@ impl Args {
 pub trait Value: Sized {
     unsafe fn take(thread: *mut Thread, args: &mut Args) -> Self;
     unsafe fn give(self, thread: *mut Thread) -> usize;
+
+    /// Whether the caller gets an exception rather than this.
+    fn is_exception(&self) -> bool {
+        false
+    }
+}
+
+/// What a native that can throw returns.
+pub enum Thrown<T> {
+    Value(T),
+    Exception,
+}
+
+impl<T: Value> Value for Thrown<T> {
+    unsafe fn take(_: *mut Thread, _: &mut Args) -> Self {
+        crate::failure::internal_panic(format_args!("an exception can't be an argument"));
+    }
+
+    unsafe fn give(self, thread: *mut Thread) -> usize {
+        match self {
+            Thrown::Value(value) => unsafe { value.give(thread) },
+            Thrown::Exception => 0,
+        }
+    }
+
+    fn is_exception(&self) -> bool {
+        matches!(self, Thrown::Exception)
+    }
 }
 
 macro_rules! integer_value {
@@ -172,9 +200,10 @@ macro_rules! natives {
                     let mut args = Args { offset: 0, size };
                     $(let $arg = unsafe { <$ty as Value>::take(thread, &mut args) };)*
                     let result: $ret = unsafe { body(thread $(, $arg)*) };
+                    let has_exception = result.is_exception();
                     let return_size = unsafe { result.give(thread) };
                     unsafe { frame.pop(thread) };
-                    ReturnValue { has_exception: false, return_size }
+                    ReturnValue { has_exception, return_size }
                 }
 
                 #[allow(unused_variables, clippy::unused_unit, unused_mut)]
@@ -343,16 +372,16 @@ natives! {
         false
     }
 
-    fn zcall(thread: *mut Thread, callee: Ptr, arguments: Ptr) -> Ptr {
+    fn zcall(thread: *mut Thread, callee: Ptr, arguments: Ptr) -> Thrown<Ptr> {
         unsafe {
             let size = cc::demote_from_heap(thread, arguments);
             object::check_function_call(callee);
             let function = &*callee.ptr.cast::<Function>();
             let result = (function.generic_entrypoint)(thread, callee.lower, size);
             if result.has_exception {
-                crate::failure::internal_panic(format_args!("Fil-C exceptions aren't supported yet"));
+                return Thrown::Exception;
             }
-            cc::promote_to_heap(thread, result.return_size)
+            Thrown::Value(cc::promote_to_heap(thread, result.return_size))
         }
     }
 

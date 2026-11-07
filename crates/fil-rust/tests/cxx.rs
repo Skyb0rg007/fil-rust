@@ -25,6 +25,7 @@ fil_rust::foreign! {
         fn throw_int(v: i32) -> i32;
         fn guarded_call(f: fn(i32) -> i32, x: i32) -> i32;
         fn call_on_thread(f: fn(i32) -> i32, x: i32) -> i32;
+        fn collect_while_unwinding(collect: fn()) -> i32;
     }
 }
 
@@ -202,5 +203,14 @@ fn callbacks_on_cxx_threads() {
         for x in 0..20 {
             assert_eq!(c.call_on_thread(fil, plain.get(fil), x).unwrap(), x * 3);
         }
+    });
+}
+
+#[test]
+fn an_exception_outlives_collections_on_its_way_up() {
+    let cxx = cxx();
+    runtime().run(|fil| {
+        let collect = fil.callback::<fn(), _>(|fil, ()| fil.collect_garbage().unwrap()).unwrap();
+        assert_eq!(cxx.collect_while_unwinding(fil, collect.get(fil)).unwrap(), 1);
     });
 }

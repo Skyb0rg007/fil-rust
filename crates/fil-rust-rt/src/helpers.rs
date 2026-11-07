@@ -674,6 +674,14 @@ unsafe extern "C" fn filc_jmp_buf_recreate(
     unsafe { crate::jump::recreate(thread, slot, kind, value) }
 }
 
+unsafe extern "C" fn filc_landing_pad(thread: *mut Thread) -> bool {
+    unsafe { crate::eh::landing_pad(thread) }
+}
+
+unsafe extern "C" fn filc_resume_unwind(thread: *mut Thread, origin: *const Origin) {
+    unsafe { crate::eh::resume_unwind(thread, origin) };
+}
+
 macro_rules! helpers {
     ($($name:ident),* $(,)?) => {
         /// Every helper with an implementation so far. A slot with no entry
@@ -707,6 +715,8 @@ helpers! {
     filc_exit,
     filc_expand_read_check_fail,
     filc_jmp_buf_recreate,
+    filc_landing_pad,
+    filc_resume_unwind,
     filc_finish_memmove_small_1,
     filc_finish_memmove_small_2,
     filc_finish_memmove_small_3,

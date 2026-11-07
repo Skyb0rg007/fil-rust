@@ -488,6 +488,11 @@ impl Marker {
                 self.mark(extra.thread_locals[index]);
             }
             self.mark(object_for_lower(thread.cast()));
+            let unwinding = &raw mut extra.unwinding;
+            self.mark_or_free_flight(&raw mut (*unwinding).context);
+            self.mark_or_free_flight(&raw mut (*unwinding).exception);
+            self.mark_or_free_flight(&raw mut (*unwinding).stop_callback);
+            self.mark_or_free_flight(&raw mut (*unwinding).stop_argument);
         }
     }
 

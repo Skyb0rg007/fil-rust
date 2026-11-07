@@ -2,7 +2,7 @@
 //! same one its C shim gives it for libpizlo.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::ptr::{null_mut, read_volatile};
+use std::ptr::{null, null_mut, read_volatile};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -11,8 +11,8 @@ use fil_rust_sys::{CallbackFn, FilcThread, PtrInfo, RawPtr, SHIM_ABI_VERSION, Sh
 use crate::abi::*;
 use crate::failure::{internal_panic, safety_panic, user_panic};
 use crate::natives::function_object;
-use crate::thread::{self, NativeFrame};
-use crate::{cc, memops, object, ptrs};
+use crate::thread::{self, NativeFrame, extra};
+use crate::{cc, eh, memops, object, ptrs};
 
 fn to_ptr(raw: RawPtr) -> Ptr {
     Ptr { ptr: raw.ptr.cast(), lower: raw.lower.cast() }
@@ -408,13 +408,65 @@ unsafe extern "C" fn fr_call(t: *mut FilcThread, function: RawPtr, argument_size
         }
         let function = to_ptr(function);
         let entry = (*function.ptr.cast::<Function>()).generic_entrypoint;
+        let mut frame = Frame { parent: (*thread).top_frame, origin: &CALL_ORIGIN.0.base, lowers: [] };
+        (*thread).top_frame = &mut frame;
         let returned = entry(thread, function.lower, argument_size);
         if returned.has_exception {
-            crate::failure::internal_panic(format_args!("Fil-C exceptions aren't supported yet"));
+            if extra(thread).unwinding.found_frame != &raw mut frame {
+                internal_panic(format_args!("fil-rust: unwinding did not stop at the Rust boundary."));
+            }
+            if !eh::landing_pad(thread) {
+                internal_panic(format_args!("fil-rust: landing pad refused the exception."));
+            }
+            eh::dispose(thread);
+        }
+        (*thread).top_frame = frame.parent;
+        if returned.has_exception {
+            return status::EXCEPTION;
         }
         *return_size = returned.return_size;
     }
     status::OK
+}
+
+/// A frame for calls from Rust, whose personality claims every exception in the
+/// search phase, like a `catch (...)`. So one that escapes the callee unwinds to
+/// here, running destructors on the way, instead of reaching `std::terminate`.
+struct SyncFunctionOrigin(FunctionOrigin);
+unsafe impl Sync for SyncFunctionOrigin {}
+struct SyncOrigin(OriginWithEh);
+unsafe impl Sync for SyncOrigin {}
+
+static CALL_FUNCTION_ORIGIN: SyncFunctionOrigin = SyncFunctionOrigin(FunctionOrigin {
+    base: OriginNode { function: c"fil_rust_call".as_ptr(), filename: c"<runtime>".as_ptr(), num_lowers_ish: 0 },
+    personality_getter: call_personality_getter as *const (),
+    can_throw: false,
+    can_catch: true,
+    num_setjmps: 0,
+    num_stack_auxes: 0,
+});
+
+static CALL_ORIGIN: SyncOrigin = SyncOrigin(OriginWithEh {
+    base: Origin { origin_node: &CALL_FUNCTION_ORIGIN.0.base, line: 0, column: 0 },
+    eh_data_getter: null(),
+});
+
+unsafe extern "C" fn call_personality_getter(_: *mut Thread, _: *const Origin) -> Ptr {
+    static CELL: AtomicPtr<FunctionObject> = AtomicPtr::new(null_mut());
+    function_object(&CELL, call_personality)
+}
+
+/// `personality(version, actions, class, exception, context)`.
+unsafe extern "C" fn call_personality(thread: *mut Thread, _: *mut u8, _: usize) -> ReturnValue {
+    const REASON_HANDLER_FOUND: u64 = 6;
+    const REASON_INSTALL_CONTEXT: u64 = 7;
+    const ACTION_SEARCH_PHASE: u64 = 1;
+    unsafe {
+        let actions = *cc::slot(thread, WORD_SIZE);
+        let reason = if actions & ACTION_SEARCH_PHASE != 0 { REASON_HANDLER_FOUND } else { REASON_INSTALL_CONTEXT };
+        *cc::slot(thread, 0) = reason;
+    }
+    ReturnValue { has_exception: false, return_size: WORD_SIZE }
 }
 
 /// The closure's whole data pointer: Rust's id for the callback is its address.

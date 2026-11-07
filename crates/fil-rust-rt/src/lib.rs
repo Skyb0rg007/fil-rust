@@ -21,6 +21,7 @@ pub mod failure;
 pub mod gc;
 pub mod globals;
 pub mod heap;
+pub mod eh;
 mod helpers;
 mod jump;
 mod memops;
@@ -98,6 +99,7 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
         implemented.extend(sys::table());
         implemented.extend(zthread::table());
         implemented.extend(jump::table());
+        implemented.extend(eh::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;
@@ -176,7 +178,7 @@ pub unsafe fn call(thread: *mut Thread, callee: Ptr, args: &[Ptr], rets: &mut [P
         let function = &*callee.ptr.cast::<Function>();
         let result = (function.generic_entrypoint)(thread, callee.lower, size);
         if result.has_exception {
-            failure::internal_panic(format_args!("Fil-C exceptions aren't supported yet"));
+            failure::internal_panic(format_args!("an exception escaped a function the runtime called"));
         }
         for (index, ret) in rets.iter_mut().enumerate() {
             let offset = index * WORD_SIZE;

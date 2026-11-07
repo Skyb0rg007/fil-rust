@@ -227,6 +227,13 @@ pub struct Origin {
     pub column: u32,
 }
 
+/// What an origin really is if its function has a personality.
+#[repr(C)]
+pub struct OriginWithEh {
+    pub base: Origin,
+    pub eh_data_getter: *const (),
+}
+
 /// The function an origin is in, however many inlined calls deep.
 pub unsafe fn function_origin(mut origin: *const Origin) -> *const FunctionOrigin {
     loop {

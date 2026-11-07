@@ -247,6 +247,20 @@ pub fn check_named_access(ptr: Ptr, size: usize, access: Access, name: &str) {
     }
 }
 
+/// Whether [`check_access`] would pass.
+pub fn is_accessible(ptr: Ptr, size: usize, access: Access) -> bool {
+    access_error(ptr, size, access, "").is_none()
+}
+
+/// Whether `ptr` can be called.
+pub fn is_function(ptr: Ptr) -> bool {
+    if ptr.lower.is_null() {
+        return false;
+    }
+    let object = unsafe { &*ptr.object() };
+    object.special_type() == SPECIAL_FUNCTION && ptr.ptr == object.aux_ptr()
+}
+
 /// Fails unless a pointer can be read or written at `ptr`.
 pub fn check_word_access(ptr: Ptr, access: Access) {
     check_access(ptr, WORD_SIZE, access);

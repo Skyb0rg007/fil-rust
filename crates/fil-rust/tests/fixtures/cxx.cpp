@@ -113,3 +113,24 @@ extern "C" int call_on_thread(int (*f)(int), int x) {
     t.join();
     return result;
 }
+
+struct CollectsOnTheWayOut {
+    void (*collect)();
+    ~CollectsOnTheWayOut() { collect(); }
+};
+
+static void throw_past_collections(void (*collect)(), int depth) {
+    CollectsOnTheWayOut guard { collect };
+    if (depth == 0) throw std::runtime_error("kept");
+    throw_past_collections(collect, depth - 1);
+}
+
+// Between frames, only the unwinder knows about the exception.
+extern "C" int collect_while_unwinding(void (*collect)()) {
+    try {
+        throw_past_collections(collect, 3);
+    } catch (const std::exception& error) {
+        return std::string(error.what()) == "kept";
+    }
+    return -1;
+}

@@ -30,6 +30,8 @@ pub struct ThreadExtra {
     pub thread_locals: Vec<*mut Object>,
     /// Where `zthread_exit` goes, for threads that started with one.
     pub escape: usize,
+    /// The exception on its way up this thread, if any.
+    pub unwinding: crate::eh::Unwinding,
 }
 
 /// Roots for what a stretch of native code allocates or loads.
@@ -216,6 +218,7 @@ fn attach() -> *mut Thread {
             base_frame,
             thread_locals: Vec::new(),
             escape: 0,
+            unwinding: crate::eh::Unwinding::new(),
         }));
         this.stack_limit = (low + STACK_SLACK) as *mut u8;
         this.stack_low = low as *mut u8;
