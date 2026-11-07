@@ -449,6 +449,11 @@ impl Heap {
         was_clear
     }
 
+    pub fn is_marked(&self, block: usize) -> bool {
+        let bit = (block - self.base) / MIN_ALIGN;
+        unsafe { *self.marks.wrapping_add(bit / 64) & (1u64 << (bit % 64)) != 0 }
+    }
+
     fn take_mark(&self, block: usize) -> bool {
         let bit = (block - self.base) / MIN_ALIGN;
         let word = unsafe { &mut *self.marks.wrapping_add(bit / 64) };

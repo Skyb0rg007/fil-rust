@@ -122,7 +122,7 @@ let
         cargo test --offline ${target} -p fil-rust-rt
         FIL_RUST_RUNTIME=rust cargo test --offline ${target} -p fil-rust \
           --test rt_bare --test rt_gc --test rt_libc --test sys --test layout --test boot --test edges \
-          --test jumps --test cxx --test signals \
+          --test jumps --test cxx --test signals --test maps \
           --test smoke --test calls --test memory --test threads --test lifecycle --test stress \
           --test startup --test callbacks --test embedded --test process --test properties \
           --test misuse --test bindgen --test ui
@@ -136,7 +136,7 @@ let
         FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust-rt
         FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust --test rt_gc --test layout
         # Every 8th: with threads, each collection waits for all of them.
-        FIL_RUST_GC_STRESS=8 cargo test --offline ${target} -p fil-rust --test rt_bare --test rt_libc --test sys --test jumps --test signals \
+        FIL_RUST_GC_STRESS=8 cargo test --offline ${target} -p fil-rust --test rt_bare --test rt_libc --test sys --test jumps --test signals --test maps \
           --test smoke --test calls --test memory --test threads --test callbacks --test properties \
           --test process --test startup
       '';

@@ -109,3 +109,28 @@ back with `zincrement_signal_deferral_depth` across the `signal()` call. Running
 the handlers before raising the depth, as `zsys_sigaction` in
 `crates/fil-rust-rt/src/signal.rs` does, covers what's already queued. For what arrives during the call, a null
 entry needs to mean the signal is dropped rather than a failed assertion.
+
+## 4. Some libc functions abort with "bad syscall" though their native exists
+
+`projects/usermusl/src/mman/mincore.c` still reads
+`return syscall(SYS_mincore, addr, len, vec);`, and the libc's `syscall` macro
+(`src/internal/syscall.h:32-47`) turns every use into a `zerrorf`. So a correct
+call to `mincore` kills the program:
+
+```
+filc user error: src/mman/mincore.c:7: int mincore(void *, size_t, unsigned char *): bad syscall: 27, addr, len, vec
+filc panic: user thwarted themselves.
+```
+
+Yet `zsys_mincore` is declared in `filc/include/pizlonated_syscalls.h` and
+implemented, and calling it directly works. The wrapper just wasn't switched
+over to it.
+
+Only `mincore` was run. These have the same shape: a `zsys_` native exists, the
+source calls `syscall(SYS_...)`, and the function's `__PRETTY_FUNCTION__` string,
+which only that error path uses, is in the 0.687 `libc.so`: `acct`, `arch_prctl`,
+`clock_settime`, `fexecve`, `ioperm`, `iopl`, `name_to_handle_at`,
+`open_by_handle_at`, `personality`, `pivot_root`, `quotactl`, `remap_file_pages`,
+`sched_rr_get_interval`, `setdomainname`, `sethostname`, `setns`, `sigaltstack`,
+`syncfs`, `unshare`, `vhangup`. Some may have an earlier return that avoids the
+error, so each needs checking.

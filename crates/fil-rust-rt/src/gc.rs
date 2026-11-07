@@ -25,7 +25,7 @@ use crate::abi::*;
 use crate::failure::internal_panic;
 use crate::heap::heap;
 use crate::thread::{self, extra};
-use crate::{globals, ptrs, shim, start};
+use crate::{globals, maps, ptrs, shim, start};
 
 /// When collections happen. A collection is the only thing that gives memory
 /// back, `free` included.
@@ -514,6 +514,30 @@ impl Marker {
     }
 }
 
+/// Objects that need something done when they go. Blocks have no record of the
+/// objects in them, so sweeping couldn't find these.
+static DESTRUCTIBLE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Has [`destruct`] see `object`. Entered threads are the only ones who call
+/// this, so the lock can't be held by a thread that's stopped.
+pub unsafe fn add_destructible(object: *mut Object) {
+    DESTRUCTIBLE.lock().unwrap_or_else(|e| e.into_inner()).push(object as usize);
+}
+
+/// Does what's needed for objects that this collection found unreachable,
+/// while their blocks are intact. The world is stopped, and everything is
+/// marked.
+unsafe fn destruct() {
+    DESTRUCTIBLE.lock().unwrap_or_else(|e| e.into_inner()).retain(|&object| {
+        let object = object as *mut Object;
+        if heap().is_marked(heap().block_of(object as usize).0) {
+            return true;
+        }
+        unsafe { maps::destruct(object) };
+        false
+    });
+}
+
 /// Fails if `object` can't be a live object in its block: a block that was
 /// swept, or a reference that was never one, would show up here. Sweeping
 /// scribbles over blocks under stress, which is what makes this catch much.
@@ -552,6 +576,7 @@ fn run(collector: &mut Collector) {
             marker.mark_thread(thread_at(entry));
         }
         marker.drain();
+        destruct();
     }
     let (reclaimed, live) = heap().sweep(stressed);
     heap().counters.allocated_since_collection.store(0, Ordering::Relaxed);

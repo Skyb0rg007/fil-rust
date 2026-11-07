@@ -8,6 +8,7 @@
 mod common;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::RefCell;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -35,11 +36,20 @@ fn library() -> &'static Library {
 /// Tests look at the state of the whole heap, so they take turns. Take this
 /// before `run`: waiting for it inside would hold up a collection. Loading the
 /// library here keeps that from happening in `library`, too.
-fn serial() -> MutexGuard<'static, ()> {
+/// Keeps other tests out for as long as this thread lasts. They measure the
+/// heap, which a test's thread is still part of until the runtime's thread-local
+/// teardown is over, and thread-locals go in reverse order, so this one goes
+/// after that as long as it's the first thing a test does.
+fn serial() {
     static SERIAL: Mutex<()> = Mutex::new(());
+    thread_local! {
+        static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    }
+    // With one test thread, that thread runs all the tests.
+    HELD.with(|held| held.borrow_mut().take());
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    HELD.with(|held| *held.borrow_mut() = Some(guard));
     library();
-    guard
 }
 
 type Collect = fn();
@@ -58,7 +68,7 @@ fn live_after_collecting() -> usize {
 
 #[test]
 fn what_compiled_frames_hold_survives() {
-    let _serial = serial();
+    serial();
     runtime().run(|fil| {
         let collect = collector(fil);
         for name in ["frame_slot", "escaping_local", "atomic_box", "closure_data", "thread_local", "thread_cookie", "aligned"] {
@@ -72,7 +82,7 @@ fn what_compiled_frames_hold_survives() {
 
 #[test]
 fn a_finished_thread_keeps_what_it_returned() {
-    let _serial = serial();
+    serial();
     runtime().run(|fil| {
         let collect = collector(fil);
         let result = library().function::<fn(Collect, i64, i32) -> i64>(fil, "thread_result").unwrap();
@@ -85,7 +95,7 @@ fn a_finished_thread_keeps_what_it_returned() {
 
 #[test]
 fn finished_threads_go_away() {
-    let _serial = serial();
+    serial();
     let rt = runtime();
     let churn = |count: i64| {
         rt.run(|fil| library().function::<fn(i64)>(fil, "churn_threads").unwrap().call(fil, (count,)).unwrap());
@@ -99,7 +109,7 @@ fn finished_threads_go_away() {
 
 #[test]
 fn arguments_survive_in_their_promoted_copies() {
-    let _serial = serial();
+    serial();
     runtime().run(|fil| {
         let collect = collector(fil);
         let by_value = library().function::<fn(Collect, i64) -> i64>(fil, "by_value").unwrap();
@@ -112,7 +122,7 @@ fn arguments_survive_in_their_promoted_copies() {
 /// Far longer than a recursive marker would get on any stack.
 #[test]
 fn long_chains_survive() {
-    let _serial = serial();
+    serial();
     if stressed() {
         return;
     }
@@ -126,7 +136,7 @@ fn long_chains_survive() {
 
 #[test]
 fn globals_hold_on_until_they_let_go() {
-    let _serial = serial();
+    serial();
     let rt = runtime();
     let call = |name: &str| rt.run(|fil| library().function::<fn()>(fil, name).unwrap().call(fil, ()).unwrap());
     let read = || rt.run(|fil| library().function::<fn() -> i64>(fil, "read_global").unwrap().call(fil, ()).unwrap());
@@ -141,7 +151,7 @@ fn globals_hold_on_until_they_let_go() {
 
 #[test]
 fn rust_keeps_what_it_tracks_and_roots() {
-    let _serial = serial();
+    serial();
     let rt = runtime();
     let handle: FilHandle<i64> = rt.run(|fil| {
         let tracked = fil.alloc::<i64>(&5).unwrap();
@@ -155,7 +165,7 @@ fn rust_keeps_what_it_tracks_and_roots() {
 
 #[test]
 fn memory_goes_away_when_nothing_refers_to_it() {
-    let _serial = serial();
+    serial();
     if stressed() {
         return;
     }
@@ -189,7 +199,7 @@ fn memory_goes_away_when_nothing_refers_to_it() {
 
 #[test]
 fn rust_references_end_with_their_scope() {
-    let _serial = serial();
+    serial();
     if stressed() {
         return;
     }
@@ -204,14 +214,15 @@ fn rust_references_end_with_their_scope() {
     });
     assert_eq!(live_after_collecting(), baseline);
     let handle: FilHandle<u8> = rt.run(|fil| fil.root(fil.alloc_bytes(1 << 22).unwrap()).unwrap());
-    assert!(live_after_collecting() >= baseline + (1 << 22));
+    let held = live_after_collecting();
+    assert!(held >= baseline + (1 << 22), "{held} live, from {baseline}");
     drop(handle);
     assert_eq!(live_after_collecting(), baseline);
 }
 
 #[test]
 fn nothing_is_reclaimed_until_rust_asks() {
-    let _serial = serial();
+    serial();
     if stressed() {
         return;
     }
@@ -239,7 +250,7 @@ fn nothing_is_reclaimed_until_rust_asks() {
 
 #[test]
 fn compiled_loops_stop_for_collections() {
-    let _serial = serial();
+    serial();
     if stressed() {
         return;
     }
@@ -288,7 +299,7 @@ fn compiled_loops_stop_for_collections() {
 
 #[test]
 fn exited_threads_are_collected_around() {
-    let _serial = serial();
+    serial();
     let rt = runtime();
     let exited = AtomicUsize::new(0);
     let release = AtomicBool::new(false);
@@ -315,7 +326,7 @@ fn exited_threads_are_collected_around() {
 
 #[test]
 fn references_to_freed_objects_are_let_go() {
-    let _serial = serial();
+    serial();
     let rt = runtime();
     rt.run(|fil| {
         let make = library().function::<fn(i64, usize) -> Ptr<u8>>(fil, "make_holder").unwrap();
@@ -347,7 +358,7 @@ fn references_to_freed_objects_are_let_go() {
 
 #[test]
 fn freed_objects_with_a_reference_on_the_stack_stay_tombstones() {
-    let _serial = serial();
+    serial();
     let rt = runtime();
     rt.run(|fil| {
         let block = fil.alloc::<i64>(&1).unwrap();

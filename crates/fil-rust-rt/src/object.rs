@@ -107,6 +107,13 @@ pub unsafe fn free(ptr: Ptr) {
     }
 }
 
+/// Frees a mapping, which only unmapping it can do.
+pub unsafe fn free_mapping(ptr: Ptr) {
+    let object = unsafe { &*ptr.object() };
+    object.upper.store(ptr.lower, Ordering::Relaxed);
+    object.aux.fetch_or(FLAG_FREE << AUX_FLAGS_SHIFT, Ordering::AcqRel);
+}
+
 /// The object `ptr` frees, if it's allowed to.
 unsafe fn object_for_deallocate<'a>(ptr: Ptr) -> &'a Object {
     if ptr.lower.is_null() {

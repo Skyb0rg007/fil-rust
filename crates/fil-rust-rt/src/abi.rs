@@ -82,6 +82,14 @@ impl Ptr {
         Ptr { ptr, lower: self.lower }
     }
 
+    /// Bytes from `ptr` to the end of its object.
+    pub fn available(self) -> usize {
+        if self.lower.is_null() {
+            return 0;
+        }
+        (unsafe { &*self.object() }.upper() as usize).saturating_sub(self.ptr as usize)
+    }
+
     /// How far `ptr` is past `lower`. Wraps for a pointer below its object.
     pub fn offset(self) -> usize {
         (self.ptr as usize).wrapping_sub(self.lower as usize)

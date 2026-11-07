@@ -24,6 +24,7 @@ pub mod heap;
 pub mod eh;
 mod helpers;
 mod jump;
+mod maps;
 mod memops;
 mod natives;
 pub mod signal;
@@ -102,6 +103,7 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
         implemented.extend(jump::table());
         implemented.extend(eh::table());
         implemented.extend(signal::table());
+        implemented.extend(maps::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;
