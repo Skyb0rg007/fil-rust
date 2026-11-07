@@ -1,0 +1,17 @@
+[package]
+name = "fil-rust-rt"
+version.workspace = true
+edition.workspace = true
+description = "A Fil-C runtime in Rust: object model, heap and collector for hosting Fil-C libraries"
+
+[features]
+default = ["musl"]
+musl = ["fil-rust-sys/musl"]
+glibc = ["fil-rust-sys/glibc"]
+
+[dependencies]
+fil-rust-sys = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+fil-rust-build = { workspace = true }

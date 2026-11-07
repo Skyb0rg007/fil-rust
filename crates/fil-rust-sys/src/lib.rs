@@ -236,6 +236,26 @@ impl Flavor {
         }
     }
 
+    /// The generated `libpizlo.so` that stands in for the real runtime when
+    /// the Rust runtime runs this flavor: a table of jump slots, filled in by
+    /// `fil-rust-rt`, under every symbol compiled code can bind to.
+    pub fn runtime_stub(self) -> Option<SupportLib> {
+        match self {
+            #[cfg(feature = "musl")]
+            Flavor::Musl => Some(SupportLib {
+                soname: "libpizlo.so",
+                bytes: include_bytes!(concat!(env!("OUT_DIR"), "/stub_musl.so")),
+            }),
+            #[cfg(feature = "glibc")]
+            Flavor::Glibc => Some(SupportLib {
+                soname: "libpizlo.so",
+                bytes: include_bytes!(concat!(env!("OUT_DIR"), "/stub_glibc.so")),
+            }),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
     /// Imports of libpizlo to redirect from the host libc to a function of
     /// a compat library: `(imported symbol, replacement)`, the replacement
     /// living in the compat library at [`Flavor::stand_in_index`]. These are

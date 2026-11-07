@@ -217,6 +217,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fil-rust-rt"
+version = "0.1.0"
+dependencies = [
+ "fil-rust-build",
+ "fil-rust-sys",
+ "libc",
+]
+
+[[package]]
 name = "fil-rust-sys"
 version = "0.1.0"
 dependencies = [
