@@ -1,0 +1,131 @@
+# 2026-11-08 Intel(R) Core(TM) Ultra 7 255H, Linux 7.4.0-rc1, governor powersave, gcc (GCC) 16.2.0
+
+== Fil-C stores: ns per store (median of 9) ==
+(+rseq stores the descriptor every time; +rseq cmp compares first and stores only if it differs)
+workload                 size     unchecked     Fil-C     +rseq +rseq cmp      cost  cmp cost
+sequential u8 stores     4 KiB        0.108     0.891     0.898     1.037     +0.8%    +16.4%
+sequential u8 stores     256 KiB      0.258     0.876     0.989     1.026    +13.0%    +17.2%
+sequential u8 stores     16 MiB       0.261     0.877     1.043     1.027    +18.9%    +17.1%
+sequential u32 stores    4 KiB        0.242     0.938     0.998     1.083     +6.4%    +15.4%
+sequential u32 stores    256 KiB      0.370     0.890     1.040     1.054    +16.7%    +18.4%
+sequential u32 stores    16 MiB       0.278     0.894     1.107     1.059    +23.7%    +18.4%
+random u32 stores        4 KiB        1.921     2.039     2.040     2.064     +0.1%     +1.2%
+random u32 stores        256 KiB      1.771     1.981     2.635     1.988    +33.0%     +0.3%
+random u32 stores        16 MiB       3.930     3.946     6.200     3.946    +57.1%     +0.0%
+u32 load then store      4 KiB        0.299     1.339     1.336     1.481     -0.2%    +10.6%
+u32 load then store      256 KiB      0.319     1.340     1.217     1.427     -9.1%     +6.5%
+u32 load then store      16 MiB       0.491     1.425     1.357     1.509     -4.7%     +5.9%
+(restarts during the rseq runs: 70)
+
+== native kernels, x86-64 (baseline, as Rust builds by default): ns per element, others as a multiple of restrict ==
+kernel           size      restrict    plain   atomic   asmvec
+add u32          4 KiB       0.1512    0.98x    3.11x    1.00x
+add u32          256 KiB     0.2439    1.00x    2.70x    1.00x
+add u32          16 MiB      0.5983    1.00x    1.57x    1.23x
+sum u32          4 KiB       0.1237    1.01x    3.52x    1.25x
+sum u32          256 KiB     0.1214    1.00x    3.61x    1.21x
+sum u32          16 MiB      0.2270    0.97x    2.23x    1.05x
+find byte        4 KiB       0.3041    1.00x    1.00x    0.11x
+find byte        256 KiB     0.3001    1.00x    1.00x    0.10x
+find byte        16 MiB      0.3243    1.02x    0.99x    0.18x
+copy bytes       4 KiB       0.0209    1.00x    2.00x    1.12x
+copy bytes       256 KiB     0.0314    1.02x    1.86x    1.00x
+copy bytes       16 MiB      0.1146    1.04x    1.51x    1.03x
+accumulate u32   4 KiB       0.4470    1.00x    0.99x        -
+accumulate u32   256 KiB     0.4438    1.00x    0.98x        -
+accumulate u32   16 MiB      0.4913    1.00x    1.04x        -
+histogram bytes  4 KiB       0.4309    1.00x    1.00x        -
+histogram bytes  256 KiB     0.4257    1.00x    1.00x        -
+histogram bytes  16 MiB      0.4447    1.01x    1.01x        -
+
+== native kernels, x86-64-v3 (AVX2): ns per element, others as a multiple of restrict ==
+kernel           size      restrict    plain   atomic   asmvec
+add u32          4 KiB       0.0839    0.94x    5.68x    1.85x
+add u32          256 KiB     0.1506    0.99x    4.37x    1.63x
+add u32          16 MiB      0.6070    1.24x    1.57x    1.23x
+sum u32          4 KiB       0.0840    1.03x    5.15x    1.83x
+sum u32          256 KiB     0.0836    1.00x    5.22x    1.59x
+sum u32          16 MiB      0.1932    0.99x    2.60x    1.16x
+find byte        4 KiB       0.0181    1.00x   16.77x    1.90x
+find byte        256 KiB     0.0178    1.00x   16.88x    1.73x
+find byte        16 MiB      0.0477    0.99x    6.68x    1.19x
+copy bytes       4 KiB       0.0126    1.02x    3.31x    1.85x
+copy bytes       256 KiB     0.0329    0.99x    1.75x    0.95x
+copy bytes       16 MiB      0.1013    1.02x    1.70x    1.16x
+accumulate u32   4 KiB       0.4471    1.00x    0.99x        -
+accumulate u32   256 KiB     0.4440    1.00x    0.99x        -
+accumulate u32   16 MiB      0.4953    1.00x    1.05x        -
+histogram bytes  4 KiB       0.4571    1.00x    0.97x        -
+histogram bytes  256 KiB     0.4295    1.00x    1.00x        -
+histogram bytes  16 MiB      0.2482    0.99x    0.92x        -
+
+== pinning ==
+pin and unpin, uncontended: 14.54 ns per pair
+
+== membarrier(PRIVATE_EXPEDITED_RSEQ): microseconds per call ==
+other threads                        median      p99      max
+none                                   0.14     0.16     3.96
+1 running store loops                  1.47     1.60     5.21   1767 restarts in 21M stores
+2 running store loops                  1.91     2.22     4.58   3404 restarts in 48M stores
+5 running store loops                  2.37     3.00     8.45   8624 restarts in 121M stores
+13 running store loops                 3.41     3.88    12.81   25656 restarts in 282M stores
+13 asleep                              0.29     0.36     2.33
+(CPUs 1-5 are performance cores, 6-13 efficiency cores; this thread is on CPU 0)
+
+== verify: does a store ever land during a borrow? ==
+store full       widen 0         0 of 20000 borrows saw a store (0 words); writers: 9.5M stores, 97 restarts, 80000 waits
+store nobarrier  widen 0     20000 of 20000 borrows saw a store (3606632 words); writers: 9.3M stores, 3 restarts, 79982 waits
+store nopin      widen 0     20000 of 20000 borrows saw a store (4587682 words); writers: 11.6M stores, 8 restarts, 0 waits
+store full       widen 200       0 of 20000 borrows saw a store (0 words); writers: 0.0M stores, 79351 restarts, 79985 waits
+store nobarrier  widen 200    4442 of 20000 borrows saw a store (14388 words); writers: 0.1M stores, 4 restarts, 29418 waits
+store nopin      widen 200   17180 of 20000 borrows saw a store (41372 words); writers: 0.1M stores, 6 restarts, 0 waits
+cmp   full       widen 0         0 of 20000 borrows saw a store (0 words); writers: 18.1M stores, 279 restarts, 79997 waits
+cmp   nobarrier  widen 0     19999 of 20000 borrows saw a store (5558727 words); writers: 18.0M stores, 7 restarts, 79985 waits
+cmp   nopin      widen 0     19999 of 20000 borrows saw a store (9785333 words); writers: 29.1M stores, 11 restarts, 0 waits
+cmp   full       widen 200       0 of 20000 borrows saw a store (0 words); writers: 0.0M stores, 79973 restarts, 79995 waits
+cmp   nobarrier  widen 200    4278 of 20000 borrows saw a store (14627 words); writers: 0.1M stores, 5 restarts, 34841 waits
+cmp   nopin      widen 200   17488 of 20000 borrows saw a store (41525 words); writers: 0.1M stores, 4 restarts, 0 waits
+
+### kernels built with clang version 21.1.8
+
+== native kernels, x86-64 (baseline, as Rust builds by default): ns per element, others as a multiple of restrict ==
+kernel           size      restrict    plain   atomic   asmvec
+add u32          4 KiB       0.0947    0.98x    3.22x    1.95x
+add u32          256 KiB     0.2166    1.00x    2.26x    1.00x
+add u32          16 MiB      0.6009    1.01x    1.42x    1.26x
+sum u32          4 KiB       0.1359    0.99x    1.63x    1.55x
+sum u32          256 KiB     0.1741    1.00x    1.26x    1.26x
+sum u32          16 MiB      0.3236    1.03x    1.11x    1.10x
+find byte        4 KiB       0.3053    1.02x    0.98x    0.12x
+find byte        256 KiB     0.3058    1.00x    0.97x    0.10x
+find byte        16 MiB      0.3440    1.04x    0.97x    0.23x
+copy bytes       4 KiB       0.0161    0.97x    1.88x    2.30x
+copy bytes       256 KiB     0.0322    1.00x    1.49x    1.04x
+copy bytes       16 MiB      0.1149    1.00x    1.19x    1.10x
+accumulate u32   4 KiB       0.1258    0.98x    2.63x        -
+accumulate u32   256 KiB     0.1209    1.01x    2.71x        -
+accumulate u32   16 MiB      0.3026    1.00x    1.49x        -
+histogram bytes  4 KiB       0.4181    1.00x    1.00x        -
+histogram bytes  256 KiB     0.4204    1.00x    1.01x        -
+histogram bytes  16 MiB      0.4280    1.00x    1.00x        -
+
+== native kernels, x86-64-v3 (AVX2): ns per element, others as a multiple of restrict ==
+kernel           size      restrict    plain   atomic   asmvec
+add u32          4 KiB       0.0447    0.98x    6.87x    4.12x
+add u32          256 KiB     0.1658    1.00x    2.85x    1.30x
+add u32          16 MiB      0.6075    1.09x    1.38x    1.24x
+sum u32          4 KiB       0.0681    1.00x    3.22x    3.05x
+sum u32          256 KiB     0.0975    1.01x    2.25x    2.24x
+sum u32          16 MiB      0.2561    1.00x    1.42x    1.40x
+find byte        4 KiB       0.3030    1.00x    0.98x    0.12x
+find byte        256 KiB     0.3002    1.00x    0.97x    0.10x
+find byte        16 MiB      0.3529    1.00x    0.96x    0.21x
+copy bytes       4 KiB       0.0069    1.00x    4.26x    5.33x
+copy bytes       256 KiB     0.0382    1.00x    1.19x    0.88x
+copy bytes       16 MiB      0.1012    1.01x    1.34x    1.25x
+accumulate u32   4 KiB       0.1078    0.97x    2.15x        -
+accumulate u32   256 KiB     0.1006    1.00x    2.29x        -
+accumulate u32   16 MiB      0.2595    0.98x    1.46x        -
+histogram bytes  4 KiB       0.4107    1.00x    1.00x        -
+histogram bytes  256 KiB     0.4184    1.00x    1.02x        -
+histogram bytes  16 MiB      0.4275    1.00x    1.00x        -
