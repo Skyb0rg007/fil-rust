@@ -283,15 +283,16 @@ calls fail by name on both backends, since upstream's musl flavor panics on them
 `getcpu`, `pkey_*`, `process_madvise`, `process_mrelease`, `epoll_pwait2` and `dlvsym`. They come
 with M6.
 
-Known race, not fixed yet: a signal that lands on a thread that isn't Fil-C's is forwarded to the
-libc main thread with `tgkill`. If that thread has signals blocked by the runtime at that moment, the
-signal waits there, and if the program has reset the disposition to `SIG_DFL` by the time it's
-unblocked, the process dies. A real process can't see this, since a signal generated before
-`setitimer` stops a timer arrives before the call returns. Under `FIL_RUST_GC_STRESS=8` it kills the
-`signals` suite about one run in five. The fix is to record forwarded signals when they're generated
-and only wake the target, so the handler runs from the deferred queue, which already drops a signal
-whose disposition changed; waking a thread in `pause` or `sigsuspend` needs a signal the runtime
-owns.
+A signal that lands on a thread that isn't Fil-C's is written down there, and the libc main thread
+is woken with signal 34 to run the handler at its next safepoint. Sending the signal itself on, as
+before, left it waiting whenever the main thread had it blocked for a moment (in a handler for it,
+or during a collection), and a program that reset it to `SIG_DFL` in that time was killed by it.
+Under `FIL_RUST_GC_STRESS=8` that killed the `signals` suite in 5 runs of 20; now it's 0 of 20.
+Signal 34 is musl's `SIGSYNCCALL`, which Fil-C programs already can't touch, but it's the host
+glibc's `SIGRTMIN`: Rust code in a process using the Rust backend mustn't use it. A signal the
+program blocks on the main thread is still sent on as it is, for `sigwait`. Not covered by tests,
+since jobs don't run on the main thread: that path, delivery when the program unblocks, and
+`sigsuspend` and `pause` going back to waiting when woken for a signal they block.
 
 The roots for the errno and dlerror handlers and for argv, environ and auxv are what upstream has,
 but disabling them changes nothing a test can see: the handlers are global function objects, and

@@ -13,11 +13,21 @@
 //! Fil-C. The main Fil-C thread takes it instead, as it can always run a
 //! handler. Faults aren't in this: Fil-C doesn't let programs handle them, so
 //! Rust's stack overflow handler stays in place.
+//!
+//! Sending the signal itself on to the main thread would leave it waiting there
+//! whenever that thread has it blocked for a moment, as in a handler for it or
+//! a collection, and by the time it got through the program could have reset it
+//! to `SIG_DFL` and been killed. So a forwarded signal is written down where it
+//! landed, and the main thread is only woken, with [`WAKE`], to run its handler
+//! from there. Unless the program has the signal blocked on the main thread:
+//! then it's sent on as it is, to wait as a blocked signal should, for
+//! `sigwait` or for the program to unblock it.
 
+use std::cell::UnsafeCell;
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::abi::*;
 use crate::failure::internal_panic;
@@ -44,6 +54,47 @@ static TABLE: [AtomicPtr<Handler>; MAX_SIGNAL as usize + 1] = [const { AtomicPtr
 
 /// Where signals go that land on threads without a `Thread`.
 static MAIN_TID: AtomicI32 = AtomicI32::new(0);
+static MAIN_THREAD: AtomicPtr<Thread> = AtomicPtr::new(null_mut());
+
+/// The main thread's signal mask, as the program last set it: bit `n - 1` for
+/// signal `n`.
+static MAIN_MASK: AtomicU64 = AtomicU64::new(0);
+
+/// Wakes the main thread for a signal that was forwarded. It's musl's
+/// `SIGSYNCCALL`, which programs can't send, handle or block. The host's glibc
+/// doesn't use it, but it's what glibc gives as `SIGRTMIN`, so Rust code in the
+/// same process mustn't use that.
+pub const WAKE: c_int = 34;
+
+/// Whether [`WAKE`] restarts system calls, which follows the handler of the
+/// signal it was last sent for. 2 until it's been set.
+static WAKE_RESTARTS: AtomicU32 = AtomicU32::new(2);
+
+/// Signals written down for the main thread: how many, and the last one's
+/// `siginfo`, which whoever holds `busy` can touch.
+struct Forwarded {
+    count: AtomicUsize,
+    busy: AtomicBool,
+    has_info: AtomicBool,
+    info: UnsafeCell<MaybeUninit<libc::siginfo_t>>,
+}
+
+unsafe impl Sync for Forwarded {}
+
+static FORWARDED: [Forwarded; MAX_SIGNAL as usize + 1] = [const {
+    Forwarded {
+        count: AtomicUsize::new(0),
+        busy: AtomicBool::new(false),
+        has_info: AtomicBool::new(false),
+        info: UnsafeCell::new(MaybeUninit::uninit()),
+    }
+}; MAX_SIGNAL as usize + 1];
+
+static ANY_FORWARDED: AtomicUsize = AtomicUsize::new(0);
+
+fn mask_bits(set: &libc::sigset_t) -> u64 {
+    (1..=MAX_SIGNAL).filter(|&signal| unsafe { libc::sigismember(set, signal) } == 1).fold(0, |bits, signal| bits | 1 << (signal - 1))
+}
 
 /// Whether a wait can see `EINTR`, which the libc wants to know: a handler has
 /// to have asked for that.
@@ -89,6 +140,7 @@ pub struct Queue {
     first: *mut Chunk,
     last: *mut Chunk,
     held_back: bool,
+    delivered: u64,
 }
 
 impl Default for Queue {
@@ -99,12 +151,69 @@ impl Default for Queue {
             first: null_mut(),
             last: null_mut(),
             held_back: false,
+            delivered: 0,
         }
     }
 }
 
-pub fn set_main_tid() {
+/// Makes the calling thread, which is `thread`, the one signals go to when they
+/// land on threads without a `Thread`. Anything forwarded so far is forgotten:
+/// this is a new process, or one that just forked.
+pub fn set_main(thread: *mut Thread) {
+    unsafe {
+        let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+        libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), mask.as_mut_ptr());
+        MAIN_MASK.store(mask_bits(mask.assume_init_ref()), Ordering::Release);
+    }
+    for slot in &FORWARDED {
+        slot.count.store(0, Ordering::Relaxed);
+    }
+    ANY_FORWARDED.store(0, Ordering::Release);
+    MAIN_THREAD.store(thread, Ordering::Release);
     MAIN_TID.store(unsafe { libc::gettid() }, Ordering::Release);
+    set_wake_restarts(true);
+}
+
+/// Has [`WAKE`] restart system calls it interrupts, or not. Async-signal-safe.
+fn set_wake_restarts(restarts: bool) {
+    if WAKE_RESTARTS.swap(restarts as u32, Ordering::AcqRel) == restarts as u32 {
+        return;
+    }
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_signal as *const () as usize;
+        action.sa_flags = libc::SA_SIGINFO | if restarts { libc::SA_RESTART } else { 0 };
+        libc::sigaction(WAKE, &action, null_mut());
+    }
+}
+
+/// The program changed the main thread's mask, if that's `thread`.
+pub unsafe fn note_mask(thread: *mut Thread) {
+    if MAIN_THREAD.load(Ordering::Acquire) != thread {
+        return;
+    }
+    unsafe {
+        let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+        libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), mask.as_mut_ptr());
+        MAIN_MASK.store(mask_bits(mask.assume_init_ref()), Ordering::Release);
+    }
+}
+
+/// Handlers this thread has run, so that a wait can tell being woken for one
+/// from being woken for nothing.
+pub unsafe fn delivered(thread: *mut Thread) -> u64 {
+    unsafe { extra(thread).signals.delivered }
+}
+
+/// Sends what was written down this thread's way: those it doesn't block run
+/// at its next safepoint, which may be now.
+pub unsafe fn deliver_unblocked_soon(thread: *mut Thread) {
+    if ANY_FORWARDED.load(Ordering::Acquire) != 0 {
+        unsafe {
+            (*thread).state.fetch_or(STATE_DEFERRED_SIGNAL, Ordering::AcqRel);
+            thread::poll(thread);
+        }
+    }
 }
 
 /// Handlers are reachable through this table, whoever installed them.
@@ -168,6 +277,7 @@ unsafe fn deliver(thread: *mut Thread, info: *const libc::siginfo_t) {
         if handler.is_null() {
             return;
         }
+        extra(thread).signals.delivered += 1;
         let native = NativeFrame::push(thread);
         // Nothing can unwind out of a handler, into what it interrupted.
         let mut frame = Frame { parent: (*thread).top_frame, origin: thread::base_origin(), lowers: [] };
@@ -223,6 +333,48 @@ unsafe fn consume(thread: *mut Thread) {
             libc::munmap(chunk.cast(), size_of::<Chunk>());
             chunk = next;
         }
+        deliver_forwarded(thread);
+    }
+}
+
+/// Runs handlers for what was forwarded, of the signals this thread doesn't
+/// block now. A signal that isn't real-time runs once however many came, as
+/// the kernel would have merged them.
+unsafe fn deliver_forwarded(thread: *mut Thread) {
+    if ANY_FORWARDED.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    unsafe {
+        let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+        libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), mask.as_mut_ptr());
+        let mask = mask.assume_init();
+        for signal in 1..=MAX_SIGNAL {
+            let slot = &FORWARDED[signal as usize];
+            if slot.count.load(Ordering::Acquire) == 0 || libc::sigismember(&mask, signal) == 1 {
+                continue;
+            }
+            let count = slot.count.swap(0, Ordering::AcqRel);
+            if count == 0 {
+                continue;
+            }
+            ANY_FORWARDED.fetch_sub(count, Ordering::AcqRel);
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            {
+                let _blocked = Blocked::all();
+                while slot.busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                    std::hint::spin_loop();
+                }
+                if slot.has_info.load(Ordering::Relaxed) {
+                    info = (*slot.info.get()).assume_init_read();
+                }
+                slot.busy.store(false, Ordering::Release);
+            }
+            info.si_signo = signal;
+            let times = if signal < 32 { 1 } else { count };
+            for _ in 0..times {
+                deliver_masked(thread, &info);
+            }
+        }
     }
 }
 
@@ -266,13 +418,35 @@ pub unsafe fn allow_deferred(thread: *mut Thread) {
 }
 
 /// Hands a signal on to the main thread, as one that isn't Fil-C's can't run
-/// its handler. The kernel only lets a thread queue a siginfo that claims to
-/// be from user space to another, so others go without theirs, as `tgkill`.
+/// its handler: see the top of this file.
 unsafe fn forward(signal: c_int, info: *mut libc::siginfo_t) {
     let target = MAIN_TID.load(Ordering::Acquire);
     if target == 0 {
         return;
     }
+    if MAIN_MASK.load(Ordering::Acquire) & (1 << (signal - 1)) != 0 {
+        unsafe { send_on(target, signal, info) };
+        return;
+    }
+    let slot = &FORWARDED[signal as usize];
+    if !info.is_null() && slot.busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        unsafe { (*slot.info.get()).write(*info) };
+        slot.has_info.store(true, Ordering::Relaxed);
+        slot.busy.store(false, Ordering::Release);
+    }
+    slot.count.fetch_add(1, Ordering::AcqRel);
+    ANY_FORWARDED.fetch_add(1, Ordering::AcqRel);
+    let handler = TABLE[signal as usize].load(Ordering::Acquire);
+    if !handler.is_null() {
+        set_wake_restarts(unsafe { (*handler).flags } & libc::SA_RESTART != 0);
+    }
+    unsafe { libc::syscall(libc::SYS_tgkill, libc::getpid(), target, WAKE) };
+}
+
+/// Sends the signal itself to `target`. The kernel only lets a thread queue a
+/// siginfo that claims to be from user space to another, so others go without
+/// theirs, as `tgkill`.
+unsafe fn send_on(target: c_int, signal: c_int, info: *mut libc::siginfo_t) {
     unsafe {
         let pid = libc::getpid();
         if info.is_null()
@@ -288,7 +462,11 @@ unsafe extern "C" fn on_signal(signal: c_int, info: *mut libc::siginfo_t, _: *mu
     unsafe {
         let error = *libc::__errno_location();
         let thread = thread::current();
-        if thread.is_null() {
+        if signal == WAKE {
+            if !thread.is_null() {
+                wake(thread);
+            }
+        } else if thread.is_null() {
             forward(signal, info);
         } else {
             let marker = 0u8;
@@ -316,6 +494,26 @@ unsafe extern "C" fn on_signal(signal: c_int, info: *mut libc::siginfo_t, _: *mu
             }
         }
         *libc::__errno_location() = error;
+    }
+}
+
+/// [`WAKE`] came: what was forwarded runs here, as if it had been sent to this
+/// thread, which is the main one.
+unsafe fn wake(thread: *mut Thread) {
+    unsafe {
+        let state = (*thread).state.load(Ordering::Acquire);
+        if (*thread).signal_deferral_depth != 0 {
+            extra(thread).signals.held_back = true;
+        } else if state & STATE_ENTERED != 0 {
+            (*thread).state.fetch_or(STATE_DEFERRED_SIGNAL, Ordering::AcqRel);
+        } else {
+            if state & STATE_STOP_REQUESTED != 0 {
+                crate::gc::note_stopped();
+            }
+            thread::enter(thread);
+            deliver_forwarded(thread);
+            thread::exit(thread);
+        }
     }
 }
 
@@ -421,7 +619,15 @@ natives! {
     fn zsys_sigsuspend(thread: *mut Thread, mask: Ptr) -> c_int {
         unsafe {
             let mask = user_sigset(mask);
-            sys(thread, || libc::sigsuspend(&mask))
+            // Being woken for a forwarded signal this mask blocks isn't the
+            // end of the wait.
+            loop {
+                let before = delivered(thread);
+                let result = sys(thread, || libc::sigsuspend(&mask));
+                if result != -1 || delivered(thread) != before || ANY_FORWARDED.load(Ordering::Acquire) == 0 {
+                    return result;
+                }
+            }
         }
     }
 

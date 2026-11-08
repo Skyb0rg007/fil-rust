@@ -152,7 +152,7 @@ unsafe fn auxiliary_vector(thread: *mut Thread) -> Ptr {
 /// Doesn't return: the thread becomes `main`.
 pub unsafe fn start_program(arguments: &[&[u8]], libc_start_main: GetterFn, main: GetterFn) -> ! {
     let thread = thread::attach_current();
-    crate::signal::set_main_tid();
+    crate::signal::set_main(thread);
     unsafe {
         thread::enter(thread);
         let UserEnvironment { argv, environ, auxv, .. } = {

@@ -446,7 +446,7 @@ pub unsafe fn fork(thread: *mut Thread) -> (libc::pid_t, i32) {
         world.waiting = 0;
         turns.next = turns.serving + 1;
         unsafe { (*thread).tid = libc::gettid() as u32 };
-        crate::signal::set_main_tid();
+        crate::signal::set_main(thread);
     }
     drop(turns);
     drop(world);

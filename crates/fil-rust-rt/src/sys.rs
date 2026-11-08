@@ -340,7 +340,16 @@ natives! {
     fn zsys_sched_getscheduler(thread: *mut Thread, pid: c_int) -> c_int { unsafe { sys(thread, || libc::sched_getscheduler(pid)) } }
     fn zsys_sched_get_priority_min(thread: *mut Thread, policy: c_int) -> c_int { unsafe { sys(thread, || libc::sched_get_priority_min(policy)) } }
     fn zsys_sched_get_priority_max(thread: *mut Thread, policy: c_int) -> c_int { unsafe { sys(thread, || libc::sched_get_priority_max(policy)) } }
-    fn zsys_pause(thread: *mut Thread) -> c_int { unsafe { sys(thread, || libc::pause()) } }
+    fn zsys_pause(thread: *mut Thread) -> c_int {
+        // Only a handler ends it, not being woken for one that's blocked.
+        loop {
+            let before = unsafe { crate::signal::delivered(thread) };
+            let result = unsafe { sys(thread, || libc::pause()) };
+            if unsafe { crate::signal::delivered(thread) } != before {
+                return result;
+            }
+        }
+    }
     fn zsys_isatty(thread: *mut Thread, fd: c_int) -> c_int { unsafe { sys(thread, || libc::isatty(fd)) } }
     fn zsys_tee(thread: *mut Thread, input: c_int, output: c_int, size: usize, flags: c_uint) -> i64 { unsafe { sys(thread, || libc::tee(input, output, size, flags)) as i64 } }
     fn zsys_eventfd(thread: *mut Thread, value: c_uint, flags: c_int) -> c_int { unsafe { sys(thread, || libc::eventfd(value, flags)) } }
@@ -534,6 +543,10 @@ natives! {
         }
         if !old.ptr.is_null() {
             unsafe { one_out::<libc::sigset_t>(old).write(previous) };
+        }
+        unsafe {
+            crate::signal::note_mask(thread);
+            crate::signal::deliver_unblocked_soon(thread);
         }
         0
     }
