@@ -26,3 +26,8 @@ proc-macro2 = "1.0.107"
 quote = "1.0.47"
 syn = "3.0.9"
 trybuild = "1.0.122"
+
+# The collector runs constantly under the stress modes, and unoptimized it
+# makes those suites take many times as long. Debug assertions stay on.
+[profile.dev.package.fil-rust-rt]
+opt-level = 2

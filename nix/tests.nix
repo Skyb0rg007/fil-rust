@@ -133,12 +133,21 @@ let
     rust-rt-gc-stress = {
       description = "The same with the Rust collector running constantly and scribbling over swept memory";
       run = ''
+        export FIL_RUST_RUNTIME=rust
         FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust-rt
         FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust --test rt_gc --test layout
         # Every 8th: with threads, each collection waits for all of them.
         FIL_RUST_GC_STRESS=8 cargo test --offline ${target} -p fil-rust --test rt_bare --test rt_libc --test sys --test jumps --test signals --test maps --test sockets --test system --test tables --test stdfil --test cpu \
           --test smoke --test calls --test memory --test threads --test callbacks --test properties \
           --test process --test startup
+        # After every allocation, as gc-stress has libpizlo do, for what loops
+        # through big buffers: collecting every 8th safepoint, cxx and edges
+        # didn't finish in 400 seconds each. `stress` is left out: with six
+        # threads allocating, every allocation stops them all, and one of its
+        # tests alone takes about seven minutes.
+        FIL_RUST_GC_STRESS_ALLOCATIONS=1 PROPTEST_CASES=1000 cargo test --offline ${target} -p fil-rust \
+          --test memory --test threads --test callbacks --test cxx --test edges --test lifecycle \
+          --test misuse --test properties
       '';
     };
 

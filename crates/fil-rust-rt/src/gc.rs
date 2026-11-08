@@ -18,7 +18,7 @@
 //! could never go away.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 use crate::abi::*;
@@ -117,10 +117,19 @@ static COMPLETED: AtomicU64 = AtomicU64::new(0);
 static STRESS: AtomicUsize = AtomicUsize::new(0);
 static STRESS_POLLS: AtomicUsize = AtomicUsize::new(0);
 
+/// `FIL_RUST_GC_STRESS_ALLOCATIONS=1`: collect at the first safepoint after
+/// any allocation, whatever the policy, as libpizlo's `FUGC_MIN_THRESHOLD=0`
+/// does. Unlike [`STRESS`], a loop that doesn't allocate runs at full speed.
+static STRESS_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+
 /// Reads the settings from the environment.
 pub fn configure_from_env() {
     if let Some(every) = std::env::var("FIL_RUST_GC_STRESS").ok().and_then(|value| value.parse().ok()) {
         STRESS.store(every, Ordering::Release);
+    }
+    if std::env::var("FIL_RUST_GC_STRESS_ALLOCATIONS").as_deref() == Ok("1") {
+        STRESS_ALLOCATIONS.store(true, Ordering::Release);
+        THRESHOLD.store(1, Ordering::Release);
     }
 }
 
@@ -172,6 +181,9 @@ impl Drop for Turn {
 }
 
 fn threshold_for(policy: Collection, live: usize) -> usize {
+    if STRESS_ALLOCATIONS.load(Ordering::Relaxed) {
+        return 1;
+    }
     match policy {
         Collection::Never | Collection::Manual => usize::MAX,
         Collection::Threshold { min_bytes, growth_percent } => {
@@ -291,7 +303,7 @@ pub fn requested() -> u64 {
 /// Whether sweeping scribbles over what it frees, and marking checks what it
 /// finds, which stress mode does.
 pub fn is_checking() -> bool {
-    is_stressed()
+    is_stressed() || STRESS_ALLOCATIONS.load(Ordering::Relaxed)
 }
 
 /// Runs `body` with every thread stopped, the way a collection does, so their
@@ -899,7 +911,7 @@ fn run() {
             heap().flush_slot(slot);
         }
     }
-    let stressed = is_stressed();
+    let stressed = is_checking();
     let mut marker = Marker {
         stack: Vec::new(),
         tombstoned: 0,

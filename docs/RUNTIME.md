@@ -353,6 +353,15 @@ That leaves no musl native missing but those that fail by name on purpose (above
 glibc's libm, which can't do its x87 work in Fil-C code; the musl libc doesn't import them, and they
 take `long double`, which needs its own handling here. Both come with M6.
 
+The gc-stress equivalent is `rust-rt-gc-stress`. Besides collecting at every nth safepoint
+(`FIL_RUST_GC_STRESS=n`), it collects at the first safepoint after any allocation
+(`FIL_RUST_GC_STRESS_ALLOCATIONS=1`), as libpizlo's `FUGC_MIN_THRESHOLD=0` does, for the suites
+gc-stress runs: loops through big buffers make the first mode far too slow for `cxx` and `edges`.
+`stress` stays out of both. Its threads all allocate, and each allocation stops every one of them,
+where FUGC's mutators never wait: one of its tests takes about seven minutes alone. The suite
+also hadn't been setting `FIL_RUST_RUNTIME=rust`, so its backend-neutral tests ran on libpizlo. The
+runtime crate builds with `opt-level = 2` in the dev profile, which halves the stress runs.
+
 **M6. glibc flavor and aarch64**
 - The larger `zsys_*` set, per-flavor struct layouts for Rust natives (musl layouts on a glibc
   host), support library compiled from `filc/src` with the glibc compiler (widen
