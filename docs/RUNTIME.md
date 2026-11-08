@@ -341,6 +341,17 @@ Done so far: `jump.rs` has `setjmp`, `eh.rs` exceptions and `signal.rs` signals,
 - `zstack_scan`, in `eh.rs`, starts at the caller's frame, as natives push none, and describes an
   inlined call as a frame of its own. Tested from C in `tests/stdfil.rs` and, for a frame that
   catches, from C++ in `tests/cxx.rs`.
+- `cpu.rs` has `cpuid`, `xgetbv`, `__cpu_model` and `__cpu_features2`. The last two come from
+  compiler-rt's own detection at `llvmorg-20.1.8` (Fil-C's clang), vendored in
+  `fil-rust-sys/csrc/compiler-rt` and built into a static library under renamed symbols, as it's
+  the code libpizlo links and the tables are too easy to get wrong by hand. They're filled in on
+  first use, so code needn't call `__builtin_cpu_init`, and `__cpu_features2` has all three
+  words. libpizlo gets both wrong: issue 7, and why two `tests/cpu.rs` tests skip it.
+
+That leaves no musl native missing but those that fail by name on purpose (above), fibers and
+`zmath_*`. Fibers exist only where upstream builds them, the glibc flavor. `zmath_*` are there for
+glibc's libm, which can't do its x87 work in Fil-C code; the musl libc doesn't import them, and they
+take `long double`, which needs its own handling here. Both come with M6.
 
 **M6. glibc flavor and aarch64**
 - The larger `zsys_*` set, per-flavor struct layouts for Rust natives (musl layouts on a glibc

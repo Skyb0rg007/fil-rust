@@ -19,6 +19,8 @@ pub mod abi;
 mod calls;
 mod tables;
 mod cc;
+#[cfg(target_arch = "x86_64")]
+mod cpu;
 pub mod failure;
 pub mod gc;
 pub mod globals;
@@ -114,6 +116,8 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
         implemented.extend(process::table());
         implemented.extend(tables::table());
         implemented.extend(queries::table());
+        #[cfg(target_arch = "x86_64")]
+        implemented.extend(cpu::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;

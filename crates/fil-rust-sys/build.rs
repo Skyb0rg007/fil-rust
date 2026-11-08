@@ -280,6 +280,19 @@ fn build_shim(inputs: &ShimInputs, libc_includes: &[PathBuf], out: &Path) {
     run(&mut cmd);
 }
 
+/// compiler-rt's processor detection, linked into the runtime for
+/// `__builtin_cpu_supports` and `__builtin_cpu_is`.
+fn build_cpu_model(cc: &str, out_dir: &Path) {
+    let object = out_dir.join("cpu_model.o");
+    run(Command::new(cc).args(["-O2", "-fPIC", "-c", "csrc/cpu_model.c", "-o"]).arg(&object));
+    let archive = out_dir.join("libfr_cpu_model.a");
+    let _ = std::fs::remove_file(&archive);
+    println!("cargo:rerun-if-env-changed=AR");
+    run(Command::new(env_or("AR", "ar")).arg("crs").arg(&archive).arg(&object));
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=fr_cpu_model");
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-changed=abi");
@@ -299,6 +312,10 @@ fn main() {
     let glibc = env::var_os("CARGO_FEATURE_GLIBC").is_some();
     if !musl && !glibc {
         panic!("fil-rust-sys: enable at least one of the `musl` and `glibc` features");
+    }
+
+    if arch == "x86_64" {
+        build_cpu_model(&cc, &out_dir);
     }
 
     let clang = env_or("FILC_HOST_CLANG", "clang");

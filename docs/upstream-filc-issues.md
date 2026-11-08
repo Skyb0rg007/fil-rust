@@ -202,3 +202,45 @@ Seen every run on 0.687 musl, through fil-rust's `tables` test
 to census, after remarking, every census-set object that remarking newly
 marked, the way fil-rust's runtime runs a second census after reviving. A census
 is idempotent, so redoing all of them is also correct, just slower.
+
+## 7. `__builtin_cpu_supports` is false unless `__builtin_cpu_init` ran, and panics past the first feature word
+
+`filc_runtime.c:7783-7839` gives Fil-C code its own `__cpu_model` and
+`__cpu_features2`, as global objects that `add_cpu_indicator_globals` zeroes at
+startup. Two things go wrong:
+
+1. They're only filled in by `filc_native___cpu_indicator_init`, which runs
+   when the program calls `__builtin_cpu_init`. In C, compiler-rt fills them
+   in from a constructor, so programs don't call it, and nothing in the Fil-C
+   libc or startup files does. `__builtin_cpu_supports("avx2")` is false on a
+   processor with AVX2, and `__builtin_cpu_is("intel")` is false on an Intel.
+2. `__cpu_features2` is declared as one `unsigned`, with a word of padding,
+   but in the LLVM 20 that Fil-C's clang comes from it's
+   `unsigned __cpu_features2[3]` (`compiler-rt/lib/builtins/cpu_model/x86.c`).
+   Features 64-95 (`sha`, `vaes`, `sha512`, ...) read the padding, so they're
+   false even after `__builtin_cpu_init`. Features 96 and up read past the
+   object's end, and those include `x86-64-v2`, `x86-64-v3` and `x86-64-v4`:
+
+```c
+int levels(void)
+{
+    return __builtin_cpu_supports("x86-64-v2");
+}
+```
+
+```
+filc safety error: cannot read pointer with ptr >= upper.
+    (libcpu.so) tests/fixtures/cpu.c:60:14: levels
+[..] filc panic: thwarted a futile attempt to violate memory safety.
+```
+
+Seen on 0.687 musl on an Intel Core Ultra 7 255H, through fil-rust's `cpu`
+test. With `__builtin_cpu_init` called first, of `sse4.2`, `avx2`, `popcnt`,
+`bmi2`, `adx`, `sha`, `gfni` and `vaes`, all of which it has, `sha` and `vaes`
+come back false; without it, all of them do. Safe, as a program falls back to
+code that doesn't need the feature, until it asks about a microarchitecture
+level.
+
+Suggested fix: size the object for `__cpu_features2` from compiler-rt's, copy
+all of it, and fill both in when the runtime starts (or on first use).
+fil-rust's runtime does the latter, with compiler-rt's own code.
