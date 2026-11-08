@@ -331,10 +331,6 @@ fn child_programs_can_be_started() {
         fil.exited(|| std::process::Command::new("sh").args(["-c", "echo $((6 * 7))"]).output().unwrap())
     });
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
-    // M5: the Rust runtime has no Fil-C `fork` yet, and the rest doesn't need it.
-    if rt.config().backend() == fil_rust::Backend::Rust {
-        return;
-    }
     // Fil-C code forking and waiting for its child.
     let status = rt.run(|fil| edges(fil).function::<fn(i32) -> i32>(fil, "fork_and_exit").unwrap().call(fil, (7,)).unwrap());
     assert_eq!(status, 7);

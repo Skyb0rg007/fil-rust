@@ -73,8 +73,9 @@ struct Collector {
     stats: HeapStats,
 }
 
-/// Held by the thread that's collecting, which is exited: waiting for it
-/// mustn't hold up the world it's trying to stop.
+/// Held only for a moment, with signals blocked, and never while waiting: an
+/// entered thread can take it, so a collection can't wait for it while the
+/// world is running.
 static COLLECTOR: Mutex<Collector> = Mutex::new(Collector {
     policy: Collection::Threshold { min_bytes: 32 << 20, growth_percent: 100 },
     stats: HeapStats {
@@ -88,10 +89,23 @@ static COLLECTOR: Mutex<Collector> = Mutex::new(Collector {
     },
 });
 
-/// Serves as the lock for `STOPPED` and `RESUMED`.
-static WORLD: Mutex<()> = Mutex::new(());
+/// Threads that are waiting for a resume, and those a resume woke that have yet
+/// to enter. A stop waits for the second kind: otherwise a thread collecting
+/// often could stop the world again before any of the others got to run.
+struct World {
+    waiting: usize,
+    owed: usize,
+}
+
+/// Also serves as the lock for `STOPPED`, `RESUMED` and `CAUGHT_UP`.
+static WORLD: Mutex<World> = Mutex::new(World { waiting: 0, owed: 0 });
 static STOPPED: Condvar = Condvar::new();
 static RESUMED: Condvar = Condvar::new();
+static CAUGHT_UP: Condvar = Condvar::new();
+
+fn lock_world() -> MutexGuard<'static, World> {
+    WORLD.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Bytes allocated since the last collection that call for a new one.
 static THRESHOLD: AtomicUsize = AtomicUsize::new(32 << 20);
@@ -118,6 +132,45 @@ fn lock_collector() -> MutexGuard<'static, Collector> {
     COLLECTOR.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn with_collector<R>(body: impl FnOnce(&mut Collector) -> R) -> R {
+    let _blocked = crate::signal::Blocked::all();
+    body(&mut lock_collector())
+}
+
+/// Whose turn it is to collect, or to fork. Turns go in the order they were
+/// asked for, since a thread collecting often would otherwise keep taking
+/// them back. Only exited threads take one, with signals blocked.
+struct Turns {
+    next: u64,
+    serving: u64,
+}
+
+static TURNS: Mutex<Turns> = Mutex::new(Turns { next: 0, serving: 0 });
+static TURN: Condvar = Condvar::new();
+
+fn lock_turns() -> MutexGuard<'static, Turns> {
+    TURNS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+struct Turn;
+
+fn take_turn() -> Turn {
+    let mut turns = lock_turns();
+    let mine = turns.next;
+    turns.next += 1;
+    while turns.serving != mine {
+        turns = TURN.wait(turns).unwrap_or_else(|e| e.into_inner());
+    }
+    Turn
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        lock_turns().serving += 1;
+        TURN.notify_all();
+    }
+}
+
 fn threshold_for(policy: Collection, live: usize) -> usize {
     match policy {
         Collection::Never | Collection::Manual => usize::MAX,
@@ -129,22 +182,23 @@ fn threshold_for(policy: Collection, live: usize) -> usize {
 
 /// Changes when collections happen, from now on.
 pub fn set_collection(policy: Collection) {
-    let mut collector = lock_collector();
-    collector.policy = policy;
-    THRESHOLD.store(threshold_for(policy, collector.stats.live_bytes), Ordering::Release);
+    with_collector(|collector| {
+        collector.policy = policy;
+        THRESHOLD.store(threshold_for(policy, collector.stats.live_bytes), Ordering::Release);
+    });
 }
 
 pub fn collection() -> Collection {
-    lock_collector().policy
+    with_collector(|collector| collector.policy)
 }
 
 /// Where the heap stands now.
 pub fn stats() -> HeapStats {
-    let collector = lock_collector();
+    let stats = with_collector(|collector| collector.stats);
     HeapStats {
         allocated_bytes: heap().counters.allocated_since_collection.load(Ordering::Relaxed),
         committed_bytes: heap().counters.committed.load(Ordering::Relaxed),
-        ..collector.stats
+        ..stats
     }
 }
 
@@ -182,7 +236,7 @@ pub unsafe fn check(thread: *mut Thread) {
         return;
     }
     if heap().counters.allocated_since_collection.load(Ordering::Relaxed) >= THRESHOLD.load(Ordering::Relaxed) {
-        // Someone else may have dealt with it by the time the lock is ours.
+        // Someone else may have dealt with it by the time it's our turn.
         unsafe {
             collect_if(thread, |collector| {
                 heap().counters.allocated_since_collection.load(Ordering::Relaxed)
@@ -223,11 +277,11 @@ unsafe fn collect_if(thread: *mut Thread, wanted: impl FnOnce(&Collector) -> boo
     // This thread looks exited to a signal, but a handler on top of a collection
     // would wait for the collection to end.
     let blocked = crate::signal::Blocked::all();
-    let mut collector = lock_collector();
-    if wanted(&collector) {
-        on_collector_stack(&mut collector);
+    let turn = take_turn();
+    if wanted(&lock_collector()) {
+        on_collector_stack();
     }
-    drop(collector);
+    drop(turn);
     drop(blocked);
     if entered {
         unsafe { thread::enter(thread) };
@@ -238,15 +292,15 @@ unsafe fn collect_if(thread: *mut Thread, wanted: impl FnOnce(&Collector) -> boo
 /// the thread may have come here with its stack nearly used up.
 const COLLECTOR_STACK_SIZE: usize = 1 << 20;
 
-fn on_collector_stack(collector: &mut Collector) {
+fn on_collector_stack() {
     static STACK: OnceLock<usize> = OnceLock::new();
     let base = *STACK.get_or_init(|| Box::leak(vec![0u8; COLLECTOR_STACK_SIZE].into_boxed_slice()).as_mut_ptr() as usize);
     let top = (base + COLLECTOR_STACK_SIZE) & !15;
 
-    unsafe extern "C" fn body(collector: *mut c_void) {
-        run(unsafe { &mut *collector.cast::<Collector>() });
+    unsafe extern "C" fn body(_: *mut c_void) {
+        run();
     }
-    let argument = (collector as *mut Collector).cast::<c_void>();
+    let argument = std::ptr::null_mut::<c_void>();
     #[cfg(target_arch = "x86_64")]
     unsafe {
         std::arch::asm!(
@@ -283,20 +337,24 @@ fn thread_at(entry: usize) -> *mut Thread {
 
 /// Stops every thread: they're exited, and stay that way.
 fn stop_the_world(threads: &[usize]) {
+    let mut world = lock_world();
+    while world.owed != 0 {
+        world = CAUGHT_UP.wait(world).unwrap_or_else(|e| e.into_inner());
+    }
     for &entry in threads {
         unsafe { (*thread_at(entry)).state.fetch_or(STATE_STOP_REQUESTED, Ordering::AcqRel) };
     }
-    let mut world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
     while threads.iter().any(|&entry| unsafe { (*thread_at(entry)).state.load(Ordering::Acquire) } & STATE_ENTERED != 0) {
         world = STOPPED.wait(world).unwrap_or_else(|e| e.into_inner());
     }
 }
 
 fn resume_the_world(threads: &[usize]) {
-    let world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
+    let mut world = lock_world();
     for &entry in threads {
         unsafe { (*thread_at(entry)).state.fetch_and(!STATE_STOP_REQUESTED, Ordering::AcqRel) };
     }
+    world.owed = world.waiting;
     drop(world);
     RESUMED.notify_all();
 }
@@ -304,18 +362,102 @@ fn resume_the_world(threads: &[usize]) {
 /// A thread that was stopping exited.
 pub fn note_stopped() {
     let _blocked = crate::signal::Blocked::all();
-    let world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
-    drop(world);
+    drop(lock_world());
     STOPPED.notify_all();
 }
 
-/// Waits for the end of the collection that stopped `thread`.
-pub unsafe fn wait_for_resume(thread: *mut Thread) {
+/// Waits for the end of the collection that stopped `thread`. If this had to
+/// wait, it returns true, and no one can stop the world again until the thread
+/// enters and calls [`caught_up`].
+pub unsafe fn wait_for_resume(thread: *mut Thread) -> bool {
     let _blocked = crate::signal::Blocked::all();
-    let mut world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
-    while unsafe { (*thread).state.load(Ordering::Acquire) } & STATE_STOP_REQUESTED != 0 {
+    let stopped = || unsafe { (*thread).state.load(Ordering::Acquire) } & STATE_STOP_REQUESTED != 0;
+    let mut world = lock_world();
+    if !stopped() {
+        return false;
+    }
+    world.waiting += 1;
+    while stopped() {
         world = RESUMED.wait(world).unwrap_or_else(|e| e.into_inner());
     }
+    world.waiting -= 1;
+    true
+}
+
+/// A thread that [`wait_for_resume`] made wait has entered.
+pub fn caught_up() {
+    let _blocked = crate::signal::Blocked::all();
+    let mut world = lock_world();
+    world.owed -= 1;
+    let done = world.owed == 0;
+    drop(world);
+    if done {
+        CAUGHT_UP.notify_all();
+    }
+}
+
+/// Forks with the runtime still, so that nothing is left behind half done or
+/// holding a lock, and has the child forget the other threads. Takes an entered
+/// thread and leaves it entered. Returns what `fork` did, with its `errno`.
+pub unsafe fn fork(thread: *mut Thread) -> (libc::pid_t, i32) {
+    unsafe {
+        // Waits for whoever is initializing a global, so needs doing now.
+        globals::lock(thread);
+        thread::exit(thread);
+    }
+    let blocked = crate::signal::Blocked::all();
+    let turn = take_turn();
+    let mut threads = thread::lock_threads();
+    stop_the_world(&threads.0);
+    for &entry in &threads.0 {
+        for slot in unsafe { &mut (*thread_at(entry)).slots } {
+            heap().flush_slot(slot);
+        }
+    }
+    // Exited threads can take these whenever they like. If one had any of
+    // them as the fork happened, no one would ever release it in the child.
+    let lifecycle = thread::lock_lifecycle();
+    let mut world = lock_world();
+    let mut turns = lock_turns();
+    let (result, error) = {
+        let _roots = (shim::hold(), start::hold(), globals::hold(), lock_collector());
+        let _heap = heap().hold();
+        unsafe {
+            *libc::__errno_location() = 0;
+            let result = libc::fork();
+            (result, *libc::__errno_location())
+        }
+    };
+    if result == 0 {
+        for &entry in &threads.0 {
+            let other = thread_at(entry);
+            if other != thread {
+                unsafe {
+                    (*other).host = 0;
+                    (*other).tid = 0;
+                    (*other).forked.store(1, Ordering::Relaxed);
+                    (*other).stopped.store(1, Ordering::Release);
+                }
+            }
+        }
+        threads.0.clear();
+        threads.0.push(thread as usize);
+        // Whoever was waiting is gone.
+        world.waiting = 0;
+        turns.next = turns.serving + 1;
+        unsafe { (*thread).tid = libc::gettid() as u32 };
+        crate::signal::set_main_tid();
+    }
+    drop(turns);
+    drop(world);
+    drop(lifecycle);
+    resume_the_world(&threads.0);
+    drop(threads);
+    drop(turn);
+    drop(blocked);
+    unsafe { thread::enter(thread) };
+    globals::unlock();
+    (result, error)
 }
 
 struct Marker {
@@ -557,7 +699,7 @@ unsafe fn verify_object(object: *mut Object, block: usize, size: usize) {
     }
 }
 
-fn run(collector: &mut Collector) {
+fn run() {
     let threads = thread::lock_threads();
     stop_the_world(&threads.0);
     for &entry in &threads.0 {
@@ -580,6 +722,7 @@ fn run(collector: &mut Collector) {
     }
     let (reclaimed, live) = heap().sweep(stressed);
     heap().counters.allocated_since_collection.store(0, Ordering::Relaxed);
+    let mut collector = lock_collector();
     let stats = &mut collector.stats;
     stats.collections += 1;
     stats.live_bytes = live;
@@ -587,6 +730,7 @@ fn run(collector: &mut Collector) {
     stats.reclaimed_bytes = reclaimed;
     stats.total_reclaimed_bytes += reclaimed;
     THRESHOLD.store(threshold_for(collector.policy, live), Ordering::Release);
+    drop(collector);
     COMPLETED.fetch_add(1, Ordering::Release);
     resume_the_world(&threads.0);
 }

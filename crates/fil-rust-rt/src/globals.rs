@@ -32,12 +32,17 @@ static OWNER: AtomicUsize = AtomicUsize::new(0);
 static STATE: Mutex<Option<Initialization>> = Mutex::new(None);
 static ROOTS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
+/// Keeps what's here from changing, for `fork`, whose caller has [`lock`].
+pub fn hold() -> impl Sized {
+    (ROOTS.lock().unwrap_or_else(|e| e.into_inner()), DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 fn with_state<R>(body: impl FnOnce(&mut Initialization) -> R) -> R {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     body(state.get_or_insert_with(Initialization::default))
 }
 
-unsafe fn lock(me: *mut Thread) {
+pub unsafe fn lock(me: *mut Thread) {
     if OWNER.load(Ordering::Relaxed) == me as usize {
         with_state(|state| state.depth += 1);
         return;
@@ -58,7 +63,7 @@ unsafe fn lock(me: *mut Thread) {
     });
 }
 
-fn unlock() {
+pub fn unlock() {
     let released = with_state(|state| {
         state.depth -= 1;
         if state.depth != 0 {

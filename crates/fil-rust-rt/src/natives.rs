@@ -206,7 +206,8 @@ macro_rules! natives {
                     ReturnValue { has_exception, return_size }
                 }
 
-                #[allow(unused_variables, clippy::unused_unit, unused_mut)]
+                // Natives take what the C function they stand for takes.
+                #[allow(unused_variables, clippy::unused_unit, unused_mut, clippy::too_many_arguments)]
                 unsafe fn body($thread: *mut Thread $(, mut $arg: $ty)*) -> $ret $body
 
                 pub unsafe extern "C" fn getter(_: *mut Thread, _: *const Origin) -> Ptr {

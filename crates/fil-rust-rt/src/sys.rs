@@ -74,13 +74,13 @@ pub(crate) unsafe fn plain<R>(thread: *mut Thread, call: impl FnOnce() -> R) -> 
 }
 
 /// A buffer to read, as the kernel would.
-fn input<T>(ptr: Ptr, size: usize) -> *const T {
+pub(crate) fn input<T>(ptr: Ptr, size: usize) -> *const T {
     object::check_access(ptr, size, Access::Read);
     ptr.ptr.cast()
 }
 
 /// A buffer the kernel will write, whatever it was holding.
-fn output<T>(ptr: Ptr, size: usize) -> *mut T {
+pub(crate) fn output<T>(ptr: Ptr, size: usize) -> *mut T {
     object::check_access(ptr, size, Access::Write);
     ptr.ptr.cast()
 }
@@ -102,19 +102,23 @@ pub(crate) fn maybe_out<T>(ptr: Ptr) -> *mut T {
 }
 
 /// A copy of a string, which is safe from other threads while the call runs.
-unsafe fn text(ptr: Ptr) -> CString {
+pub(crate) unsafe fn text(ptr: Ptr) -> CString {
     unsafe { CString::from_vec_unchecked(string_of(ptr)) }
 }
 
-fn array_size(size: usize, count: usize) -> usize {
+pub(crate) fn array_size(size: usize, count: usize) -> usize {
     size.checked_mul(count)
         .unwrap_or_else(|| safety_panic(format_args!("size argument too big, causes overflow; size = {count}.")))
 }
 
 /// Reads the entries of a Fil-C `iovec` array and checks what they point at.
-unsafe fn iovecs(thread: *mut Thread, user: Ptr, count: c_int, access: Access) -> Vec<libc::iovec> {
+pub(crate) unsafe fn iovecs(thread: *mut Thread, user: Ptr, count: c_int, access: Access) -> Vec<libc::iovec> {
+    unsafe { iovecs_of(thread, user, count.max(0) as usize, Some(access)) }
+}
+
+/// [`iovecs`], leaving what they point at alone if `access` is `None`.
+pub(crate) unsafe fn iovecs_of(thread: *mut Thread, user: Ptr, count: usize, access: Option<Access>) -> Vec<libc::iovec> {
     let entry_size = size_of::<libc::iovec>();
-    let count = count.max(0) as usize;
     object::check_access(user, array_size(entry_size, count), Access::Read);
     (0..count)
         .map(|index| unsafe {
@@ -122,7 +126,9 @@ unsafe fn iovecs(thread: *mut Thread, user: Ptr, count: c_int, access: Access) -
             let base = crate::ptrs::load(user.with_ptr(entry));
             thread::track(thread, base.object());
             let length = (*entry.cast::<libc::iovec>()).iov_len;
-            object::check_access(base, length, access);
+            if let Some(access) = access {
+                object::check_access(base, length, access);
+            }
             libc::iovec { iov_base: base.ptr.cast(), iov_len: length }
         })
         .collect()
@@ -615,6 +621,28 @@ natives! {
             return Ptr::NULL;
         }
         unsafe { dl_handle_object(thread, handle) }
+    }
+
+    fn zsys_dladdr(thread: *mut Thread, address: Ptr, info: Ptr) -> c_int {
+        let mut found: libc::Dl_info = unsafe { std::mem::zeroed() };
+        let result = unsafe { plain(thread, || libc::dladdr(address.ptr.cast(), &mut found)) };
+        if result == 0 {
+            unsafe { report_dl_failure(thread) };
+            return 0;
+        }
+        object::check_access(info, size_of::<libc::Dl_info>(), Access::Write);
+        let name = unsafe { std::ffi::CStr::from_ptr(found.dli_fname) }.to_bytes();
+        unsafe {
+            let name = crate::start::c_string(thread, name);
+            let at = |index: usize| info.with_ptr(info.ptr.add(index * size_of::<Ptr>() / 2));
+            crate::ptrs::store(thread, at(0), name);
+            // No one can get at the object through this address. The symbol
+            // isn't known, as it isn't upstream.
+            crate::ptrs::store(thread, at(1), Ptr { ptr: found.dli_fbase.cast(), lower: null_mut() });
+            crate::ptrs::store(thread, at(2), Ptr::NULL);
+            crate::ptrs::store(thread, at(3), Ptr::NULL);
+        }
+        result
     }
 
     fn zsys_dlsym(thread: *mut Thread, handle: Ptr, symbol: Ptr) -> Ptr {

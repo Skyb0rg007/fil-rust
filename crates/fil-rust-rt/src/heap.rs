@@ -184,6 +184,11 @@ impl Heap {
         self.central.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Keeps others from changing the heap, for `fork`.
+    pub fn hold(&self) -> impl Sized {
+        self.lock()
+    }
+
     pub fn contains(&self, address: usize) -> bool {
         address.wrapping_sub(self.base) < RESERVE_SIZE
     }

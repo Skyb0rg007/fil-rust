@@ -319,6 +319,8 @@ pub struct Thread {
     pub host: usize,
     /// Set by a thread that's finished, under `thread::lock_lifecycle`.
     pub stopped: AtomicU32,
+    /// Set on threads left behind by a `fork`, which never finish.
+    pub forked: AtomicU32,
     /// How many `zincrement_signal_deferral_depth` calls are in effect.
     pub signal_deferral_depth: u64,
     _pad3: [u8; ALLOCATOR_SLOTS_OFFSET - 728],

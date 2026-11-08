@@ -126,11 +126,26 @@ Yet `zsys_mincore` is declared in `filc/include/pizlonated_syscalls.h` and
 implemented, and calling it directly works. The wrapper just wasn't switched
 over to it.
 
-Only `mincore` was run. These have the same shape: a `zsys_` native exists, the
+`fexecve` was seen to do the same. These have the same shape, but weren't run: a `zsys_` native exists, the
 source calls `syscall(SYS_...)`, and the function's `__PRETTY_FUNCTION__` string,
 which only that error path uses, is in the 0.687 `libc.so`: `acct`, `arch_prctl`,
-`clock_settime`, `fexecve`, `ioperm`, `iopl`, `name_to_handle_at`,
+`clock_settime`, `ioperm`, `iopl`, `name_to_handle_at`,
 `open_by_handle_at`, `personality`, `pivot_root`, `quotactl`, `remap_file_pages`,
 `sched_rr_get_interval`, `setdomainname`, `sethostname`, `setns`, `sigaltstack`,
 `syncfs`, `unshare`, `vhangup`. Some may have an earlier return that avoids the
 error, so each needs checking.
+
+## 5. `quotactl` panics on every valid command
+
+`filc_native_zsys_quotactl` dispatches on `cmd >> SUBCMDSHIFT` with `cmd` an
+`int`. `QCMD(Q_GETQUOTA, USRQUOTA)` is `0x800007 << 8`, which has the top bit set,
+so the shift sign-extends to `0xff800007` and no `case` matches. The result is
+reached with a call that's correct, and is a panic rather than an error:
+
+```
+filc safety error: unrecognized quotactl command -2147481856.
+```
+
+Run through `zsys_quotactl` on 0.687. The libc's `quotactl` goes through the
+stub from issue 4, so nothing gets this far without calling the native by hand.
+The fix is to shift it as `unsigned`.

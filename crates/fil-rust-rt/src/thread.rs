@@ -255,14 +255,18 @@ fn attach() -> *mut Thread {
 /// The thread is now running Fil-C code and must reach safepoints.
 pub unsafe fn enter(thread: *mut Thread) {
     let state = unsafe { &(*thread).state };
+    let mut waited = false;
     loop {
         let current = state.load(Ordering::Acquire);
         if current & STATE_STOP_REQUESTED != 0 {
-            unsafe { crate::gc::wait_for_resume(thread) };
+            waited |= unsafe { crate::gc::wait_for_resume(thread) };
         } else if state
             .compare_exchange_weak(current, current | STATE_ENTERED, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
+            if waited {
+                crate::gc::caught_up();
+            }
             return;
         }
     }

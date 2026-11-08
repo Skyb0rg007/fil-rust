@@ -36,6 +36,11 @@ fn registered() -> std::sync::MutexGuard<'static, Registered> {
     REGISTERED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Keeps this from changing, for `fork`.
+pub fn hold() -> impl Sized {
+    registered()
+}
+
 /// The arguments constructors get, once there are any.
 pub fn user_environment() -> Option<UserEnvironment> {
     registered().environment
@@ -92,7 +97,7 @@ pub unsafe fn for_each_root(mut visit: impl FnMut(*mut Object)) {
 }
 
 /// A tracked copy of `bytes`, with a terminator.
-unsafe fn c_string(thread: *mut Thread, bytes: &[u8]) -> Ptr {
+pub(crate) unsafe fn c_string(thread: *mut Thread, bytes: &[u8]) -> Ptr {
     unsafe {
         let object = object::allocate(thread, bytes.len() + 1, 0);
         thread::track(thread, object);

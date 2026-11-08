@@ -8,6 +8,7 @@
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
 
 use crate::abi::*;
@@ -260,6 +261,10 @@ natives! {
     fn zthread_join(thread: *mut Thread, zthread: Ptr, result: Ptr) -> bool {
         check_zthread(zthread);
         let target = zthread.ptr.cast::<Thread>();
+        if unsafe { (*target).forked.load(Ordering::Relaxed) } != 0 {
+            unsafe { set_errno(thread, libc::ESRCH) };
+            return false;
+        }
         unsafe {
             thread::exit(thread);
             thread::wait_until_finished(target);

@@ -16,6 +16,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod abi;
+mod calls;
 mod cc;
 pub mod failure;
 pub mod gc;
@@ -25,6 +26,8 @@ pub mod eh;
 mod helpers;
 mod jump;
 mod maps;
+mod net;
+mod process;
 mod memops;
 mod natives;
 pub mod signal;
@@ -104,6 +107,9 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
         implemented.extend(eh::table());
         implemented.extend(signal::table());
         implemented.extend(maps::table());
+        implemented.extend(net::table());
+        implemented.extend(calls::table());
+        implemented.extend(process::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;

@@ -34,6 +34,11 @@ static THREAD_MAIN: AtomicUsize = AtomicUsize::new(0);
 /// References Rust holds on to. The collector treats the table as roots.
 static ROOTS: Mutex<Vec<Ptr>> = Mutex::new(Vec::new());
 
+/// Keeps these from changing, for `fork`.
+pub fn hold() -> impl Sized {
+    ROOTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// As much as anyone could want, given that the table takes no memory until
 /// it's used.
 const ROOT_CAPACITY: usize = 1 << 32;

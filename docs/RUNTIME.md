@@ -275,10 +275,23 @@ tests pass too. Under `FIL_RUST_GC_STRESS`, the libc suites stay green. Some fin
   need it find its symbols in the global scope. `Library::getter` falls back to the handle kept by
   the runtime, since `dlsym` on a handle only looks at that library and what it depends on.
 
-Out until M5, failing by name when called: sockets, the `mmap` family, `epoll`, `fork`, `execve`,
-`wait*`, timers, SysV IPC, `mount` and `prctl`. So `abi_audit` stays on libpizlo for now, and
-`edges.rs` skips its Fil-C `fork` case on the Rust backend. `tests/boot.rs` checks each backend for
-what it should map.
+Out until M5, failing by name when called: `epoll`, which needs the pointer tables.
+`tests/boot.rs` checks each backend for what it should map. `abi_audit` passes on both: its
+`cmsghdr` padding case is why sends copy control data and clean it the way musl's `sendmsg` does. Sockets, the
+`mmap` family, `fork`, `execve`, `wait*`, timers, SysV IPC, `mount` and `prctl` landed in M5. A few
+calls fail by name on both backends, since upstream's musl flavor panics on them too: `fanotify_*`,
+`getcpu`, `pkey_*`, `process_madvise`, `process_mrelease`, `epoll_pwait2` and `dlvsym`. They come
+with M6.
+
+Known race, not fixed yet: a signal that lands on a thread that isn't Fil-C's is forwarded to the
+libc main thread with `tgkill`. If that thread has signals blocked by the runtime at that moment, the
+signal waits there, and if the program has reset the disposition to `SIG_DFL` by the time it's
+unblocked, the process dies. A real process can't see this, since a signal generated before
+`setitimer` stops a timer arrives before the call returns. Under `FIL_RUST_GC_STRESS=8` it kills the
+`signals` suite about one run in five. The fix is to record forwarded signals when they're generated
+and only wake the target, so the handler runs from the deferred queue, which already drops a signal
+whose disposition changed; waking a thread in `pause` or `sigsuspend` needs a signal the runtime
+owns.
 
 The roots for the errno and dlerror handlers and for argv, environ and auxv are what upstream has,
 but disabling them changes nothing a test can see: the handlers are global function objects, and
