@@ -21,6 +21,7 @@ pub const FLAG_READONLY: usize = 2;
 pub const FLAG_FREE: usize = 4;
 pub const FLAG_MMAP: usize = 8;
 pub const FLAG_GLOBAL_AUX: usize = 16;
+pub const FLAG_WEAK_KEY: usize = 32;
 pub const FLAGS_SPECIAL_SHIFT: u32 = 7;
 pub const FLAGS_SPECIAL_MASK: usize = 15 << FLAGS_SPECIAL_SHIFT;
 pub const FLAGS_ALIGN_SHIFT: u32 = 11;

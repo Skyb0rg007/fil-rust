@@ -16,6 +16,7 @@
 #define CHECK(condition) do { if (!(condition)) return __LINE__; } while (0)
 
 int zsys_mincore(void* address, size_t length, char* result);
+int zsys_remap_file_pages(void* address, size_t size, int prot, size_t offset, int flags);
 
 static const size_t page = 4096;
 
@@ -118,6 +119,25 @@ int remapping(const char* path)
     char* private = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECK(private != MAP_FAILED);
     CHECK(mremap(private, page, 2 * page, MREMAP_MAYMOVE) == MAP_FAILED && errno == ENOSYS);
+    return 0;
+}
+
+/* Through the native, as issue 4 in docs/upstream-filc-issues.md suspects
+   the libc's wrapper never reaches it. */
+int rearranging_file_pages(const char* path)
+{
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    CHECK(fd >= 0);
+    CHECK(ftruncate(fd, 2 * page) == 0);
+    char* map = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(map != MAP_FAILED);
+    strcpy(map, "zero");
+    strcpy(map + page, "one");
+    CHECK(zsys_remap_file_pages(map, page, 0, 1, 0) == 0);
+    CHECK(!strcmp(map, "one") && !strcmp(map + page, "one"));
+    CHECK(zsys_remap_file_pages(map, page, PROT_EXEC, 0, 0) == -1 && errno == EINVAL);
+    CHECK(munmap(map, 2 * page) == 0);
+    CHECK(close(fd) == 0);
     return 0;
 }
 

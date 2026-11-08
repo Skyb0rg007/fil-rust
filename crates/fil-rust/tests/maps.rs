@@ -64,6 +64,11 @@ fn mappings_can_move_and_shrink() {
 }
 
 #[test]
+fn file_pages_can_be_rearranged() {
+    check_with_path("rearranging_file_pages", &scratch("rearranged"));
+}
+
+#[test]
 fn shared_memory_segments() {
     check("shared_memory");
 }

@@ -331,6 +331,13 @@ Done so far: `jump.rs` has `setjmp`, `eh.rs` exceptions and `signal.rs` signals,
 - `epoll` needs only the four `_impl` natives. The support library's Fil-C wrappers keep a weak
   exact pointer table per epoll descriptor and pass pointers in event data through it, so the
   natives move integers between Fil-C's 16-byte event and the kernel's packed 12-byte one.
+- `queries.rs` has what `stdfil.h` asks of the runtime about itself, tested by `tests/stdfil.rs`.
+  There's no scavenger and no runtime threads, so their natives do nothing; collections stop the
+  world, so `zgc_is_stw` is always true. `zgc_try_request` arms the caller's Check bit, so the
+  collection happens at its next safepoint and the call doesn't wait. `zsetproctitle` only checks
+  its string, since the process title is the host's. `zdump_heap` and `zdump_pas_status` print
+  `HeapStats`, not every object; `zdump_stacks` stops the world to read every thread's frames.
+  Pointer descriptions (`zptr_to_new_string`) match libpizlo's byte for byte.
 
 **M6. glibc flavor and aarch64**
 - The larger `zsys_*` set, per-flavor struct layouts for Rust natives (musl layouts on a glibc

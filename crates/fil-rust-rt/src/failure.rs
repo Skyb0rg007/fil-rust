@@ -7,6 +7,7 @@
 
 use std::ffi::{CStr, c_char};
 use std::fmt::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::abi::{Frame, InlineFrame, Origin, OriginNode};
 
@@ -54,7 +55,20 @@ unsafe fn dump_stack(report: &mut String, mut frame: *mut Frame) {
     }
 }
 
+/// `zset_quiet_panic`: fail without a report.
+pub static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// The frames from `frame` out, as a failure shows them.
+pub(crate) unsafe fn stack_report(frame: *mut Frame) -> String {
+    let mut report = String::new();
+    unsafe { dump_stack(&mut report, frame) };
+    report
+}
+
 fn finish(mut report: String, kind: &str) -> ! {
+    if QUIET.load(Ordering::Relaxed) {
+        unsafe { libc::abort() }
+    }
     let thread = crate::thread::current();
     if !thread.is_null() {
         unsafe { dump_stack(&mut report, (*thread).top_frame) };

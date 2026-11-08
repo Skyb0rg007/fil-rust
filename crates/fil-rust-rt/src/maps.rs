@@ -221,6 +221,16 @@ natives! {
         unsafe { sys(thread, || libc::mprotect(address.ptr.cast(), length, prot)) }
     }
 
+    fn zsys_remap_file_pages(thread: *mut Thread, address: Ptr, length: usize, prot: c_int, offset: usize, flags: c_int) -> c_int {
+        if prot & libc::PROT_EXEC != 0 {
+            unsafe { set_errno(thread, libc::EINVAL) };
+            return -1;
+        }
+        object::check_access(address, length, Access::Write);
+        check_mapped(address);
+        unsafe { sys(thread, || libc::syscall(libc::SYS_remap_file_pages, address.ptr, length, prot, offset, flags) as c_int) }
+    }
+
     fn zsys_madvise(thread: *mut Thread, address: Ptr, length: usize, advice: c_int) -> c_int {
         if !is_transparent(advice) {
             object::check_access(address, length, Access::Write);

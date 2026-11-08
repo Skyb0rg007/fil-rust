@@ -235,12 +235,13 @@ pub unsafe fn check(thread: *mut Thread) {
         }
         return;
     }
-    if heap().counters.allocated_since_collection.load(Ordering::Relaxed) >= THRESHOLD.load(Ordering::Relaxed) {
+    if heap().counters.allocated_since_collection.load(Ordering::Relaxed) >= THRESHOLD.load(Ordering::Relaxed) || is_requested() {
         // Someone else may have dealt with it by the time it's our turn.
         unsafe {
             collect_if(thread, |collector| {
                 heap().counters.allocated_since_collection.load(Ordering::Relaxed)
                     >= threshold_for(collector.policy, collector.stats.live_bytes)
+                    || is_requested() && matches!(collector.policy, Collection::Threshold { .. })
             })
         };
     }
@@ -256,6 +257,64 @@ pub unsafe fn collect(thread: *mut Thread) {
 /// The collection `zgc_wait` should wait for, to see everything up to now.
 pub fn request_fresh() -> u64 {
     COMPLETED.load(Ordering::Acquire) + 1
+}
+
+/// Collections finished so far.
+pub fn completed() -> u64 {
+    COMPLETED.load(Ordering::Acquire)
+}
+
+/// The last collection `zgc_try_request` asked for.
+static REQUESTED: AtomicU64 = AtomicU64::new(0);
+
+fn is_requested() -> bool {
+    REQUESTED.load(Ordering::Acquire) > COMPLETED.load(Ordering::Acquire)
+}
+
+/// Asks for a collection at the thread's next safepoint, if Fil-C code gets to
+/// start them, and returns its number.
+pub unsafe fn try_request(thread: *mut Thread) -> u64 {
+    let cycle = request_fresh();
+    if matches!(collection(), Collection::Threshold { .. }) {
+        REQUESTED.fetch_max(cycle, Ordering::AcqRel);
+        unsafe { arm(thread) };
+    }
+    cycle
+}
+
+/// The last collection asked for that hasn't been turned down: the one running
+/// or about to, if it's past [`completed`].
+pub fn requested() -> u64 {
+    REQUESTED.load(Ordering::Acquire).max(completed())
+}
+
+/// Whether sweeping scribbles over what it frees, and marking checks what it
+/// finds, which stress mode does.
+pub fn is_checking() -> bool {
+    is_stressed()
+}
+
+/// Runs `body` with every thread stopped, the way a collection does, so their
+/// frames hold still. The rules for `thread` are those of [`collect`]. `body`
+/// mustn't allocate Fil-C memory.
+pub unsafe fn with_world_stopped(thread: *mut Thread, body: impl FnOnce(&[*mut Thread])) {
+    let entered = !thread.is_null() && unsafe { crate::helpers::is_entered(thread) };
+    if entered {
+        unsafe { thread::exit(thread) };
+    }
+    let blocked = crate::signal::Blocked::all();
+    let turn = take_turn();
+    {
+        let threads = thread::lock_threads();
+        stop_the_world(&threads.0);
+        body(&threads.0.iter().map(|&entry| thread_at(entry)).collect::<Vec<_>>());
+        resume_the_world(&threads.0);
+    }
+    drop(turn);
+    drop(blocked);
+    if entered {
+        unsafe { thread::enter(thread) };
+    }
 }
 
 /// Returns once `cycle` collections are done. Fil-C code doesn't get to start
@@ -804,7 +863,7 @@ unsafe fn destruct() {
 /// Fails if `object` can't be a live object in its block: a block that was
 /// swept, or a reference that was never one, would show up here. Sweeping
 /// scribbles over blocks under stress, which is what makes this catch much.
-unsafe fn verify_object(object: *mut Object, block: usize, size: usize) {
+pub(crate) unsafe fn verify_object(object: *mut Object, block: usize, size: usize) {
     let this = unsafe { &*object };
     let (lower, upper) = (lower_for_object(object) as usize, this.upper() as usize);
     let aux = this.aux_ptr() as usize;
