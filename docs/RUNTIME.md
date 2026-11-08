@@ -308,7 +308,7 @@ function and argument in `zthread_create` is redundant the same way, with the co
   its null check) and `:8866` (compares `act_ptr`, not the handler). Don't copy them, and
   record real ones in `docs/upstream-filc-issues.md`.
 
-Done so far: `jump.rs` has `setjmp`, `eh.rs` exceptions and `signal.rs` signals, and `tests/jumps.rs`,
+M5 is done, but for `stress` under the stress modes (below). `jump.rs` has `setjmp`, `eh.rs` exceptions and `signal.rs` signals, and `tests/jumps.rs`,
 `tests/cxx.rs` and `tests/signals.rs` pass on both backends. Notes from those:
 
 - Every lock an exited thread can hold has signals blocked around it, as a handler could want it
