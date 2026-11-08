@@ -9,13 +9,40 @@ could safely use memory that Fil-C threads may be writing at the same time.
    Every section running on another CPU restarts and re-tests. After that, no store can land
    until the pin is cleared, so the native function gets real `noalias` access. Costs: every
    Fil-C store, plus a pin and sometimes a `membarrier` per native call.
-2. **Race tolerance.** Fil-C is unchanged. Native code reads and writes shared memory only
-   with relaxed atomics or opaque inline-asm moves, so it never relies on memory staying the
-   same. Costs: lost optimizations in native code.
+2. **Race tolerance.** Fil-C is unchanged. Native code's memory safety must not depend on the
+   contents of shared memory (the rule below). Code that follows the rule keeps `restrict`
+   and full optimization. Costs: one relaxed atomic or volatile load wherever a shared value
+   steers an access.
 
-Dropping `restrict` alone is not one of the options. Without it the compiler still assumes
-there are no data races, so it may still reload a value it already checked. The `plain`
-columns are there only to separate the cost of `noalias` from the cost of race tolerance.
+### What race tolerance requires
+
+Fil-C stays memory safe under races because it checks every access against a capability
+loaded atomically, at the moment of the access. Native code checks once and trusts the value.
+In LLVM, a non-atomic load that races with a store returns `undef`, which may differ at each
+use, and through a `noalias` pointer the racing store is outright undefined behavior. Either
+way the compiler may fetch a value twice, once for a bounds check and once for the use. Xen's
+XSA-155 (CVE-2015-8550) was this, and it's why Linux has `READ_ONCE`.
+
+That only breaks code whose staying in bounds depends on two reads agreeing. So the rule is:
+
+- Addresses, lengths, loop bounds and loop exits that keep accesses in bounds come from the
+  arguments, never from shared memory.
+- A value read from shared memory flows only into outputs, or into decisions where every
+  outcome stays in bounds. Otherwise it's read once with a relaxed atomic or volatile load.
+
+| Safe with `restrict` and full optimization | Needs one atomic load of the shared value |
+|---|---|
+| `memcpy`, `memset`, `memcmp`, `memchr`, hashing, checksums | A length or offset parsed from the buffer and used as a bound or index |
+| `strlen`, `strchr`, if also bounded by the object's end | A `switch` on a buffer byte (range check, then a jump-table load) |
+| `table[byte]` with a 256-entry table (every byte is in range) | A scan whose bound the compiler could drop because an earlier read found the terminator |
+
+This is an argument about what a compiler can exploit, not a guarantee. A race on a
+`noalias` argument is still undefined behavior in C, Rust and LLVM, and the rule is enforced
+by review, as the kernel's discipline for user memory is.
+
+Dropping `restrict` doesn't help, and doesn't replace the rule. Without it the compiler still
+assumes there are no data races, so it may still reload a value it already checked. The
+`plain` columns are there only to separate the cost of `noalias` from the rest.
 
 Run `./run.sh` (gcc), or `CLANG=/path/to/host/clang ./run.sh` to also build the kernels with
 clang. Fil-C's own `clang` is the wrong compiler here.
@@ -43,7 +70,8 @@ clang. Fil-C's own `clang` is the wrong compiler here.
   these variants:
   - `restrict`;
   - `plain`;
-  - `atomic`: relaxed atomics on shared memory, what safe Rust over atomic views compiles to;
+  - `atomic`: every shared access a relaxed atomic, what safe Rust over atomic views compiles
+    to. The rule above doesn't require this; it's the cost of not applying it;
   - `asmvec`: 16-byte inline-asm loads and stores, race-tolerant and hand-vectorized with
     SSE2.
 
@@ -133,13 +161,19 @@ As a multiple of the `restrict` version, over the three sizes:
 | accumulate | 1.0 | 1.0 with gcc; 1.5 to 2.7 with clang | - |
 | histogram (a shared byte as an index) | 1.0 | 1.0 | - |
 
+- **Following the rule costs about nothing here.** `add`, `sum`, `find`, `copy` and
+  `accumulate` take every address and bound from their arguments, so they can be compiled as
+  the `restrict` column. In `histogram` a shared byte becomes an index, and an atomic load of
+  it cost 1.0×. The 256-entry table is in range for any byte, so that load isn't strictly
+  needed; it shows what an atomic load feeding an index costs.
 - **`noalias` itself bought almost nothing.** `plain` matched `restrict` to within 10%,
   apart from one DRAM-bound case at 1.24×. Both compilers add runtime overlap checks and
   vectorize anyway.
-- **What race tolerance costs is vectorization.** Compilers don't vectorize atomic accesses,
-  so loops they would vectorize get slower. Scalar loops, including the histogram pattern where
-  a reloaded index could go out of bounds, cost nothing.
-- **Hand-written vector code recovers much of it.** Inline-asm loads are race-tolerant
+- **Making every shared access atomic is what costs.** Compilers don't vectorize atomic
+  accesses, so loops they would vectorize get 1.1 to 7× slower. That's the price for code that
+  can't separate the values that steer accesses from plain data, such as safe Rust over
+  atomic views.
+- **Hand-written vector code recovers much of that.** Inline-asm loads are race-tolerant
   and vectorize. At the same 16-byte width they were within 1.25× of gcc's code. clang's
   unrolled loops and glibc's `memcpy` beat them by up to 2.3× in L1. Against AVX2 builds they
   were up to 5× slower, because this asm is SSE2 only. `find`
@@ -155,14 +189,13 @@ The two approaches tax different code:
   sometimes a `membarrier` of 1.5 to 3.4 µs. In exchange, native code runs at full
   optimization with real references. They also need a Fil-C compiler change, and every store
   site must stay inside a section.
-- **Race tolerance** taxes only native functions that loop over shared memory and would have
-  been vectorized: 1.1 to 7× when the compiler does the work (up to 17× for one gcc AVX2
-  case). Hand-written vector code removes much of that, and scalar code pays nothing. Fil-C
-  is untouched.
+- **Race tolerance under the rule** cost nothing measurable on any kernel here. Functions
+  whose bounds come from their arguments keep `restrict` and full vectorization, and each
+  shared value that steers an access costs one atomic load. Fil-C is untouched. The price is
+  a discipline enforced by review rather than by types, resting on what compilers can
+  exploit rather than on the language's guarantees. Without the rule, making every access
+  atomic costs 1.1 to 7× on vectorizable loops (up to 17× for one gcc AVX2 case).
 
-The functions where race tolerance hurts (`memcpy`, `memchr`, `strlen`, `memcmp` and their
-relatives) are the ones a libc already hand-writes in vector code. So race tolerance
-concentrates its cost where libcs already spend their effort, while rseq spreads its cost
-over all Fil-C code. On these numbers, race tolerance, with hand-written vector code for
-the hot memory and string functions, is the cheaper default. rseq pins stay an option if
-some native code can't be written that way.
+On these numbers race tolerance is the default, and no kernel measured needs rseq pins.
+They stay an option for native code whose safety depends on shared contents and can't be
+restructured, such as directly translated code nobody has audited for the rule.

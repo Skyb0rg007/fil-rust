@@ -229,8 +229,9 @@ KERNEL(accum_atomic) {
     return acc;
 }
 
-// Histogram into a private table: a value read from shared memory becomes an index. This
-// is the pattern where a reload after a check would go out of bounds.
+// Histogram into a private table: a value read from shared memory becomes an index. With
+// 256 entries every byte is in range, so this measures what an atomic load feeding an index
+// costs; a smaller table with a range check is where a reload would go out of bounds.
 
 KERNEL(hist_restrict) {
     const uint8_t *restrict a = a_;
