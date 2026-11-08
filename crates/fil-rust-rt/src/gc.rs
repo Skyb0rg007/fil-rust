@@ -25,7 +25,7 @@ use crate::abi::*;
 use crate::failure::internal_panic;
 use crate::heap::heap;
 use crate::thread::{self, extra};
-use crate::{globals, maps, ptrs, shim, start};
+use crate::{globals, maps, ptrs, shim, start, tables};
 
 /// When collections happen. A collection is the only thing that gives memory
 /// back, `free` included.
@@ -464,6 +464,10 @@ struct Marker {
     stack: Vec<*mut Object>,
     tombstoned: usize,
     verify: bool,
+    /// What the census has to see to, as marking found them.
+    weaks: Vec<*mut Object>,
+    weak_maps: Vec<*mut Object>,
+    weak_tables: Vec<*mut Object>,
 }
 
 impl Marker {
@@ -587,6 +591,29 @@ impl Marker {
                 unsafe { crate::jump::for_each_lower(buffer, |lower| self.mark(object_for_lower(lower))) };
                 return;
             }
+            SPECIAL_PTR_TABLE => {
+                unsafe { tables::collect::scan_ptr_table(object, |target| self.mark(target)) };
+                return;
+            }
+            SPECIAL_EXACT_PTR_TABLE => {
+                if !unsafe { tables::collect::scan_exact_table(object, |target| self.mark(target)) } {
+                    self.weak_tables.push(object);
+                }
+                return;
+            }
+            SPECIAL_WEAK => {
+                self.weaks.push(object);
+                return;
+            }
+            SPECIAL_WEAK_MAP => {
+                // Its values get marked once it's known which keys are live.
+                self.weak_maps.push(object);
+                return;
+            }
+            SPECIAL_FINALIZER_QUEUE => {
+                unsafe { tables::collect::scan_finalizer_queue(object, |target| self.mark(target)) };
+                return;
+            }
             special => internal_panic(format_args!("the collector can't scan special objects of type {special}")),
         }
         let aux = this.aux_ptr();
@@ -654,6 +681,94 @@ impl Marker {
             unsafe { self.scan(object) };
         }
     }
+
+    /// Drains, and marks the values of weak maps whose keys turned out to be
+    /// live, until that finds nothing more.
+    unsafe fn drain_with_ephemerons(&mut self) {
+        loop {
+            unsafe { self.drain() };
+            let mut marked = false;
+            let mut index = 0;
+            while index < self.weak_maps.len() {
+                let map = self.weak_maps[index];
+                marked |= unsafe {
+                    tables::collect::mark_weak_map_values(map, |target| {
+                        let new = (*target).flags() & FLAG_GLOBAL == 0 && !is_marked(target);
+                        self.mark(target);
+                        new
+                    })
+                };
+                index += 1;
+            }
+            if !marked && self.stack.is_empty() {
+                return;
+            }
+        }
+    }
+
+    /// Clears what weak references, weak maps and weak tables hold that
+    /// marking didn't reach.
+    unsafe fn census(&mut self) {
+        unsafe {
+            for &weak in &self.weaks {
+                tables::collect::census_weak(weak);
+            }
+            for &map in &self.weak_maps {
+                tables::collect::census_weak_map(map);
+            }
+            for &table in &self.weak_tables {
+                tables::collect::census_exact_table(table);
+            }
+        }
+    }
+
+    /// Marks finalizable objects that nothing reached, and queues them for
+    /// their finalizers, if their queues are still around. Weak references to
+    /// them are already gone. Whatever this marks gets a census too, as a weak
+    /// map only reachable from one of them hasn't had one.
+    unsafe fn revive(&mut self) {
+        let mut finalizable = FINALIZABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let revived: Vec<bool> = finalizable
+            .iter()
+            .map(|&(object, _)| {
+                let object = object as *mut Object;
+                let dead = !is_marked(object);
+                if dead {
+                    unsafe { self.mark(object) };
+                }
+                dead
+            })
+            .collect();
+        unsafe {
+            self.drain_with_ephemerons();
+            self.census();
+        }
+        let mut index = 0;
+        finalizable.retain(|&(object, queue)| {
+            let (object, queue) = (object as *mut Object, queue as *mut Object);
+            let was_revived = revived[index];
+            index += 1;
+            let queue_lives = is_marked(queue);
+            if was_revived && queue_lives {
+                unsafe { tables::collect::enqueue(queue, object) };
+            }
+            // Live with its queue gone, it's just an object now.
+            !was_revived && queue_lives
+        });
+    }
+}
+
+/// Objects allocated with a finalizer queue, and the queue, until they're
+/// queued. Entered threads are the only ones who add to this.
+static FINALIZABLE: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+pub unsafe fn add_finalizable(object: *mut Object, queue: *mut Object) {
+    FINALIZABLE.lock().unwrap_or_else(|e| e.into_inner()).push((object as usize, queue as usize));
+}
+
+/// Whether this collection has marked `object`, which is in the heap.
+pub fn is_marked(object: *mut Object) -> bool {
+    heap().is_marked(heap().block_of(object as usize).0)
 }
 
 /// Objects that need something done when they go. Blocks have no record of the
@@ -672,10 +787,16 @@ pub unsafe fn add_destructible(object: *mut Object) {
 unsafe fn destruct() {
     DESTRUCTIBLE.lock().unwrap_or_else(|e| e.into_inner()).retain(|&object| {
         let object = object as *mut Object;
-        if heap().is_marked(heap().block_of(object as usize).0) {
+        if is_marked(object) {
             return true;
         }
-        unsafe { maps::destruct(object) };
+        unsafe {
+            if (*object).flags() & FLAG_MMAP != 0 {
+                maps::destruct(object);
+            } else {
+                tables::destruct(object);
+            }
+        }
         false
     });
 }
@@ -690,7 +811,19 @@ unsafe fn verify_object(object: *mut Object, block: usize, size: usize) {
     let good = (object as usize) >= block
         && upper >= lower
         && upper <= block + size
-        && matches!(this.special_type(), 0 | SPECIAL_FUNCTION | SPECIAL_THREAD | SPECIAL_DL_HANDLE | SPECIAL_JMP_BUF | SPECIAL_SIGNAL_HANDLER)
+        && matches!(
+            this.special_type(),
+            0 | SPECIAL_FUNCTION
+                | SPECIAL_THREAD
+                | SPECIAL_DL_HANDLE
+                | SPECIAL_JMP_BUF
+                | SPECIAL_SIGNAL_HANDLER
+                | SPECIAL_PTR_TABLE
+                | SPECIAL_EXACT_PTR_TABLE
+                | SPECIAL_WEAK
+                | SPECIAL_WEAK_MAP
+                | SPECIAL_FINALIZER_QUEUE
+        )
         && (aux == 0 || heap().contains(aux) || this.special_type() != 0);
     if !good {
         internal_panic(format_args!(
@@ -708,7 +841,14 @@ fn run() {
         }
     }
     let stressed = is_stressed();
-    let mut marker = Marker { stack: Vec::new(), tombstoned: 0, verify: stressed };
+    let mut marker = Marker {
+        stack: Vec::new(),
+        tombstoned: 0,
+        verify: stressed,
+        weaks: Vec::new(),
+        weak_maps: Vec::new(),
+        weak_tables: Vec::new(),
+    };
     unsafe {
         globals::for_each_root(|object| marker.root(object));
         shim::for_each_root(|object| marker.mark(object));
@@ -717,7 +857,9 @@ fn run() {
         for &entry in &threads.0 {
             marker.mark_thread(thread_at(entry));
         }
-        marker.drain();
+        marker.drain_with_ephemerons();
+        marker.census();
+        marker.revive();
         destruct();
     }
     let (reclaimed, live) = heap().sweep(stressed);

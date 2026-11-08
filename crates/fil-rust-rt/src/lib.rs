@@ -17,6 +17,7 @@
 
 pub mod abi;
 mod calls;
+mod tables;
 mod cc;
 pub mod failure;
 pub mod gc;
@@ -110,6 +111,7 @@ unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), Strin
         implemented.extend(net::table());
         implemented.extend(calls::table());
         implemented.extend(process::table());
+        implemented.extend(tables::table());
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;

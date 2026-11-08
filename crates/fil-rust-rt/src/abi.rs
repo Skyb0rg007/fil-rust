@@ -30,6 +30,11 @@ pub const SPECIAL_THREAD: usize = 2;
 pub const SPECIAL_SIGNAL_HANDLER: usize = 3;
 pub const SPECIAL_DL_HANDLE: usize = 6;
 pub const SPECIAL_JMP_BUF: usize = 7;
+pub const SPECIAL_PTR_TABLE: usize = 4;
+pub const SPECIAL_EXACT_PTR_TABLE: usize = 8;
+pub const SPECIAL_WEAK: usize = 9;
+pub const SPECIAL_WEAK_MAP: usize = 10;
+pub const SPECIAL_FINALIZER_QUEUE: usize = 11;
 
 /// Marks an aux word that holds a box pointer rather than a `lower`.
 pub const ATOMIC_BOX_BIT: usize = 1;

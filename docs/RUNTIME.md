@@ -247,8 +247,8 @@ compiled global function objects: marking them can't change what a test sees. So
   Rust's hands keeps a tombstone in place. Heap references are redirected.
 
 Not done here: census, revive and destruct. Threads turned out not to need them, since a thread
-record is an ordinary block with no destructor (see M4), so they come with their first user in M5,
-along with the signal table's roots.
+record is an ordinary block with no destructor (see M4), so they came with their first users in M5:
+mappings, and the tables and weak references in `tables.rs`.
 
 **M4. Libc mode on musl x86-64, with threads**: done.
 - ELF import scan, `Auto` upgrade, ctor gate, boot, errno and dlerror handlers.
@@ -275,7 +275,7 @@ tests pass too. Under `FIL_RUST_GC_STRESS`, the libc suites stay green. Some fin
   need it find its symbols in the global scope. `Library::getter` falls back to the handle kept by
   the runtime, since `dlsym` on a handle only looks at that library and what it depends on.
 
-Out until M5, failing by name when called: `epoll`, which needs the pointer tables.
+Out until M5, failing by name when called: `epoll`, which needs the exact pointer tables.
 `tests/boot.rs` checks each backend for what it should map. `abi_audit` passes on both: its
 `cmsghdr` padding case is why sends copy control data and clean it the way musl's `sendmsg` does. Sockets, the
 `mmap` family, `fork`, `execve`, `wait*`, timers, SysV IPC, `mount` and `prctl` landed in M5. A few
@@ -323,6 +323,13 @@ Done so far: `jump.rs` has `setjmp`, `eh.rs` exceptions and `signal.rs` signals,
 - `:8866` and a third bug, a signal queued across `sigaction`, are real, and both are in
   `docs/upstream-filc-issues.md`. `:1811` is only reachable from a thread that isn't Fil-C's, which
   a pure Fil-C process doesn't have. Here it's why such signals are forwarded, so it isn't reported.
+- `tables.rs` has pointer tables, exact pointer tables, weak references, weak maps and finalizer
+  queues, tested by `tests/tables.rs`. Weak maps are ephemerons: marking repeats until no live key
+  adds a value. After the census, finalizable objects nothing reached are marked and queued, and
+  what that marks gets a second census. FUGC skips that, so a weak map or weak reference only a
+  finalizable object reaches hands back what was collected: issue 6 in
+  `docs/upstream-filc-issues.md`, and the one table test skipped on libpizlo. Next is `epoll`, whose
+  user data sits in an exact pointer table.
 
 **M6. glibc flavor and aarch64**
 - The larger `zsys_*` set, per-flavor struct layouts for Rust natives (musl layouts on a glibc

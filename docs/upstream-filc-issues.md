@@ -149,3 +149,56 @@ filc safety error: unrecognized quotactl command -2147481856.
 Run through `zsys_quotactl` on 0.687. The libc's `quotactl` goes through the
 stub from issue 4, so nothing gets this far without calling the native by hand.
 The fix is to shift it as `unsigned`.
+
+## 6. Weak references and weak maps reached only through a finalizable object outlive what they point at
+
+FUGC censuses weak objects (`zweak`, `zweak_map`, weak exact pointer tables)
+once, in `census_and_start_reviving` (`fugc.c:1028`), iterating
+`fugc_census_set` with `verse_heap_iterate_marked`. Reviving then marks
+finalizable objects nothing reached, and remarking marks what they reach, but
+`recensus_object_callback` (`fugc.c:551`) only calls
+`filc_finalizable_object_census`. A weak map or weak reference that was first
+marked during remarking, because only a revived object reaches it, never gets
+a census that cycle. Its dead keys and targets are swept anyway.
+
+`filc_weak_map_snapshot` (`filc_runtime.c:3657`, behind `zweak_map_get_iter`)
+then copies such a key into the snapshot with a capability that still looks
+valid, since `filc_weak_load_barrier` only filters while marking. `zweak_get`
+does the same for a weak reference. Both are reached with correct code:
+
+```c
+struct holder { zweak_map* map; zweak* weak; };
+
+static __attribute__((noinline)) void hold_lost_things(zgc_finq* queue)
+{
+    struct holder* holder = zgc_finq_alloc(queue, sizeof(struct holder));
+    holder->map = zweak_map_new();
+    zweak_map_set(holder->map, strdup("key"), strdup("value"));
+    holder->weak = zweak_new(strdup("lost"));
+}
+
+zgc_finq* queue = zgc_finq_new();
+hold_lost_things(queue);
+zgc_request_and_wait();
+struct holder* holder = zgc_finq_poll(queue);
+/* Expected: the map is empty and the weak reference is null. */
+zweak_map_iter* iter = zweak_map_get_iter(holder->map);
+zweak_map_iter_next(iter);        /* returns true */
+zweak_get(holder->weak);          /* returns the collected string */
+```
+
+This is a memory-safety hole, not just a stale entry. After filling the heap
+with fresh allocations, the key the iterator handed back reads as another
+object's bytes, and writing through it hits whatever now owns the memory:
+
+```
+PROBE key=0x7425a311d2a0 valid=1 value=0x7425a311d2d0
+PROBE key contents=��%t value contents=���%t
+filc safety error: cannot write to read-only object.
+```
+
+Seen every run on 0.687 musl, through fil-rust's `tables` test
+(`weak_things_reached_by_finalizable_objects`, skipped on libpizlo). The fix is
+to census, after remarking, every census-set object that remarking newly
+marked, the way fil-rust's runtime runs a second census after reviving. A census
+is idempotent, so redoing all of them is also correct, just slower.
