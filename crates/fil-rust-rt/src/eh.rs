@@ -372,4 +372,82 @@ natives! {
             Thrown::Exception
         }
     }
+
+    fn zstack_scan(thread: *mut Thread, callback: Ptr, argument: Ptr) -> () {
+        unsafe { stack_scan(thread, callback, argument) };
+    }
+}
+
+/// `struct zstack_frame_description`. The pointers are words in memory, their
+/// capabilities in the aux.
+#[repr(C)]
+struct FrameDescription {
+    function_name: usize,
+    filename: usize,
+    line: u32,
+    column: u32,
+    can_throw: bool,
+    can_catch: bool,
+    is_inline: bool,
+    personality_function: usize,
+    eh_data: usize,
+}
+
+const _: () = assert!(size_of::<FrameDescription>() == 48 && std::mem::offset_of!(FrameDescription, personality_function) == 32);
+
+/// Calls `callback` with a description of each frame from the caller out, an
+/// inlined call being a frame of its own, until it returns false. Natives have
+/// no frame, so the first is the caller's.
+unsafe fn stack_scan(thread: *mut Thread, callback: Ptr, argument: Ptr) {
+    let mut frame = unsafe { (*thread).top_frame };
+    while !frame.is_null() {
+        let outer = unsafe { (*frame).origin };
+        let mut origin = outer;
+        while !origin.is_null() {
+            let node = unsafe { (*origin).origin_node };
+            let is_inline = unsafe { (*node).num_lowers_ish } == u32::MAX;
+            let description = unsafe { describe_frame(thread, frame, origin, is_inline) };
+            let mut result = [Ptr::NULL];
+            unsafe { crate::call(thread, callback, &[description, argument], &mut result) };
+            if result[0].ptr as usize as u8 == 0 {
+                return;
+            }
+            origin = if is_inline { unsafe { &raw const (*node.cast::<InlineFrame>()).caller } } else { std::ptr::null() };
+        }
+        frame = unsafe { (*frame).parent };
+    }
+}
+
+/// A new, tracked description of the part of `frame` that `origin` is in.
+unsafe fn describe_frame(thread: *mut Thread, frame: *mut Frame, origin: *const Origin, is_inline: bool) -> Ptr {
+    unsafe {
+        let node = (*origin).origin_node;
+        let object = object::allocate(thread, size_of::<FrameDescription>(), 0);
+        track(thread, object);
+        let description = Ptr::for_object(object);
+        let fields = description.ptr.cast::<FrameDescription>();
+        let field = |place: *mut usize| description.with_ptr(place.cast());
+        let text = |name: *const std::ffi::c_char| if name.is_null() { &b""[..] } else { std::ffi::CStr::from_ptr(name).to_bytes() };
+        let function_name = crate::start::c_string(thread, text((*node).function));
+        ptrs::store(thread, field(&raw mut (*fields).function_name), function_name);
+        let filename = crate::start::c_string(thread, text((*node).filename));
+        ptrs::store(thread, field(&raw mut (*fields).filename), filename);
+        (*fields).line = (*origin).line;
+        (*fields).column = (*origin).column;
+        (*fields).is_inline = is_inline;
+        if !is_inline {
+            let function = &*node.cast::<FunctionOrigin>();
+            (*fields).can_throw = function.can_throw;
+            (*fields).can_catch = function.can_catch;
+            if let Some(getter) = personality_getter(function) {
+                let personality = getter(thread, null_mut());
+                track(thread, personality.object());
+                ptrs::store(thread, field(&raw mut (*fields).personality_function), personality);
+                let data = eh_data(thread, frame);
+                track(thread, data.object());
+                ptrs::store(thread, field(&raw mut (*fields).eh_data), data);
+            }
+        }
+        description
+    }
 }

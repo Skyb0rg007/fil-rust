@@ -26,6 +26,7 @@ fil_rust::foreign! {
         fn guarded_call(f: fn(i32) -> i32, x: i32) -> i32;
         fn call_on_thread(f: fn(i32) -> i32, x: i32) -> i32;
         fn collect_while_unwinding(collect: fn()) -> i32;
+        fn scan_a_catching_frame(x: i32) -> i32;
     }
 }
 
@@ -213,4 +214,10 @@ fn an_exception_outlives_collections_on_its_way_up() {
         let collect = fil.callback::<fn(), _>(|fil, ()| fil.collect_garbage().unwrap()).unwrap();
         assert_eq!(cxx.collect_while_unwinding(fil, collect.get(fil)).unwrap(), 1);
     });
+}
+
+#[test]
+fn stack_scans_see_what_catches() {
+    let cxx = cxx();
+    runtime().run(|fil| assert_eq!(cxx.scan_a_catching_frame(fil, 1).unwrap(), 1));
 }

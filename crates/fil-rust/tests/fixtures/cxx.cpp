@@ -1,6 +1,8 @@
 // Test fixture: C++ behind a C ABI, including exceptions.
 
 #include <algorithm>
+#include <cstring>
+#include <stdfil.h>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -133,4 +135,29 @@ extern "C" int collect_while_unwinding(void (*collect)()) {
         return std::string(error.what()) == "kept";
     }
     return -1;
+}
+
+static bool find_catcher(const zstack_frame_description* description, void* arg) {
+    if (strcmp(description->function_name, "scan_a_catching_frame"))
+        return true;
+    *static_cast<int*>(arg) =
+        description->can_catch && description->personality_function && description->eh_data ? 1 : 2;
+    return false;
+}
+
+static __attribute__((noinline)) void maybe_throw(int x) {
+    if (x < 0)
+        throw std::runtime_error("negative");
+}
+
+// A frame that catches tells zstack_scan its personality and its data.
+extern "C" int scan_a_catching_frame(int x) {
+    int found = 0;
+    try {
+        maybe_throw(x);
+        zstack_scan(find_catcher, &found);
+    } catch (const std::exception&) {
+        return -1;
+    }
+    return found;
 }

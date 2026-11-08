@@ -86,6 +86,57 @@ int requesting_collections(void)
     return 0;
 }
 
+struct scan {
+    int count;
+    const char* names[4];
+    bool inline_flags[4];
+    bool any_personality;
+    unsigned first_line;
+    const char* first_file;
+};
+
+static bool record(const zstack_frame_description* description, void* arg)
+{
+    struct scan* scan = arg;
+    if (scan->count < 4) {
+        scan->names[scan->count] = description->function_name;
+        scan->inline_flags[scan->count] = description->is_inline;
+    }
+    if (!scan->count) {
+        scan->first_line = description->line;
+        scan->first_file = description->filename;
+    }
+    if (description->personality_function || description->eh_data)
+        scan->any_personality = true;
+    scan->count++;
+    return strcmp(description->function_name, "stack_scanning") != 0;
+}
+
+static inline __attribute__((always_inline)) void scan_inlined(struct scan* scan)
+{
+    zstack_scan(record, scan);
+}
+
+static __attribute__((noinline)) void scan_from_here(struct scan* scan)
+{
+    scan_inlined(scan);
+}
+
+/* From the caller out, an inlined call being a frame of its own, until the
+   callback says to stop. */
+int stack_scanning(void)
+{
+    struct scan scan = { 0 };
+    scan_from_here(&scan);
+    CHECK(scan.count == 3);
+    CHECK(!strcmp(scan.names[0], "scan_inlined") && scan.inline_flags[0]);
+    CHECK(!strcmp(scan.names[1], "scan_from_here") && !scan.inline_flags[1]);
+    CHECK(!strcmp(scan.names[2], "stack_scanning") && !scan.inline_flags[2]);
+    CHECK(scan.first_line > 0 && strstr(scan.first_file, "stdfil.c"));
+    CHECK(!scan.any_personality);
+    return 0;
+}
+
 int printing(void)
 {
     zprint_long(12345);

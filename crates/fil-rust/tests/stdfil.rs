@@ -41,6 +41,11 @@ fn requesting_collections() {
 }
 
 #[test]
+fn stack_scanning() {
+    check("stack_scanning");
+}
+
+#[test]
 #[ignore = "run by the other test, in a process of its own"]
 fn printing_alone() {
     check("printing");

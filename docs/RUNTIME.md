@@ -338,6 +338,9 @@ Done so far: `jump.rs` has `setjmp`, `eh.rs` exceptions and `signal.rs` signals,
   its string, since the process title is the host's. `zdump_heap` and `zdump_pas_status` print
   `HeapStats`, not every object; `zdump_stacks` stops the world to read every thread's frames.
   Pointer descriptions (`zptr_to_new_string`) match libpizlo's byte for byte.
+- `zstack_scan`, in `eh.rs`, starts at the caller's frame, as natives push none, and describes an
+  inlined call as a frame of its own. Tested from C in `tests/stdfil.rs` and, for a frame that
+  catches, from C++ in `tests/cxx.rs`.
 
 **M6. glibc flavor and aarch64**
 - The larger `zsys_*` set, per-flavor struct layouts for Rust natives (musl layouts on a glibc
