@@ -45,6 +45,11 @@ fn pipes_and_waiting() {
 }
 
 #[test]
+fn epoll() {
+    check("epoll_events");
+}
+
+#[test]
 fn the_state_of_the_process() {
     check("process_state");
 }

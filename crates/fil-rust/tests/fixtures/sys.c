@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <stdfil.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/random.h>
 #include <sys/resource.h>
@@ -128,6 +131,55 @@ int streams(void)
 
     CHECK(close(ends[0]) == 0);
     CHECK(close(ends[1]) == 0);
+    return 0;
+}
+
+/* A pointer in an event's data comes back as the same pointer, through a
+   collection, and integers come back as they went. */
+int epoll_events(void)
+{
+    int ends[2];
+    CHECK(pipe(ends) == 0);
+    int other[2];
+    CHECK(pipe(other) == 0);
+    int epoll = epoll_create1(EPOLL_CLOEXEC);
+    CHECK(epoll >= 0);
+
+    char* named = strdup("named by the event");
+    struct epoll_event event = { .events = EPOLLIN, .data.ptr = named };
+    CHECK(epoll_ctl(epoll, EPOLL_CTL_ADD, ends[0], &event) == 0);
+    event = (struct epoll_event){ .events = EPOLLIN, .data.u64 = 0x1234567890abcdefull };
+    CHECK(epoll_ctl(epoll, EPOLL_CTL_ADD, other[0], &event) == 0);
+
+    struct epoll_event got[4];
+    CHECK(epoll_wait(epoll, got, 4, 0) == 0);
+    CHECK(epoll_wait(epoll, got, 0, 0) == -1 && errno == EINVAL);
+
+    CHECK(write(ends[1], "x", 1) == 1);
+    zgc_request_and_wait();
+    memset(got, 0, sizeof(got));
+    CHECK(epoll_wait(epoll, got, 4, 1000) == 1);
+    CHECK(got[0].events == EPOLLIN && got[0].data.ptr == named);
+    CHECK(!strcmp(got[0].data.ptr, "named by the event"));
+
+    CHECK(write(other[1], "y", 1) == 1);
+    CHECK(epoll_ctl(epoll, EPOLL_CTL_DEL, ends[0], NULL) == 0);
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR1);
+    memset(got, 0, sizeof(got));
+    CHECK(epoll_pwait(epoll, got, 4, 1000, &mask) == 1);
+    CHECK(got[0].events == EPOLLIN && got[0].data.u64 == 0x1234567890abcdefull);
+
+    event = (struct epoll_event){ .events = EPOLLOUT, .data.u64 = 7 };
+    CHECK(epoll_ctl(epoll, EPOLL_CTL_MOD, other[0], &event) == 0);
+    CHECK(epoll_wait(epoll, got, 4, 0) == 0);
+    CHECK(epoll_ctl(epoll, EPOLL_CTL_ADD, other[0], &event) == -1 && errno == EEXIST);
+
+    free(named);
+    CHECK(close(epoll) == 0);
+    for (int i = 0; i < 2; i++)
+        CHECK(close(ends[i]) == 0 && close(other[i]) == 0);
     return 0;
 }
 

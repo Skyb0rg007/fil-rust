@@ -139,6 +139,33 @@ fn fd_set_size(count: c_int) -> usize {
     (count as usize).div_ceil(8)
 }
 
+/// Fil-C's `struct epoll_event`. The kernel's is packed on x86-64, so its data
+/// sits at 4; this one's is at 8. A pointer in the data has already gone
+/// through the support library's exact pointer table, so it's an integer here.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserEpollEvent {
+    events: u32,
+    data: u64,
+}
+
+/// Waits for up to `count` events into a buffer of the kernel's, then copies
+/// the ones it gets into the program's. The whole of the program's buffer is
+/// checked first, as the kernel could fill all of it.
+unsafe fn epoll_waited(thread: *mut Thread, events: Ptr, count: c_int, wait: impl FnOnce(*mut libc::epoll_event) -> c_int) -> c_int {
+    if count <= 0 {
+        // The kernel turns these down without touching the buffer.
+        return unsafe { sys(thread, || wait(null_mut())) };
+    }
+    let user = output::<UserEpollEvent>(events, array_size(size_of::<UserEpollEvent>(), count as usize));
+    let mut host = vec![libc::epoll_event { events: 0, u64: 0 }; count as usize];
+    let result = unsafe { sys(thread, || wait(host.as_mut_ptr())) };
+    for (index, event) in host.iter().take(result.max(0) as usize).enumerate() {
+        unsafe { user.add(index).write_unaligned(UserEpollEvent { events: event.events, data: event.u64 }) };
+    }
+    result
+}
+
 /// Lets go of the signals that aren't the program's to touch.
 pub(crate) unsafe fn user_sigset(user: Ptr) -> libc::sigset_t {
     unsafe {
@@ -456,6 +483,21 @@ natives! {
         let timeout = maybe_in(timeout);
         let mask = (!mask.ptr.is_null()).then(|| unsafe { user_sigset(mask) });
         unsafe { sys(thread, || libc::ppoll(fds, count, timeout, mask.as_ref().map_or(null(), |mask| mask))) }
+    }
+    fn zsys_epoll_create1_impl(thread: *mut Thread, flags: c_int) -> c_int { unsafe { sys(thread, || libc::epoll_create1(flags)) } }
+    fn zsys_epoll_ctl_impl(thread: *mut Thread, epoll: c_int, operation: c_int, fd: c_int, event: Ptr) -> c_int {
+        let mut host = (!event.ptr.is_null()).then(|| unsafe {
+            let user = one_in::<UserEpollEvent>(event).read_unaligned();
+            libc::epoll_event { events: user.events, u64: user.data }
+        });
+        unsafe { sys(thread, || libc::epoll_ctl(epoll, operation, fd, host.as_mut().map_or(null_mut(), |host| host))) }
+    }
+    fn zsys_epoll_wait_impl(thread: *mut Thread, epoll: c_int, events: Ptr, count: c_int, timeout: c_int) -> c_int {
+        unsafe { epoll_waited(thread, events, count, |host| libc::epoll_wait(epoll, host, count, timeout)) }
+    }
+    fn zsys_epoll_pwait_impl(thread: *mut Thread, epoll: c_int, events: Ptr, count: c_int, timeout: c_int, mask: Ptr) -> c_int {
+        let mask = (!mask.ptr.is_null()).then(|| unsafe { user_sigset(mask) });
+        unsafe { epoll_waited(thread, events, count, |host| libc::epoll_pwait(epoll, host, count, timeout, mask.as_ref().map_or(null(), |mask| mask))) }
     }
     fn zsys_select(thread: *mut Thread, count: c_int, read: Ptr, write: Ptr, except: Ptr, timeout: Ptr) -> c_int {
         if count < 0 {

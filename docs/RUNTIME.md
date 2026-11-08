@@ -275,9 +275,8 @@ tests pass too. Under `FIL_RUST_GC_STRESS`, the libc suites stay green. Some fin
   need it find its symbols in the global scope. `Library::getter` falls back to the handle kept by
   the runtime, since `dlsym` on a handle only looks at that library and what it depends on.
 
-Out until M5, failing by name when called: `epoll`, which needs the exact pointer tables.
 `tests/boot.rs` checks each backend for what it should map. `abi_audit` passes on both: its
-`cmsghdr` padding case is why sends copy control data and clean it the way musl's `sendmsg` does. Sockets, the
+`cmsghdr` padding case is why sends copy control data and clean it the way musl's `sendmsg` does. Sockets, `epoll`, the
 `mmap` family, `fork`, `execve`, `wait*`, timers, SysV IPC, `mount` and `prctl` landed in M5. A few
 calls fail by name on both backends, since upstream's musl flavor panics on them too: `fanotify_*`,
 `getcpu`, `pkey_*`, `process_madvise`, `process_mrelease`, `epoll_pwait2` and `dlvsym`. They come
@@ -328,8 +327,10 @@ Done so far: `jump.rs` has `setjmp`, `eh.rs` exceptions and `signal.rs` signals,
   adds a value. After the census, finalizable objects nothing reached are marked and queued, and
   what that marks gets a second census. FUGC skips that, so a weak map or weak reference only a
   finalizable object reaches hands back what was collected: issue 6 in
-  `docs/upstream-filc-issues.md`, and the one table test skipped on libpizlo. Next is `epoll`, whose
-  user data sits in an exact pointer table.
+  `docs/upstream-filc-issues.md`, and the one table test skipped on libpizlo.
+- `epoll` needs only the four `_impl` natives. The support library's Fil-C wrappers keep a weak
+  exact pointer table per epoll descriptor and pass pointers in event data through it, so the
+  natives move integers between Fil-C's 16-byte event and the kernel's packed 12-byte one.
 
 **M6. glibc flavor and aarch64**
 - The larger `zsys_*` set, per-flavor struct layouts for Rust natives (musl layouts on a glibc
