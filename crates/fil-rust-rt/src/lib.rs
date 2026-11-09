@@ -42,6 +42,7 @@ pub mod shim;
 pub mod start;
 pub mod sys;
 pub mod thread;
+mod view;
 pub mod zthread;
 
 use std::ffi::{c_char, c_void};

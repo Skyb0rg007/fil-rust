@@ -186,6 +186,12 @@ pub unsafe fn aux_word<'a>(aux: *mut u8, offset: usize) -> &'a AtomicUsize {
     unsafe { &*aux.wrapping_add(offset).cast::<AtomicUsize>() }
 }
 
+/// Makes `object` read-only from now on, for whatever the runtime fills in
+/// before it hands the object out.
+pub unsafe fn make_readonly(object: *mut Object) {
+    unsafe { (*object).aux.fetch_or(FLAG_READONLY << AUX_FLAGS_SHIFT, Ordering::Release) };
+}
+
 /// Which way an access goes, for checks and for reporting them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Access {

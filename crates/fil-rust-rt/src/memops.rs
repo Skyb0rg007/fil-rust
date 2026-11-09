@@ -126,6 +126,16 @@ pub unsafe fn move_memory(thread: *mut Thread, dst: Ptr, src: Ptr, count: usize)
     unsafe { move_checked(thread, dst, src, count) };
 }
 
+/// Drops the capabilities of the pointers in the words `count` bytes at `ptr_`
+/// touch, after something wrote bytes there.
+pub unsafe fn forget_pointers(ptr_: Ptr, count: usize) {
+    let aux = unsafe { (*ptr_.object()).aux_ptr() };
+    if !aux.is_null() && count != 0 {
+        let offset = ptr_.offset();
+        unsafe { nuke_range(aux, round_down(offset), round_up(offset + count)) };
+    }
+}
+
 pub unsafe fn set_memory(ptr_: Ptr, value: u32, count: usize) {
     if count == 0 {
         return;

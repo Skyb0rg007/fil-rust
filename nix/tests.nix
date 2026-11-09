@@ -124,7 +124,8 @@ let
       env.FILC_FLAVOR = "glibc";
       run = ''
         cargo test --offline ${target} -p fil-rust --features glibc \
-          --test rt_bare --test rt_gc --test layout --test cpu --test libc_stand_ins
+          --test rt_bare --test rt_gc --test layout --test cpu --test libc_stand_ins \
+          --test tables --test libc_core
       '';
     };
   };

@@ -12,6 +12,10 @@ use crate::abi::*;
 use crate::object;
 use crate::thread;
 
+mod ctype;
+mod stdlib;
+mod string;
+
 /// What the libc keeps per thread. It lives in the thread's `ThreadExtra`,
 /// which the collector marks, never in a `thread_local!`: registering a
 /// thread-local's destructor takes the loader lock, which a constructor may
@@ -22,11 +26,13 @@ pub struct ThreadState {
     errno: Option<std::ptr::NonNull<Object>>,
     /// What `dlerror` returns next, or null.
     dlerror: Ptr,
+    /// Where `strtok` carries on from, or null.
+    pub(crate) strtok: Ptr,
 }
 
 impl Default for ThreadState {
     fn default() -> Self {
-        ThreadState { errno: None, dlerror: Ptr::NULL }
+        ThreadState { errno: None, dlerror: Ptr::NULL, strtok: Ptr::NULL }
     }
 }
 
@@ -37,6 +43,7 @@ impl ThreadState {
             visit(errno.as_ptr());
         }
         visit(self.dlerror.object());
+        visit(self.strtok.object());
     }
 }
 
@@ -60,6 +67,21 @@ pub unsafe fn set_dlerror(me: *mut Thread, message: &[u8]) {
     unsafe { thread::extra(me) }.libc.dlerror = copy;
 }
 
+/// Stub slots for every native here, keyed by symbol.
+pub fn table() -> Vec<(&'static str, *const ())> {
+    let mut table = errno::table();
+    table.extend(string::table());
+    table.extend(string::aliases());
+    table.extend(ctype::table());
+    table.extend(ctype::aliases());
+    table.extend(stdlib::table());
+    table.extend(stdlib::aliases());
+    table
+}
+
+mod errno {
+    use super::*;
+
 crate::natives::natives! {
     fn __errno_location(thread: *mut Thread) -> Ptr {
         Ptr::for_object(unsafe { errno_object(thread) })
@@ -68,4 +90,5 @@ crate::natives::natives! {
     fn dlerror(thread: *mut Thread) -> Ptr {
         std::mem::replace(&mut unsafe { thread::extra(thread) }.libc.dlerror, Ptr::NULL)
     }
+}
 }

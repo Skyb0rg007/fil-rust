@@ -88,6 +88,27 @@ macro_rules! integer_value {
 
 integer_value!(usize, u64, i64, c_int, u32);
 
+// Floating-point values take a word like integers do, in its low bytes.
+impl Value for f64 {
+    unsafe fn take(thread: *mut Thread, args: &mut Args) -> f64 {
+        f64::from_bits(unsafe { *cc::slot(thread, args.next()) })
+    }
+
+    unsafe fn give(self, thread: *mut Thread) -> usize {
+        unsafe { self.to_bits().give(thread) }
+    }
+}
+
+impl Value for f32 {
+    unsafe fn take(thread: *mut Thread, args: &mut Args) -> f32 {
+        f32::from_bits(unsafe { *cc::slot(thread, args.next()) } as u32)
+    }
+
+    unsafe fn give(self, thread: *mut Thread) -> usize {
+        unsafe { (self.to_bits() as u64).give(thread) }
+    }
+}
+
 impl Value for bool {
     unsafe fn take(thread: *mut Thread, args: &mut Args) -> bool {
         unsafe { *cc::slot(thread, args.next()) as u8 != 0 }
@@ -291,7 +312,7 @@ pub unsafe fn string_of(ptr_: Ptr) -> Vec<u8> {
     }
 }
 
-unsafe fn realloc(thread: *mut Thread, old: Ptr, size: usize, alignment: usize) -> Ptr {
+pub(crate) unsafe fn realloc(thread: *mut Thread, old: Ptr, size: usize, alignment: usize) -> Ptr {
     if old.ptr.is_null() {
         return Ptr::for_object(unsafe { object::allocate_aligned(thread, size, alignment, 0) });
     }

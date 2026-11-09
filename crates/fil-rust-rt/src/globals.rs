@@ -239,6 +239,12 @@ pub unsafe fn execute_relocations(
     }
 }
 
+/// Keeps `object` alive for good: it's the runtime's own, handed out to every
+/// caller, like a libc's static data.
+pub fn keep(object: *mut Object) {
+    ROOTS.lock().unwrap_or_else(|e| e.into_inner()).push(object as usize);
+}
+
 /// Calls `visit` on every object global state refers to.
 pub unsafe fn for_each_root(mut visit: impl FnMut(*mut Object)) {
     let roots = ROOTS.lock().unwrap_or_else(|e| e.into_inner());

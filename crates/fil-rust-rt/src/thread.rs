@@ -115,6 +115,22 @@ pub fn lock_threads() -> MutexGuard<'static, ThreadList> {
     THREADS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Takes `mutex` from an entered thread. If it has to wait, it waits exited,
+/// so a collection can go on meanwhile; so whoever holds the lock may allocate
+/// or reach a safepoint, since nobody waiting for it holds a collection up.
+pub unsafe fn lock_entered<'a, T>(me: *mut Thread, mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
+    match mutex.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            unsafe { exit(me) };
+            let guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+            unsafe { enter(me) };
+            guard
+        }
+    }
+}
+
 static LIFECYCLE: Mutex<()> = Mutex::new(());
 
 /// Keeps a thread from finishing, for whoever is about to signal it. Blocks, so
