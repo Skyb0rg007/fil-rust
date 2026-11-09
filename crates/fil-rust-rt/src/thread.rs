@@ -34,6 +34,8 @@ pub struct ThreadExtra {
     pub unwinding: crate::eh::Unwinding,
     /// Signals on their way to this thread's next safepoint.
     pub signals: crate::signal::Queue,
+    /// What the glibc flavor's libc keeps per thread.
+    pub libc: crate::glibc::ThreadState,
 }
 
 /// Roots for what a stretch of native code allocates or loads.
@@ -234,6 +236,7 @@ fn attach() -> *mut Thread {
             escape: 0,
             unwinding: Default::default(),
             signals: Default::default(),
+            libc: Default::default(),
         }));
         this.stack_limit = (low + STACK_SLACK) as *mut u8;
         this.stack_low = low as *mut u8;

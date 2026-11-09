@@ -38,10 +38,11 @@ fn run_child(case: &str) -> std::process::Output {
     common::without_core_dumps(&mut command).output().unwrap()
 }
 
-/// Lines of the memory map that came from a file of the Fil-C distribution.
+/// Lines of the memory map that came from a file of the Fil-C distribution:
+/// its runtime, its libc, anything.
 fn distribution_mappings() -> Vec<String> {
     let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
-    let root = std::env::var("FILC_ROOT").unwrap();
+    let root = config().root().to_str().unwrap().to_string();
     maps.lines().filter(|line| line.contains(&root)).map(str::to_string).collect()
 }
 
@@ -245,6 +246,7 @@ fn the_runtime_library_answers_without_a_libc() {
         fil.collect_garbage().unwrap();
         fil.flush().unwrap();
     });
-    rt.run(|fil| assert!(!fil.libc().has_symbol("strlen")));
+    // musl's stand-in is only a soname; glibc's has a slot for everything.
+    rt.run(|fil| assert_eq!(fil.libc().has_symbol("strlen"), flavor() == fil_rust::Flavor::Glibc));
 }
 

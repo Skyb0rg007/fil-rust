@@ -181,6 +181,60 @@ pub fn function_object(cell: &AtomicPtr<FunctionObject>, entry: PizlonatedFn) ->
     Ptr { ptr: function, lower: function }
 }
 
+/// The function object a getter hands back for a function nothing implements:
+/// taking its address is fine, calling it fails with its name.
+#[repr(C)]
+struct MissingFunction {
+    object: FunctionObject,
+    /// The symbol, as the stub has it.
+    name: *const std::ffi::c_char,
+}
+
+/// Where a missing function's name is, from the function itself, which is what
+/// its entry point gets as `lower`.
+const MISSING_NAME_OFFSET: usize =
+    std::mem::offset_of!(MissingFunction, name) - std::mem::offset_of!(MissingFunction, object.function);
+
+unsafe extern "C" fn missing_entry(_: *mut Thread, function: *mut u8, _: usize) -> ReturnValue {
+    let name = unsafe { *function.add(MISSING_NAME_OFFSET).cast::<*const std::ffi::c_char>() };
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
+    crate::failure::missing(name.strip_prefix("pizlonated_").unwrap_or(&name));
+}
+
+/// The function object for `name`, a symbol the stub has no implementation
+/// for: one per symbol, made the first time it's asked for. They never go
+/// away.
+pub fn missing_function(name: *const std::ffi::c_char) -> Ptr {
+    static MADE: std::sync::Mutex<Option<std::collections::HashMap<usize, usize>>> = std::sync::Mutex::new(None);
+    let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    let made = made.get_or_insert_with(Default::default);
+    let function = match made.get(&(name as usize)) {
+        Some(&function) => function as *mut u8,
+        None => {
+            let object = Box::into_raw(Box::new(MissingFunction {
+                object: FunctionObject {
+                    object: Object { upper: AtomicPtr::new(null_mut()), aux: AtomicUsize::new(0) },
+                    function: Function {
+                        fast_entrypoint: missing_entry as *const (),
+                        generic_entrypoint: missing_entry,
+                        signature: GENERIC_SIGNATURE,
+                    },
+                },
+                name,
+            }));
+            let function = unsafe { (&raw mut (*object).object.function).cast::<u8>() };
+            unsafe {
+                (*object).object.object.upper.store(function, Ordering::Relaxed);
+                let flags = FLAG_GLOBAL | FLAG_READONLY | object_flags(SPECIAL_FUNCTION, 0);
+                (*object).object.object.aux.store(aux_create(flags, function), Ordering::Relaxed);
+            }
+            made.insert(name as usize, function as usize);
+            function
+        }
+    };
+    Ptr { ptr: function, lower: function }
+}
+
 macro_rules! natives {
     ($(fn $name:ident($thread:ident: *mut Thread $(, $arg:ident: $ty:ty)* $(,)?) -> $ret:ty $body:block)*) => {
         $(

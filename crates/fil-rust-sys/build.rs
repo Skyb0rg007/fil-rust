@@ -4,9 +4,14 @@
 //!   (`libyoloc.so` for musl; `libyolocimpl.so`, `libyolomimpl.so` and
 //!   `ld-fil1-x86_64.so` for glibc) on top of the host glibc, and
 //! * the **runtime stub**, a `libpizlo.so` of jump slots that the Rust runtime
-//!   fills in, generated from `abi/runtime_symbols_*.txt`, and
-//! * **name-only** libraries with the sonames of the Fil-C libc, for running
-//!   libraries that link against it but import nothing from it.
+//!   fills in, generated from `abi/runtime_symbols_*.txt`,
+//! * stand-ins for the **Fil-C libc**: for glibc, one per soname, with a jump
+//!   slot under every symbol and version the real one has, which the Rust
+//!   runtime fills in; for musl, a library with the soname and nothing else,
+//!   for libraries that link against the libc but import nothing from it, and
+//! * the **support** library, the Fil-C-compiled part of the runtime: for
+//!   musl, linked from the distribution's `libpizlo.a`; for glibc, compiled
+//!   from the vendored `csrc/filc`.
 //!
 //! Inputs come from environment variables that `shell.nix` sets.
 
@@ -183,6 +188,150 @@ fn build_stub(cc: &str, arch: &str, list: &Path, out_dir: &Path, stem: &str) {
     run(&mut cmd);
 }
 
+/// One export of a glibc-flavor libc soname: a getter, under every version the
+/// distribution's library has it.
+struct Export<'a> {
+    name: &'a str,
+    /// A variable's getter, which fails as it runs if there's nothing behind
+    /// it; a function's hands back a function that fails when it's called.
+    data: bool,
+    /// Each version, and whether it's the default one (`@@`).
+    versions: Vec<(&'a str, bool)>,
+}
+
+/// Writes the assembly and version script for one libc stand-in, from its
+/// `abi/glibc_<soname>.txt`.
+///
+/// Every export is one jump through `fr_stub_table`, as in the runtime stub,
+/// under global aliases that `.symver` gives each version, since a library
+/// asks for a symbol at a version and the loader won't bind it otherwise. The
+/// version script has every node of the real library, in order, and lists the
+/// default names under theirs. It makes only the aliases local: a plain
+/// `local: *` would hide the non-default versions too.
+fn stand_in_sources(list: &str) -> (String, String) {
+    use std::fmt::Write;
+
+    let mut nodes: Vec<&str> = Vec::new();
+    let mut exports: Vec<Export<'_>> = Vec::new();
+    for line in list.lines() {
+        let (kind, rest) = line.split_once(' ').expect("`<kind> <rest>` lines");
+        if kind == "V" {
+            nodes.push(rest);
+            continue;
+        }
+        let (name, default, version) = match rest.split_once("@@") {
+            Some((name, version)) => (name, true, version),
+            None => {
+                let (name, version) = rest.split_once('@').expect("`name@version`");
+                (name, false, version)
+            }
+        };
+        let data = match kind {
+            "F" => false,
+            "D" => true,
+            _ => panic!("fil-rust-sys: unknown kind {kind} in a libc symbol list"),
+        };
+        match exports.last_mut() {
+            Some(last) if last.name == name => last.versions.push((version, default)),
+            _ => exports.push(Export { name, data, versions: vec![(version, default)] }),
+        }
+    }
+
+    let mut s = String::new();
+    let w = &mut s;
+    writeln!(w, "\t.section .note.GNU-stack,\"\",@progbits\n\t.text").unwrap();
+    let mut defaults: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for (index, export) in exports.iter().enumerate() {
+        writeln!(w, "\t.globl fr_i{index}\n\t.type fr_i{index},@function\n\t.p2align 4").unwrap();
+        writeln!(w, "fr_i{index}:\n\tjmpq *.Ltable+{}(%rip)\n\t.size fr_i{index}, .-fr_i{index}", index * 8).unwrap();
+        for &(version, default) in &export.versions {
+            let alias = if default {
+                defaults.entry(version).or_default().push(export.name);
+                format!("fr_d{index}")
+            } else {
+                format!("fr_v{index}_{}", version.replace('.', "_"))
+            };
+            let at = if default { "@@" } else { "@" };
+            writeln!(w, "\t.globl {alias}\n\t.set {alias}, fr_i{index}").unwrap();
+            writeln!(w, "\t.symver {alias}, {}{at}{version}", export.name).unwrap();
+        }
+        let slot = if export.data { ".Lmissing_data" } else { ".Lmissing_native" };
+        writeln!(w, ".Lmissing_{index}:\n\tleaq .Lname_{index}(%rip), %rdx\n\tjmpq *{slot}(%rip)").unwrap();
+    }
+    writeln!(w, "\t.section .rodata").unwrap();
+    for (index, export) in exports.iter().enumerate() {
+        writeln!(w, ".Lname_{index}:\n\t.asciz \"{}\"", export.name).unwrap();
+    }
+    writeln!(w, "\t.data\n\t.p2align 3").unwrap();
+    writeln!(w, "\t.globl fr_stub_table\n\t.type fr_stub_table,@object\nfr_stub_table:\n.Ltable:").unwrap();
+    for index in 0..exports.len() {
+        writeln!(w, "\t.quad .Lmissing_{index}").unwrap();
+    }
+    writeln!(w, "\t.size fr_stub_table, .-fr_stub_table").unwrap();
+    writeln!(w, "\t.globl fr_stub_names\n\t.type fr_stub_names,@object\nfr_stub_names:").unwrap();
+    for index in 0..exports.len() {
+        writeln!(w, "\t.quad .Lname_{index}").unwrap();
+    }
+    writeln!(w, "\t.size fr_stub_names, .-fr_stub_names").unwrap();
+    writeln!(w, "\t.globl fr_stub_count\n\t.type fr_stub_count,@object").unwrap();
+    writeln!(w, "fr_stub_count:\n\t.quad {}\n\t.size fr_stub_count, 8", exports.len()).unwrap();
+    for (symbol, label) in [("fr_stub_missing_native", ".Lmissing_native"), ("fr_stub_missing_data", ".Lmissing_data")] {
+        writeln!(w, "\t.globl {symbol}\n\t.type {symbol},@object").unwrap();
+        writeln!(w, "{symbol}:\n{label}:\n\t.quad 0\n\t.size {symbol}, 8").unwrap();
+    }
+
+    let mut script = String::new();
+    let mut previous: Option<&str> = None;
+    for &node in &nodes {
+        let mut globals: Vec<&str> = defaults.get(node).cloned().unwrap_or_default();
+        if previous.is_none() {
+            globals.extend([
+                "fr_stub_table",
+                "fr_stub_names",
+                "fr_stub_count",
+                "fr_stub_missing_native",
+                "fr_stub_missing_data",
+            ]);
+        }
+        write!(script, "{node} {{").unwrap();
+        if !globals.is_empty() {
+            write!(script, " global:").unwrap();
+            for global in globals {
+                write!(script, " {global};").unwrap();
+            }
+        }
+        if previous.is_none() {
+            write!(script, " local: fr_i*; fr_d*; fr_v*;").unwrap();
+        }
+        match previous {
+            Some(previous) => writeln!(script, " }} {previous};").unwrap(),
+            None => writeln!(script, " }};").unwrap(),
+        }
+        previous = Some(node);
+    }
+    (s, script)
+}
+
+/// Builds a glibc-flavor libc stand-in under the real one's soname.
+fn build_stand_in(cc: &str, soname: &str, out_dir: &Path, out: &str) {
+    let list = format!("abi/glibc_{soname}.txt");
+    let text = std::fs::read_to_string(&list).unwrap_or_else(|e| panic!("fil-rust-sys: reading {list}: {e}"));
+    let (assembly, script) = stand_in_sources(&text);
+    let stem = out.trim_end_matches(".so");
+    let source = out_dir.join(format!("{stem}.S"));
+    let map = out_dir.join(format!("{stem}.map"));
+    std::fs::write(&source, assembly).unwrap();
+    std::fs::write(&map, script).unwrap();
+    let mut cmd = Command::new(cc);
+    cmd.args(["-shared", "-nostdlib", "-fPIC", "-Wl,-z,noexecstack"])
+        .arg(format!("-Wl,-soname,{soname}"))
+        .arg(format!("-Wl,--version-script={}", map.display()))
+        .arg("-o")
+        .arg(out_dir.join(out))
+        .arg(&source);
+    run(&mut cmd);
+}
+
 /// Builds the part of the runtime that's Fil-C code itself, from the objects
 /// `libpizlo.a` has for it. Nothing here comes from libpas, and it has no
 /// constructors, so loading it costs nothing. Without an archive, as the glibc
@@ -207,6 +356,27 @@ fn build_support(cc: &str, archive: Option<PathBuf>, out_dir: &Path, stem: &str)
         cmd.arg(directory.join(object));
     }
     run(&mut cmd);
+}
+
+/// Builds the support library from the vendored `csrc/filc`, with a Fil-C
+/// compiler (the glibc distribution has no `libpizlo.a` to take it from).
+fn build_support_from_source(filcc: &str, out_dir: &Path, stem: &str) {
+    const SOURCES: [&str; 5] = ["gcc_personality", "pizlonated_eh_landing_pad", "runtime", "snprintf", "unwind"];
+    let directory = out_dir.join(stem);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut link = Command::new(filcc);
+    link.args(["-shared", "-nostdlib", "-Wl,-soname,libfilrust_support.so", "-Wl,-z,noexecstack", "-o"])
+        .arg(out_dir.join(format!("{stem}.so")));
+    for source in SOURCES {
+        let object = directory.join(format!("{source}.o"));
+        run(Command::new(filcc)
+            .args(["-O3", "-g", "-fPIC", "-w", "-c"])
+            .arg(Path::new("csrc/filc").join(format!("{source}.c")))
+            .arg("-o")
+            .arg(&object));
+        link.arg(object);
+    }
+    run(&mut link);
 }
 
 /// compiler-rt's processor detection, linked into the runtime for
@@ -273,13 +443,16 @@ fn main() {
             );
         }
         build_stub(&cc, &arch, Path::new("abi/runtime_symbols_glibc.txt"), &out_dir, "stub_glibc");
-        for (out, soname) in [
-            ("name_only_libc_6666.so", "libc.so.6666"),
-            ("name_only_libm_6666.so", "libm.so.6666"),
-            ("name_only_libdl_6662.so", "libdl.so.6662"),
-            ("name_only_libpthread_6660.so", "libpthread.so.6660"),
+        for (soname, out) in [
+            ("libc.so.6666", "stand_in_libc_6666.so"),
+            ("libm.so.6666", "stand_in_libm_6666.so"),
+            ("libdl.so.6662", "stand_in_libdl_6662.so"),
+            ("libpthread.so.6660", "stand_in_libpthread_6660.so"),
         ] {
-            build_name_only(&cc, &out_dir.join(out), soname);
+            build_stand_in(&cc, soname, &out_dir, out);
         }
+        let filcc = env::var("FILC_GLIBC_CC").expect("fil-rust-sys: FILC_GLIBC_CC must be set for the glibc flavor");
+        println!("cargo:rerun-if-env-changed=FILC_GLIBC_CC");
+        build_support_from_source(&filcc, &out_dir, "support_glibc");
     }
 }

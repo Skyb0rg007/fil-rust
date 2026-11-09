@@ -117,13 +117,14 @@ let
       '';
     };
 
-    # The glibc flavor has no libc yet: until the Rust one serves it, this
-    # only builds the tests (clippy checks them too).
+    # Only the tests whose libraries need no more of the libc than the Rust
+    # one has so far.
     glibc = {
-      description = "Builds fil-rust's tests against the glibc distribution";
+      description = "fil-rust's tests that run against the glibc distribution so far";
       env.FILC_FLAVOR = "glibc";
       run = ''
-        cargo test --offline ${target} -p fil-rust --features glibc --no-run
+        cargo test --offline ${target} -p fil-rust --features glibc \
+          --test rt_bare --test rt_gc --test layout --test cpu --test libc_stand_ins
       '';
     };
   };

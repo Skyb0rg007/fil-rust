@@ -166,8 +166,10 @@ impl Flavor {
         }
     }
 
-    /// Empty libraries under the sonames of the Fil-C libc, which take its
-    /// place when the process runs without it.
+    /// Libraries under the sonames of the Fil-C libc, which take its place
+    /// when the process runs without it. glibc's have a jump slot under every
+    /// symbol and version the real ones export, for the Rust runtime to fill
+    /// in; musl's has only the soname.
     pub fn libc_stand_ins(self) -> &'static [SupportLib] {
         match self {
             #[cfg(feature = "musl")]
@@ -179,19 +181,19 @@ impl Flavor {
             Flavor::Glibc => &[
                 SupportLib {
                     soname: "libc.so.6666",
-                    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/name_only_libc_6666.so")),
+                    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/stand_in_libc_6666.so")),
                 },
                 SupportLib {
                     soname: "libm.so.6666",
-                    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/name_only_libm_6666.so")),
+                    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/stand_in_libm_6666.so")),
                 },
                 SupportLib {
                     soname: "libdl.so.6662",
-                    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/name_only_libdl_6662.so")),
+                    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/stand_in_libdl_6662.so")),
                 },
                 SupportLib {
                     soname: "libpthread.so.6660",
-                    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/name_only_libpthread_6660.so")),
+                    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/stand_in_libpthread_6660.so")),
                 },
             ],
             #[allow(unreachable_patterns)]
@@ -199,12 +201,15 @@ impl Flavor {
         }
     }
 
-    /// The Fil-C-compiled part of the runtime, if this flavor's distribution
-    /// has it in a form that can be linked apart from libpas.
+    /// The Fil-C-compiled part of the runtime: musl's linked from the
+    /// distribution's `libpizlo.a`, glibc's compiled from the vendored source.
+    /// `None` if the musl distribution has no archive.
     pub fn support_library(self) -> Option<SupportLib> {
         let bytes: &'static [u8] = match self {
             #[cfg(feature = "musl")]
             Flavor::Musl => include_bytes!(concat!(env!("OUT_DIR"), "/support_musl.so")),
+            #[cfg(feature = "glibc")]
+            Flavor::Glibc => include_bytes!(concat!(env!("OUT_DIR"), "/support_glibc.so")),
             #[allow(unreachable_patterns)]
             _ => &[],
         };

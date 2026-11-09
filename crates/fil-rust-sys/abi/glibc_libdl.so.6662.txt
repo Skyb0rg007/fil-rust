@@ -1,0 +1,6 @@
+V GLIBC_2.2.5
+V GLIBC_2.3.3
+V GLIBC_2.3.4
+F pizlonated___libdl_version_placeholder@GLIBC_2.2.5
+F pizlonated___libdl_version_placeholder@GLIBC_2.3.3
+F pizlonated___libdl_version_placeholder@GLIBC_2.3.4

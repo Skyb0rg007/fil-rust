@@ -488,21 +488,24 @@ Each ends green in Nix and is committed.
   musl libc mode stays until L6, as the only coverage for the system-call suites. Nix: `musl` takes
   over `rust-rt` and `rust-rt-gc-stress`; `glibc` is build and clippy only; aarch64 runs the
   libc-free musl tests.
-- **L2. glibc on the Rust runtime, bare.** Generated stand-ins, missing natives failing when called,
-  runtime-owned errno and dlerror (the registered handlers win until L6), the glibc support library
-  from vendored `filc/src`, flavor-aware loading. Tests on glibc: `rt_bare`, `rt_gc`, `layout`,
-  `jumps`, `tables`, `stdfil`, `cpu`; missing functions and data failing by name; no real
-  `libc.so.6666` or libpizlo mapped.
+- **L2. glibc on the Rust runtime, bare: done.** Generated stand-ins, missing natives failing when
+  called, runtime-owned errno and dlerror (the registered handlers win until L6), the glibc support
+  library from vendored `filc/src`, flavor-aware loading. Tests on glibc: `rt_bare`, `rt_gc`,
+  `layout`, `cpu`, `libc_stand_ins` (errno per thread and set by the runtime; missing functions and
+  data failing by name); `rt_bare` proves nothing of the distribution is mapped. `jumps`, `tables`
+  and `stdfil` need string functions, `sigemptyset` and `longjmp`, so they move to L3, and
+  `stdfil`'s `snprintf` to L4.
 - **L3. libc core.** The view, `double` arguments, the `va_list` decoder; strings, memory, ctype,
   `strto*` and `__isoc23_*`; allocation; environment; time; `strerror`; system-call wrappers sharing
   the `zsys_*` bodies; `epoll` with Fil-C's 16-byte event; `signal`, `sigaction` and routing;
   `setjmp` and `longjmp`; exit handlers; `qsort`, `bsearch`; `dl*`; constructor arguments. Tests:
-  differential against host glibc for results, errno and safety failures; Fil-C threads moving NULs
-  during calls; environment changes seen both ways; signals with no libc main thread.
+  `jumps` and `tables` on glibc; differential against host glibc for results, errno and safety
+  failures; Fil-C threads moving NULs during calls; environment changes seen both ways; signals
+  with no libc main thread.
 - **L4. stdio.** FILE objects, `__uflow` and `__overflow`, the `fopen` family, printf, `getline`,
   `puts`, `DIR *`. Tests: Fil-C `printf` and Rust `println!` in order; inline `getc_unlocked` and
   `feof_unlocked`; corrupted FILE fields stay safe; use after `fclose` traps; capped `%s`; `%n`; fork
-  with buffered output; `smoke`, `calls`, `misuse`, `bindgen` on glibc.
+  with buffered output; `smoke`, `calls`, `misuse`, `bindgen`, `stdfil` on glibc.
 - **L5. pthreads and C++.** pthreads; the C locale's `newlocale`, `uselocale` and `*_l`; wide
   characters; `__isoc23_sscanf`; what else libc++ calls on tested paths. Tests on glibc: `threads`,
   `callbacks`, `stress`, `edges`, `lifecycle`, `cxx`, `std::thread`, key destructors.

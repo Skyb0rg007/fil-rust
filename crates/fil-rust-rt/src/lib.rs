@@ -23,6 +23,7 @@ mod cc;
 mod cpu;
 pub mod failure;
 pub mod gc;
+mod glibc;
 pub mod globals;
 pub mod heap;
 pub mod eh;
@@ -54,8 +55,16 @@ unsafe extern "C" fn missing_helper(name: *const c_char) -> ! {
     failure::missing(&unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy());
 }
 
-unsafe extern "C" fn missing_native(_: *mut Thread, _: *const Origin, name: *const c_char) -> ! {
-    failure::missing(&unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy());
+/// A function's getter with nothing behind it: the function fails when it's
+/// called, since taking its address doesn't mean it will be.
+unsafe extern "C" fn missing_native(_: *mut Thread, _: *const Origin, name: *const c_char) -> Ptr {
+    natives::missing_function(name)
+}
+
+/// A variable's getter with nothing behind it, which can't hand anything back.
+unsafe extern "C" fn missing_data(_: *mut Thread, _: *const Origin, name: *const c_char) -> ! {
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
+    failure::missing(name.strip_prefix("pizlonated_").unwrap_or(&name));
 }
 
 /// What [`install`] loaded, for looking symbols up in.
@@ -63,7 +72,8 @@ unsafe extern "C" fn missing_native(_: *mut Thread, _: *const Origin, name: *con
 pub struct Installed {
     /// The stub, which has every symbol the runtime defines.
     pub runtime: usize,
-    /// The empty library that took the place of the Fil-C libc.
+    /// The stand-in that took the place of the Fil-C libc (`libc.so` or
+    /// `libc.so.6666`).
     pub libc: usize,
 }
 
@@ -73,12 +83,9 @@ fn load_stub(flavor: Flavor) -> Result<Installed, String> {
     for lib in compat {
         unsafe { dlopen_bytes(lib.soname, lib.bytes, flags) }?;
     }
-    let mut libc = std::ptr::null_mut();
-    for (index, lib) in flavor.libc_stand_ins().iter().enumerate() {
-        let handle = unsafe { dlopen_bytes(lib.soname, lib.bytes, flags) }?;
-        if index == 0 {
-            libc = handle;
-        }
+    let mut stand_ins = Vec::new();
+    for lib in flavor.libc_stand_ins() {
+        stand_ins.push(unsafe { dlopen_bytes(lib.soname, lib.bytes, flags) }?);
     }
     let stub = flavor.runtime_stub().ok_or_else(|| format!("{flavor:?} has no runtime stub"))?;
     let handle = unsafe { dlopen_bytes(stub.soname, stub.bytes, flags) }?;
@@ -87,37 +94,61 @@ fn load_stub(flavor: Flavor) -> Result<Installed, String> {
         Some(lib) => unsafe { dlopen_bytes(lib.soname, lib.bytes, libc::RTLD_NOW | libc::RTLD_LOCAL) }?,
         None => std::ptr::null_mut(),
     };
-    unsafe { fill_stub(handle, support) }?;
-    Ok(Installed { runtime: handle as usize, libc: libc as usize })
+    unsafe { fill_stub(handle, &runtime_table(), support) }?;
+    // musl's stand-in has no slots: it's only a soname.
+    if flavor == Flavor::Glibc {
+        let natives: std::collections::HashMap<_, _> = glibc::table().into_iter().collect();
+        for &stand_in in &stand_ins {
+            unsafe { fill_stub(stand_in, &natives, std::ptr::null_mut()) }?;
+        }
+    }
+    Ok(Installed { runtime: handle as usize, libc: stand_ins[0] as usize })
 }
 
-/// Points the stub's slots at what implements them: the helpers and natives
-/// here, or the support library. That one goes through the stub as well, since
-/// the stub comes first in the search order even for the library's own uses.
-unsafe fn fill_stub(stub: *mut c_void, support: *mut c_void) -> Result<(), String> {
+/// What implements the runtime stub's symbols, by name.
+fn runtime_table() -> std::collections::HashMap<&'static str, *const ()> {
+    let mut implemented: std::collections::HashMap<_, _> = helpers::table().into_iter().collect();
+    implemented.extend(natives::table());
+    implemented.extend(sys::table());
+    implemented.extend(zthread::table());
+    implemented.extend(jump::table());
+    implemented.extend(eh::table());
+    implemented.extend(signal::table());
+    implemented.extend(maps::table());
+    implemented.extend(net::table());
+    implemented.extend(calls::table());
+    implemented.extend(process::table());
+    implemented.extend(tables::table());
+    implemented.extend(queries::table());
+    #[cfg(target_arch = "x86_64")]
+    implemented.extend(cpu::table());
+    implemented
+}
+
+/// Points a stub's slots at what implements them: `implemented`, or else the
+/// support library, if there is one. That one goes through the runtime stub
+/// as well, since the stub comes first in the search order even for the
+/// library's own uses. The rest keep their failure paths.
+unsafe fn fill_stub(
+    stub: *mut c_void,
+    implemented: &std::collections::HashMap<&'static str, *const ()>,
+    support: *mut c_void,
+) -> Result<(), String> {
     unsafe {
         let table = dlsym_checked(stub, "fr_stub_table\0")?.cast::<*const ()>();
         let names = dlsym_checked(stub, "fr_stub_names\0")?.cast::<*const c_char>();
         let count = *dlsym_checked(stub, "fr_stub_count\0")?.cast::<usize>();
-        let helper_slot = dlsym_checked(stub, "fr_stub_missing_helper\0")?.cast::<*const ()>();
-        let native_slot = dlsym_checked(stub, "fr_stub_missing_native\0")?.cast::<*const ()>();
-        helper_slot.write(missing_helper as *const ());
-        native_slot.write(missing_native as *const ());
-        let mut implemented: std::collections::HashMap<_, _> = helpers::table().into_iter().collect();
-        implemented.extend(natives::table());
-        implemented.extend(sys::table());
-        implemented.extend(zthread::table());
-        implemented.extend(jump::table());
-        implemented.extend(eh::table());
-        implemented.extend(signal::table());
-        implemented.extend(maps::table());
-        implemented.extend(net::table());
-        implemented.extend(calls::table());
-        implemented.extend(process::table());
-        implemented.extend(tables::table());
-        implemented.extend(queries::table());
-        #[cfg(target_arch = "x86_64")]
-        implemented.extend(cpu::table());
+        dlsym_checked(stub, "fr_stub_missing_native\0")?.cast::<*const ()>().write(missing_native as *const ());
+        // Only the runtime stub has helpers, and only the libc's variables.
+        for (slot, function) in [
+            ("fr_stub_missing_helper\0", missing_helper as *const ()),
+            ("fr_stub_missing_data\0", missing_data as *const ()),
+        ] {
+            let symbol = libc::dlsym(stub, slot.as_ptr().cast());
+            if !symbol.is_null() {
+                symbol.cast::<*const ()>().write(function);
+            }
+        }
         for index in 0..count {
             let name = std::ffi::CStr::from_ptr(*names.add(index));
             let text = name.to_str().map_err(|e| e.to_string())?;

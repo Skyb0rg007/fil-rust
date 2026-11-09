@@ -22,7 +22,9 @@ use crate::ptr::FilPtr;
 use crate::types::{FilType, raw_add};
 use crate::{Error, Result, error};
 
-/// Whether the process loads the Fil-C libc.
+/// Whether the process loads the Fil-C libc. Only the musl flavor has one to
+/// load: the glibc flavor's libc is the runtime's own, there from the start,
+/// so this makes no difference there.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Libc {
     /// For the first library that imports from it, through [`Runtime::load`], which waits for any
@@ -598,6 +600,9 @@ impl Inner {
     /// Moves the process to the libc and its executors, once no thread is
     /// running Fil-C code without them.
     fn start_libc(&'static self) -> Result<()> {
+        if self.config.flavor == Flavor::Glibc {
+            return Ok(());
+        }
         if !current_thread().is_null() {
             return Err(Error::Unsupported(
                 "the Fil-C libc can't start from inside Runtime::run, which has to finish first".into(),
@@ -882,9 +887,6 @@ const MAIN_STACK_SIZE: usize = 8 << 20;
 /// when they first run Fil-C code.
 fn boot(config: Config) -> Result<&'static Inner> {
     let flavor = config.flavor;
-    if flavor != Flavor::Musl {
-        return Err(Error::Unsupported(format!("the Rust runtime doesn't support the {flavor:?} flavor yet")));
-    }
     // Nothing is loaded from the distribution yet, but libraries find their
     // dependencies there: a wrong root should fail here, not at the first load.
     let marker = config.lib_dir().join("libpizlo.so");

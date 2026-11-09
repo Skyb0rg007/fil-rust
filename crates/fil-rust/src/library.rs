@@ -140,6 +140,10 @@ pub(crate) fn check_no_foreign_runtime(config: &Config, has_libc: bool) -> Resul
 /// tells. Every Fil-C library is linked against the libc whether it uses it or
 /// not.
 pub(crate) fn libc_import(inner: &Inner, data: &[u8]) -> Option<String> {
+    // The glibc flavor's stand-ins have every libc symbol.
+    if inner.config.flavor() == Flavor::Glibc {
+        return None;
+    }
     let mut seen = Vec::new();
     let mut wanted = Vec::new();
     let mut defined = std::collections::HashSet::new();

@@ -62,20 +62,24 @@ pub fn register_dlerror_handler(handler: Ptr) {
     registered.dlerror_handler = handler;
 }
 
-/// Sets the libc's errno. This runs compiled code, so it's a safepoint.
+/// Sets the libc's errno: through the Fil-C libc's handler if it registered
+/// one, which runs compiled code, or else in the runtime's own. Either way,
+/// it's a safepoint.
 pub unsafe fn set_errno(thread: *mut Thread, value: c_int) {
     let handler = registered().errno_handler;
     if handler.lower.is_null() {
-        safety_panic(format_args!("errno handler not registered when trying to set errno = {value}."));
+        unsafe { crate::glibc::set_errno(thread, value) };
+        return;
     }
     unsafe { crate::call(thread, handler, &[Ptr { ptr: value as usize as *mut u8, lower: null_mut() }], &mut []) };
 }
 
-/// Hands the libc an error for `dlerror`.
+/// Hands the libc an error for `dlerror`, as [`set_errno`] does errno.
 pub unsafe fn set_dlerror(thread: *mut Thread, message: &[u8]) {
     let handler = registered().dlerror_handler;
     if handler.lower.is_null() {
-        safety_panic(format_args!("dlerror handler not registered when trying to set dlerror."));
+        unsafe { crate::glibc::set_dlerror(thread, message) };
+        return;
     }
     unsafe {
         let copy = c_string(thread, message);

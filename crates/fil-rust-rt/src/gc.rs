@@ -738,6 +738,7 @@ impl Marker {
             for index in 0..extra.thread_locals.len() {
                 self.mark(extra.thread_locals[index]);
             }
+            extra.libc.for_each_object(|object| self.mark(object));
             self.mark(object_for_lower(thread.cast()));
             let unwinding = &raw mut extra.unwinding;
             self.mark_or_free_flight(&raw mut (*unwinding).context);
