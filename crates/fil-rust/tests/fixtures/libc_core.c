@@ -4,6 +4,12 @@
  * with -fno-builtin, so every call reaches the libc. */
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <langinfo.h>
+#include <limits.h>
+#include <locale.h>
+#include <stdio.h>
+#include <wchar.h>
+#include <wctype.h>
 #include <malloc.h>
 #include <errno.h>
 #include <stdint.h>
@@ -354,6 +360,113 @@ static void sets(void)
     line("sigisemptyset"); field(sigisemptyset(&result));
 }
 
+static void wide_str(const wchar_t *s)
+{
+    text(" L\"");
+    for (; *s; s++) { char c[2] = { *s < 128 ? (char)*s : '?', 0 }; text(c); }
+    text("\"");
+}
+
+static void locales(void)
+{
+    line("setlocale"); str(setlocale(LC_ALL, NULL)); str(setlocale(LC_CTYPE, "C")); str(setlocale(LC_ALL, "POSIX"));
+    field(setlocale(LC_ALL, "xx_YY.nonexistent") == NULL);
+    locale_t c = newlocale(LC_ALL_MASK, "C", (locale_t)0);
+    line("newlocale"); field(c != (locale_t)0);
+    field(newlocale(LC_ALL_MASK, "xx_YY.nonexistent", (locale_t)0) == (locale_t)0); error();
+    line("uselocale"); field(uselocale((locale_t)0) == LC_GLOBAL_LOCALE);
+    locale_t old = uselocale(c); field(old == LC_GLOBAL_LOCALE); field(uselocale((locale_t)0) == c);
+    uselocale(old); field(uselocale((locale_t)0) == LC_GLOBAL_LOCALE);
+    line("_l"); field(isalpha_l('a', c) != 0); field(isdigit_l('a', c) != 0); field(toupper_l('q', c)); field(tolower_l('Q', c));
+    field(strtol_l("  -42z", NULL, 10, c)); field((long long)(strtod_l("2.5", NULL, c) * 10)); sign(strcoll_l("a", "b", c));
+    char buffer[32];
+    struct tm tm = { .tm_year = 100, .tm_mon = 1, .tm_mday = 3 };
+    field(strftime_l(buffer, sizeof buffer, "%Y-%m-%d", &tm, c)); str(buffer);
+    freelocale(c);
+    struct lconv *conv = localeconv();
+    line("localeconv"); str(conv->decimal_point); str(conv->thousands_sep); str(conv->grouping); field(conv->int_frac_digits == CHAR_MAX);
+    line("nl_langinfo"); str(nl_langinfo(CODESET)); str(nl_langinfo(RADIXCHAR)); str(nl_langinfo(D_FMT));
+    line("mb_cur_max"); field(MB_CUR_MAX);
+}
+
+static void wides(void)
+{
+    const wchar_t *hello = L"hello, wide";
+    line("wcslen"); field(wcslen(hello)); field(wcsnlen(hello, 3));
+    line("wcscmp"); sign(wcscmp(L"abc", L"abd")); sign(wcsncmp(L"abc", L"abd", 2)); sign(wcscmp(L"b", L"a"));
+    line("wcschr"); at(wcschr(hello, L','), hello); at(wcsrchr(hello, L'e'), hello); at(wcschr(hello, L'z'), hello);
+    wchar_t buffer[32];
+    line("wcscpy"); wcscpy(buffer, L"copy"); wcscat(buffer, L"+cat"); wide_str(buffer);
+    wcsncpy(buffer, L"ab", 4); field(buffer[2]); field(buffer[3]);
+    line("wmem"); wmemset(buffer, L'x', 3); buffer[3] = 0; wide_str(buffer);
+    at(wmemchr(hello, L'w', 11), hello); sign(wmemcmp(L"abc", L"abd", 3));
+    wmemcpy(buffer, L"0123456789", 11); wmemmove(buffer + 2, buffer, 5); wide_str(buffer);
+    wchar_t *copy = wcsdup(hello); wide_str(copy); free(copy);
+    wchar_t *end;
+    line("wcstol"); field(wcstol(L"  -123xyz", &end, 10)); field(end - (wchar_t *)L"  -123xyz" > 0);
+    field(wcstoul(L"ff", NULL, 16)); field(wcstoll(L"0x10", NULL, 0)); field((long long)(wcstod(L"3.25", NULL) * 100));
+    line("btowc"); field(btowc('a')); field(btowc(EOF) == WEOF); field(wctob(L'b')); field(wctob(0x263a));
+    mbstate_t state = { 0 };
+    wchar_t unit = 0;
+    line("mbrtowc"); field((long long)mbrtowc(&unit, "z", 1, &state)); field(unit); field((long long)mbrtowc(&unit, "", 1, &state));
+    field((long long)mbrtowc(&unit, "\xc3\xa9", 2, &state)); error();
+    memset(&state, 0, sizeof state);
+    line("mbtowc"); field(mbtowc(&unit, "q", 1)); field(unit); field(mblen("ab", 2)); field(mbrlen("x", 1, &state));
+    char bytes[16] = { 0 };
+    line("wcrtomb"); field((long long)wcrtomb(bytes, L'k', &state)); field(bytes[0]); field((long long)wcrtomb(bytes, 0x263a, &state)); error();
+    line("mbsinit"); field(mbsinit(&state) != 0); field(mbsinit(NULL) != 0);
+    const char *source = "convert me";
+    line("mbsrtowcs"); field((long long)mbsrtowcs(buffer, &source, 32, &state)); wide_str(buffer); field(source == NULL);
+    source = "partial";
+    field((long long)mbsnrtowcs(buffer, &source, 4, 32, &state)); field(source ? source - "partial" : -1);
+    source = "count";
+    field((long long)mbsrtowcs(NULL, &source, 0, &state));
+    const wchar_t *wsource = L"back again";
+    line("wcsrtombs"); field((long long)wcsrtombs(bytes, &wsource, sizeof bytes, &state)); str(bytes); field(wsource == NULL);
+    wsource = L"limited";
+    memset(bytes, 0, sizeof bytes);
+    field((long long)wcsnrtombs(bytes, &wsource, 3, sizeof bytes, &state)); str(bytes);
+    line("mbstowcs"); field((long long)mbstowcs(buffer, "many", 32)); wide_str(buffer); field((long long)wcstombs(bytes, L"few", sizeof bytes)); str(bytes);
+    line("wctype");
+    for (wint_t c = 0; c < 128; c += 7)
+        { field(!!iswalpha(c)); field(!!iswdigit(c)); field(!!iswspace(c)); field(!!iswpunct(c)); field(towupper(c)); }
+    field(!!iswctype(L'a', wctype("alpha"))); field(!!iswctype(L'1', wctype("alpha"))); field(towctrans(L'a', wctrans("toupper")));
+    locale_t c = newlocale(LC_ALL_MASK, "C", (locale_t)0);
+    field(!!iswalpha_l(L'a', c)); field(towupper_l(L'b', c));
+    freelocale(c);
+    line("swprintf"); field(swprintf(buffer, 32, L"%d-%s-%ls %.2f", 7, "narrow", L"wide", 1.5)); wide_str(buffer);
+    field(swprintf(buffer, 4, L"%s", "too long"));
+}
+
+static void scanning(void)
+{
+    int a = 0, b = 0, n = 0;
+    unsigned u = 0;
+    long l = 0;
+    long long ll = 0;
+    short h = 0;
+    char c = 0, word[16] = { 0 }, set[16] = { 0 }, chars[4] = { 0 };
+    float f = 0;
+    double d = 0;
+    long double ld = 0;
+    void *p = NULL;
+    line("sscanf ints"); field(sscanf("12 -34", "%d %d", &a, &b)); field(a); field(b);
+    field(sscanf("0x1f 017 99", "%i %i %u", &a, &b, &u)); field(a); field(b); field(u);
+    field(sscanf("ff 777", "%x %o", &a, &b)); field(a); field(b);
+    field(sscanf("123456789012 -5 70000", "%lld %ld %hd", &ll, &l, &h)); field(ll); field(l); field(h);
+    line("sscanf width"); field(sscanf("123456", "%3d%2d", &a, &b)); field(a); field(b);
+    line("sscanf floats"); field(sscanf("1.5 2.25e2 -0.125", "%f %lf %Lf", &f, &d, &ld)); field((long long)(f * 100)); field((long long)d); field((long long)(ld * 1000));
+    line("sscanf strings"); field(sscanf("  hello world", "%s %c", word, &c)); str(word); field(c);
+    field(sscanf("abc123def", "%[a-z]%n", set, &n)); str(set); field(n);
+    field(sscanf("xyz!", "%[^!]", set)); str(set);
+    field(sscanf("abcd", "%3c", chars)); field(chars[0]); field(chars[2]);
+    line("sscanf literal"); field(sscanf("key=42;", "key=%d;", &a)); field(a); field(sscanf("100%", "%d%%", &a)); field(a);
+    line("sscanf suppress"); field(sscanf("1 2 3", "%*d %d %*d", &a)); field(a);
+    line("sscanf failures"); a = 77; field(sscanf("abc", "%d", &a)); field(a); field(sscanf("", "%d", &a)); field(sscanf("   ", "%d", &a));
+    field(sscanf("5 x", "%d %d", &a, &b)); field(a);
+    line("sscanf pointer"); field(sscanf("0x1234", "%p", &p)); field((long long)(uintptr_t)p);
+}
+
 size_t transcript_length(void)
 {
     if (!used) {
@@ -367,6 +480,9 @@ size_t transcript_length(void)
         calls();
         sorting();
         sets();
+        locales();
+        wides();
+        scanning();
     }
     return used;
 }

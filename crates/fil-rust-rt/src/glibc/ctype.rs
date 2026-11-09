@@ -92,7 +92,7 @@ unsafe fn make_table<T: Copy>(me: *mut Thread, entry: impl Fn(c_int) -> T) -> Pt
 }
 
 /// The three tables' pointer holders, made once.
-fn tables(me: *mut Thread) -> [Ptr; 3] {
+pub(crate) fn tables(me: *mut Thread) -> [Ptr; 3] {
     static TABLES: Mutex<Option<[(usize, usize); 3]>> = Mutex::new(None);
     let mut tables = unsafe { thread::lock_entered(me, &TABLES) };
     let made = tables.get_or_insert_with(|| unsafe {
@@ -147,4 +147,36 @@ natives! {
 
 pub fn aliases() -> Vec<(&'static str, *const ())> {
     vec![("pizlonated_isctype", __isctype::getter as *const ())]
+        .into_iter()
+        .chain([
+            ("pizlonated_isalnum_l", isalnum::getter as *const ()),
+            ("pizlonated___isalnum_l", isalnum::getter as *const ()),
+            ("pizlonated_isalpha_l", isalpha::getter as *const ()),
+            ("pizlonated___isalpha_l", isalpha::getter as *const ()),
+            ("pizlonated_isblank_l", isblank::getter as *const ()),
+            ("pizlonated___isblank_l", isblank::getter as *const ()),
+            ("pizlonated_iscntrl_l", iscntrl::getter as *const ()),
+            ("pizlonated___iscntrl_l", iscntrl::getter as *const ()),
+            ("pizlonated_isdigit_l", isdigit::getter as *const ()),
+            ("pizlonated___isdigit_l", isdigit::getter as *const ()),
+            ("pizlonated_isgraph_l", isgraph::getter as *const ()),
+            ("pizlonated___isgraph_l", isgraph::getter as *const ()),
+            ("pizlonated_islower_l", islower::getter as *const ()),
+            ("pizlonated___islower_l", islower::getter as *const ()),
+            ("pizlonated_isprint_l", isprint::getter as *const ()),
+            ("pizlonated___isprint_l", isprint::getter as *const ()),
+            ("pizlonated_ispunct_l", ispunct::getter as *const ()),
+            ("pizlonated___ispunct_l", ispunct::getter as *const ()),
+            ("pizlonated_isspace_l", isspace::getter as *const ()),
+            ("pizlonated___isspace_l", isspace::getter as *const ()),
+            ("pizlonated_isupper_l", isupper::getter as *const ()),
+            ("pizlonated___isupper_l", isupper::getter as *const ()),
+            ("pizlonated_isxdigit_l", isxdigit::getter as *const ()),
+            ("pizlonated___isxdigit_l", isxdigit::getter as *const ()),
+            ("pizlonated_tolower_l", tolower::getter as *const ()),
+            ("pizlonated___tolower_l", tolower::getter as *const ()),
+            ("pizlonated_toupper_l", toupper::getter as *const ()),
+            ("pizlonated___toupper_l", toupper::getter as *const ()),
+        ])
+        .collect()
 }

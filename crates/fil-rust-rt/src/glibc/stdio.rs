@@ -605,6 +605,93 @@ natives! {
     }
 
     // With the buffer always empty, the next character, as `fgetc`.
+    // Wide characters, in the C locale's encoding.
+    fn fputwc(thread: *mut Thread, c: u32, file: Ptr) -> u32 {
+        let Some(bytes) = crate::glibc::wide::encode(c as libc::wchar_t) else {
+            unsafe { set_errno(thread, libc::EILSEQ) };
+            return u32::MAX;
+        };
+        if unsafe { put(thread, file, bytes) } { c } else { u32::MAX }
+    }
+
+    fn putwchar(thread: *mut Thread, c: u32) -> u32 {
+        let file = standard_file(thread, 1);
+        match crate::glibc::wide::encode(c as libc::wchar_t) {
+            Some(bytes) if unsafe { put(thread, file, bytes.clone()) } => c,
+            _ => u32::MAX,
+        }
+    }
+
+    fn fputws(thread: *mut Thread, string: Ptr, file: Ptr) -> c_int {
+        let units = {
+            let bytes = Bytes::readable(string);
+            let mut units = Vec::new();
+            let mut index = 0;
+            loop {
+                if index + 4 > bytes.len() {
+                    crate::failure::safety_panic(format_args!("wide string is not null-terminated (ptr = {:p}).", string.ptr));
+                }
+                let unit = i32::from_le_bytes(std::array::from_fn(|offset| bytes.get(index + offset)));
+                if unit == 0 {
+                    break units;
+                }
+                units.push(unit);
+                index += 4;
+            }
+        };
+        let mut out = Vec::new();
+        for unit in units {
+            match crate::glibc::wide::encode(unit) {
+                Some(bytes) => out.extend(bytes),
+                None => {
+                    unsafe { set_errno(thread, libc::EILSEQ) };
+                    return -1;
+                }
+            }
+        }
+        if unsafe { put(thread, file, out) } { 1 } else { -1 }
+    }
+
+    fn fgetwc(thread: *mut Thread, file: Ptr) -> u32 {
+        let c = unsafe { get(thread, file) };
+        if c == EOF {
+            return u32::MAX;
+        }
+        match crate::glibc::wide::decode(c as u8) {
+            Some(unit) => unit as u32,
+            None => {
+                unsafe { set_errno(thread, libc::EILSEQ) };
+                u32::MAX
+            }
+        }
+    }
+
+    fn getwchar(thread: *mut Thread) -> u32 {
+        let file = standard_file(thread, 0);
+        let c = unsafe { get(thread, file) };
+        if c == EOF { u32::MAX } else { crate::glibc::wide::decode(c as u8).map_or(u32::MAX, |unit| unit as u32) }
+    }
+
+    fn ungetwc(thread: *mut Thread, c: u32, file: Ptr) -> u32 {
+        if c == u32::MAX {
+            return u32::MAX;
+        }
+        let Some(bytes) = crate::glibc::wide::encode(c as libc::wchar_t) else { return u32::MAX };
+        unsafe {
+            with(thread, file, |state| {
+                state.pushback.extend(bytes.iter().rev());
+                state.eof = false;
+            })
+        };
+        c
+    }
+
+    // Streams have no orientation here: either kind of call works.
+    fn fwide(thread: *mut Thread, file: Ptr, mode: c_int) -> c_int {
+        let _ = stream(file);
+        mode.signum()
+    }
+
     fn __uflow(thread: *mut Thread, file: Ptr) -> c_int {
         unsafe { get(thread, file) }
     }
@@ -765,6 +852,7 @@ natives! {
     // Every stream's lock is held across the fork, so the child gets none
     // halfway through a write.
     fn fork(thread: *mut Thread) -> c_int {
+        unsafe { crate::glibc::pthread::before_fork(thread) };
         let mut streams: Vec<(usize, Arc<Stream>)> =
             STREAMS.lock().unwrap_or_else(|e| e.into_inner()).iter().flat_map(|streams| streams.iter().map(|(&lower, stream)| (lower, stream.clone()))).collect();
         streams.sort_by_key(|&(lower, _)| lower);
@@ -773,6 +861,8 @@ natives! {
         drop(held);
         if result < 0 {
             unsafe { set_errno(thread, error) };
+        } else {
+            unsafe { crate::glibc::pthread::after_fork(thread, result == 0) };
         }
         result
     }
@@ -907,6 +997,13 @@ pub fn aliases() -> Vec<(&'static str, *const ())> {
         ("pizlonated_getchar_unlocked", getchar::getter as *const ()),
         ("pizlonated_fgets_unlocked", fgets::getter as *const ()),
         ("pizlonated_putc", fputc::getter as *const ()),
+        ("pizlonated_putwc", fputwc::getter as *const ()),
+        ("pizlonated_putwc_unlocked", fputwc::getter as *const ()),
+        ("pizlonated_fputwc_unlocked", fputwc::getter as *const ()),
+        ("pizlonated_getwc", fgetwc::getter as *const ()),
+        ("pizlonated_getwc_unlocked", fgetwc::getter as *const ()),
+        ("pizlonated_fgetwc_unlocked", fgetwc::getter as *const ()),
+        ("pizlonated_fputws_unlocked", fputws::getter as *const ()),
         ("pizlonated__IO_putc", fputc::getter as *const ()),
         ("pizlonated_putc_unlocked", fputc::getter as *const ()),
         ("pizlonated_fputc_unlocked", fputc::getter as *const ()),

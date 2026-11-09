@@ -83,9 +83,11 @@ fn blocking_while_exited_does_not_stall_the_collector() {
 fn long_rust_loops_with_pollcheck() {
     let rt = runtime();
     let stop = Arc::new(AtomicBool::new(false));
-    let s2 = stop.clone();
+    let spinning = Arc::new(AtomicBool::new(false));
+    let (s2, spinning2) = (stop.clone(), spinning.clone());
     let spinner = rt.spawn(move |fil| {
         let mut n = 0u64;
+        spinning2.store(true, Ordering::Release);
         while !s2.load(Ordering::Relaxed) {
             n += 1;
             if n.is_multiple_of(1024) {
@@ -94,6 +96,10 @@ fn long_rust_loops_with_pollcheck() {
         }
         n
     });
+    while !spinning.load(Ordering::Acquire) {
+        std::thread::yield_now();
+    }
+    // The collection waits for the spinner's next pollcheck.
     rt.run(|fil| fil.collect_garbage().unwrap());
     stop.store(true, Ordering::Relaxed);
     assert!(spinner.join() > 0);

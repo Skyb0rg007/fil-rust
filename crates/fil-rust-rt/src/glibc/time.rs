@@ -282,5 +282,7 @@ pub fn aliases() -> Vec<(&'static str, *const ())> {
         ("pizlonated_tzname", tzname as *const ()),
         ("pizlonated___tzname", tzname as *const ()),
         ("pizlonated___tzset", tzset::getter as *const ()),
+        ("pizlonated_strftime_l", strftime::getter as *const ()),
+        ("pizlonated___strftime_l", strftime::getter as *const ()),
     ]
 }

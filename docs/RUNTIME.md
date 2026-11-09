@@ -531,16 +531,35 @@ Each ends green in Nix and is committed.
   bounds it, and then reads no further than the object's end; `%ls` reads `wchar_t`s the same way;
   `%n` stores through a checked pointer; too few arguments fail; `%Lf` goes through a `double`.
   `fork` holds every stream's lock. A `DIR` is an opaque object holding the last entry, so the entry
-  dies with `closedir`. Memory streams (`fmemopen`, `open_memstream`) and `scanf` wait for need.
+  dies with `closedir`. Memory streams (`fmemopen`, `open_memstream`) and stream `scanf` wait for need.
   Tests on glibc: `libc_stdio` (the same fixture built for Fil-C and for the host writes the same
   transcript of formats, streams, lines, positions, the inline `getc` and `putc`, pipes and
   directories; output in order with Rust's; a scribbled-over `FILE` still works; a forged `FILE`,
   use after `fclose` or `closedir`, an unterminated `%s`, a too-wide `%n`, an overflowing
   `sprintf` and missing arguments trap; buffered streams survive a fork), `smoke`, `calls`,
   `misuse`, `bindgen`, `stdfil`.
-- **L5. pthreads and C++.** pthreads; the C locale's `newlocale`, `uselocale` and `*_l`; wide
-  characters; `__isoc23_sscanf`; what else libc++ calls on tested paths. Tests on glibc: `threads`,
-  `callbacks`, `stress`, `edges`, `lifecycle`, `cxx`, `std::thread`, key destructors.
+- **L5. pthreads and C++: done.** `pthread_t` is the thread's object; threads come from the
+  zthread machinery, and `pthread_exit` on a thread Fil-C didn't create fails by name. Mutexes
+  (normal, recursive, error-checking, timed), condition variables (with their clock), rwlocks,
+  `once` (reset if its function throws), barriers, spin locks and semaphores are futex code over
+  glibc's object sizes, where a zeroed object is a ready lock; every wait is exited. Key values live
+  in the thread's libc state, and destructors run, with glibc's repeats, when a thread Fil-C created
+  returns or calls `pthread_exit`; on attached Rust threads the values are dropped instead.
+  `pthread_atfork` handlers run around `fork`. Locales are the C locale only: one read-only
+  `__locale_struct` whose ctype tables are the `__ctype_b_loc` ones, so the headers' inline `*_l`
+  work, and the `*_l` functions are the plain ones. Wide characters: the `wcs*` and `wmem*`
+  functions read `wchar_t`s through the object's bounds, conversions and classification are the
+  host's on copies, `swprintf` shares the printf formatter, and the wide stream functions encode
+  onto the byte streams. `sscanf` and `vsscanf` (every `__isoc99`/`__isoc23` name) parse a copy,
+  numbers through the host's `strto*` bounded by the width, and store through checked pointers;
+  `%Lf` and `strtold` go through a `double`. Attaching and detaching a thread take a turn with the
+  collector, so a collector looping on the thread list can't starve them. Tests on glibc:
+  `libc_threads` (results, `pthread_exit`, every mutex kind and its errors, timeouts, condition
+  variables, rwlocks, `once` across threads, key destructors however a thread ends, barriers,
+  semaphores, spin locks, fork handlers, Rust and Fil-C threads sharing a Fil-C mutex,
+  `pthread_exit` from Rust and a freed mutex trap), `libc_core`'s locale, wide and `sscanf`
+  sections, `threads`, `callbacks`, `stress`, `edges`, `lifecycle`, `cxx`, `memory`, `properties`,
+  and the examples, `cxx` among them.
 - **L6. Switch over.** Delete libc mode and the `zregister_*` natives; musl becomes libc-free only;
   port `maps`, `signals`, `sockets`, `system`, `sys`, `process`, `startup`, `ui` and the examples to
   glibc; delete `rt_libc.rs`; `boot.rs` proves nothing but the stand-ins is mapped; `abi_audit`

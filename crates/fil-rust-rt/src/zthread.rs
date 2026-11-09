@@ -118,9 +118,14 @@ struct Running {
     start: *const Start,
 }
 
+/// Whether this thread is one Fil-C code created, which can leave early.
+pub(crate) unsafe fn can_leave(thread: *mut Thread) -> bool {
+    unsafe { extra(thread).escape != 0 }
+}
+
 /// The thread is done: its frames are about to be gone, and its result is what
 /// `zthread_join` will see.
-unsafe fn leave(thread: *mut Thread, result: Ptr) -> ! {
+pub(crate) unsafe fn leave(thread: *mut Thread, result: Ptr) -> ! {
     unsafe {
         (*thread).result = result;
         (*thread).top_frame = null_mut();
@@ -158,6 +163,7 @@ unsafe extern "C" fn run(argument: *mut c_void) {
 
         let mut results = [Ptr::NULL];
         crate::call(thread, function, &[argument], &mut results);
+        crate::glibc::thread_ending(thread);
         frame.pop(thread);
         leave(thread, results[0]);
     }
@@ -173,10 +179,6 @@ extern "C" fn thread_entry(start: *mut c_void) -> *mut c_void {
     null_mut()
 }
 
-fn check_zthread(ptr: Ptr) {
-    object::check_special(ptr, SPECIAL_THREAD, "zthread");
-}
-
 /// The signals a thread comes up with: none until it knows what it is.
 unsafe fn block_all_signals() -> libc::sigset_t {
     unsafe {
@@ -186,6 +188,89 @@ unsafe fn block_all_signals() -> libc::sigset_t {
         libc::pthread_sigmask(libc::SIG_BLOCK, all.as_ptr(), old.as_mut_ptr());
         old.assume_init()
     }
+}
+
+/// Starts a thread running `function(argument)`, storing the thread at
+/// `zthread` and its id at `tid` if they aren't null, with a stack of
+/// `stack_size` bytes, or the host's default for 0. Returns 0 or an error
+/// number.
+pub(crate) unsafe fn create(thread: *mut Thread, function: Ptr, argument: Ptr, zthread: Ptr, tid: Ptr, stack_size: usize) -> c_int {
+    if !globals::ctors_started() {
+        safety_panic(format_args!("cannot create threads before global constructors have started being run."));
+    }
+    object::check_function_call(function);
+    unsafe {
+        thread::exit(thread);
+        let signal_mask = block_all_signals();
+        let start = Start { function, argument, zthread, tid, signal_mask, started: Mutex::new(false), changed: Condvar::new() };
+        let mut attributes = MaybeUninit::uninit();
+        libc::pthread_attr_init(attributes.as_mut_ptr());
+        libc::pthread_attr_setdetachstate(attributes.as_mut_ptr(), libc::PTHREAD_CREATE_DETACHED);
+        let mut result = 0;
+        if stack_size != 0 {
+            result = libc::pthread_attr_setstacksize(attributes.as_mut_ptr(), stack_size);
+        }
+        if result == 0 {
+            let mut ignored = MaybeUninit::uninit();
+            result = libc::pthread_create(ignored.as_mut_ptr(), attributes.as_ptr(), thread_entry, (&raw const start).cast_mut().cast());
+        }
+        libc::pthread_attr_destroy(attributes.as_mut_ptr());
+        libc::pthread_sigmask(libc::SIG_SETMASK, &signal_mask, null_mut());
+        if result == 0 {
+            let mut started = start.started.lock().unwrap_or_else(|e| e.into_inner());
+            while !*started {
+                started = start.changed.wait(started).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        thread::enter(thread);
+        result
+    }
+}
+
+/// Waits for `zthread` to finish, storing its result at `result` if that
+/// isn't null. Returns 0 or an error number.
+pub(crate) unsafe fn join(thread: *mut Thread, zthread: Ptr, result: Ptr) -> c_int {
+    check_zthread(zthread);
+    let target = zthread.ptr.cast::<Thread>();
+    if unsafe { (*target).forked.load(Ordering::Relaxed) } != 0 {
+        return libc::ESRCH;
+    }
+    if target == thread {
+        return libc::EDEADLK;
+    }
+    unsafe {
+        thread::exit(thread);
+        thread::wait_until_finished(target);
+        thread::enter(thread);
+        if !result.ptr.is_null() {
+            ptrs::store(thread, result, (*target).result);
+        }
+    }
+    0
+}
+
+/// Sends `signal` to `zthread`. Returns 0 or an error number.
+pub(crate) unsafe fn kill(thread: *mut Thread, zthread: Ptr, signal: c_int) -> c_int {
+    if crate::sys::is_internal_signal(signal) {
+        return libc::ENOSYS;
+    }
+    check_zthread(zthread);
+    let target = zthread.ptr.cast::<Thread>();
+    unsafe {
+        thread::exit(thread);
+        let blocked = crate::signal::Blocked::all();
+        let guard = thread::lock_lifecycle();
+        let host = (*target).host;
+        let error = if host != 0 { libc::pthread_kill(host as libc::pthread_t, signal) } else { libc::ESRCH };
+        drop(guard);
+        drop(blocked);
+        thread::enter(thread);
+        error
+    }
+}
+
+pub(crate) fn check_zthread(ptr: Ptr) {
+    object::check_special(ptr, SPECIAL_THREAD, "zthread");
 }
 
 natives! {
@@ -212,46 +297,11 @@ natives! {
     }
 
     fn zthread_create2(thread: *mut Thread, function: Ptr, argument: Ptr, zthread: Ptr, tid: Ptr) -> bool {
-        if !globals::ctors_started() {
-            safety_panic(format_args!("cannot create threads before global constructors have started being run."));
+        let error = unsafe { create(thread, function, argument, zthread, tid, 0) };
+        if error != 0 {
+            unsafe { set_errno(thread, error) };
         }
-        object::check_function_call(function);
-        unsafe {
-            thread::exit(thread);
-            let signal_mask = block_all_signals();
-            let start = Start {
-                function,
-                argument,
-                zthread,
-                tid,
-                signal_mask,
-                started: Mutex::new(false),
-                changed: Condvar::new(),
-            };
-            let mut attributes = MaybeUninit::uninit();
-            libc::pthread_attr_init(attributes.as_mut_ptr());
-            libc::pthread_attr_setdetachstate(attributes.as_mut_ptr(), libc::PTHREAD_CREATE_DETACHED);
-            let mut ignored = MaybeUninit::uninit();
-            let result = libc::pthread_create(
-                ignored.as_mut_ptr(),
-                attributes.as_ptr(),
-                thread_entry,
-                (&raw const start).cast_mut().cast(),
-            );
-            libc::pthread_attr_destroy(attributes.as_mut_ptr());
-            libc::pthread_sigmask(libc::SIG_SETMASK, &signal_mask, null_mut());
-            if result == 0 {
-                let mut started = start.started.lock().unwrap_or_else(|e| e.into_inner());
-                while !*started {
-                    started = start.changed.wait(started).unwrap_or_else(|e| e.into_inner());
-                }
-            }
-            thread::enter(thread);
-            if result != 0 {
-                set_errno(thread, result);
-            }
-            result == 0
-        }
+        error == 0
     }
 
     fn zthread_exit(thread: *mut Thread, result: Ptr) -> () {
@@ -259,44 +309,19 @@ natives! {
     }
 
     fn zthread_join(thread: *mut Thread, zthread: Ptr, result: Ptr) -> bool {
-        check_zthread(zthread);
-        let target = zthread.ptr.cast::<Thread>();
-        if unsafe { (*target).forked.load(Ordering::Relaxed) } != 0 {
-            unsafe { set_errno(thread, libc::ESRCH) };
-            return false;
+        let error = unsafe { join(thread, zthread, result) };
+        if error != 0 {
+            unsafe { set_errno(thread, error) };
         }
-        unsafe {
-            thread::exit(thread);
-            thread::wait_until_finished(target);
-            thread::enter(thread);
-            if !result.ptr.is_null() {
-                ptrs::store(thread, result, (*target).result);
-            }
-        }
-        true
+        error == 0
     }
 
     fn zthread_kill(thread: *mut Thread, zthread: Ptr, signal: c_int) -> bool {
-        if crate::sys::is_internal_signal(signal) {
-            unsafe { set_errno(thread, libc::ENOSYS) };
-            return false;
+        let error = unsafe { kill(thread, zthread, signal) };
+        if error != 0 {
+            unsafe { set_errno(thread, error) };
         }
-        check_zthread(zthread);
-        let target = zthread.ptr.cast::<Thread>();
-        unsafe {
-            thread::exit(thread);
-            let blocked = crate::signal::Blocked::all();
-            let guard = thread::lock_lifecycle();
-            let host = (*target).host;
-            let error = if host != 0 { libc::pthread_kill(host as libc::pthread_t, signal) } else { libc::ESRCH };
-            drop(guard);
-            drop(blocked);
-            thread::enter(thread);
-            if error != 0 {
-                set_errno(thread, error);
-            }
-            error == 0
-        }
+        error == 0
     }
 
     fn zincrement_signal_deferral_depth(thread: *mut Thread) -> () {

@@ -355,10 +355,14 @@ fn wide_string(string: Ptr, precision: Option<i32>) -> Vec<libc::wchar_t> {
     wide
 }
 
+/// Formats the string at `format` with `arguments`.
+pub unsafe fn format(thread: *mut Thread, format: Ptr, arguments: Arguments) -> Vec<u8> {
+    unsafe { format_text(thread, &view::c_string(format), arguments) }
+}
+
 /// Formats `format` with `arguments`.
-pub unsafe fn format(thread: *mut Thread, format: Ptr, mut arguments: Arguments) -> Vec<u8> {
-    let format = view::c_string(format);
-    let pieces = parse(&format);
+pub unsafe fn format_text(thread: *mut Thread, format: &[u8], mut arguments: Arguments) -> Vec<u8> {
+    let pieces = parse(format);
     let values = unsafe { gather(&pieces, &mut arguments, thread) };
     let mut out = Vec::new();
     let mut next = 0usize;

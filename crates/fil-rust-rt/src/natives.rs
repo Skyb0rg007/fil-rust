@@ -99,6 +99,65 @@ impl Value for f64 {
     }
 }
 
+/// A `long double`, as near as a `double` gets: 16 bytes at a 16-byte
+/// boundary, the x87 80-bit value in the low 10.
+#[derive(Clone, Copy)]
+pub struct LongDouble(pub f64);
+
+impl Value for LongDouble {
+    unsafe fn take(thread: *mut Thread, args: &mut Args) -> LongDouble {
+        args.offset = args.offset.next_multiple_of(16);
+        let low = unsafe { *cc::slot(thread, args.next()) };
+        let high = unsafe { *cc::slot(thread, args.next()) };
+        LongDouble(x87_to_f64(low, high as u16))
+    }
+
+    unsafe fn give(self, thread: *mut Thread) -> usize {
+        let (mantissa, sign_exponent) = f64_to_x87(self.0);
+        unsafe {
+            cc::ensure_total(thread, 16);
+            *cc::slot(thread, 0) = mantissa;
+            *cc::aux_slot(thread, 0) = 0;
+            *cc::slot(thread, WORD_SIZE) = sign_exponent as u64;
+            *cc::aux_slot(thread, WORD_SIZE) = 0;
+        }
+        16
+    }
+}
+
+/// An x87 80-bit extended value, as a `double`.
+pub fn x87_to_f64(mantissa: u64, sign_exponent: u16) -> f64 {
+    let negative = sign_exponent & 0x8000 != 0;
+    let exponent = (sign_exponent & 0x7fff) as i32;
+    let magnitude = if exponent == 0 && mantissa == 0 {
+        0.0
+    } else if exponent == 0x7fff {
+        if mantissa << 1 == 0 { f64::INFINITY } else { f64::NAN }
+    } else {
+        (mantissa as f64) * 2f64.powi(exponent - 16383 - 63)
+    };
+    if negative { -magnitude } else { magnitude }
+}
+
+/// A `double` as an x87 80-bit extended value: the mantissa with its explicit
+/// integer bit, and the sign and exponent.
+pub fn f64_to_x87(value: f64) -> (u64, u16) {
+    let bits = value.to_bits();
+    let sign = ((bits >> 63) as u16) << 15;
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1 << 52) - 1);
+    match exponent {
+        0 if fraction == 0 => (0, sign),
+        0 => {
+            // Subnormal: normalize, as the x87 format has room.
+            let shift = fraction.leading_zeros() as i32;
+            ((fraction << shift), sign | (16383 - 1022 - (shift - 11)) as u16)
+        }
+        0x7ff => ((1 << 63) | (fraction << 11), sign | 0x7fff),
+        _ => ((1 << 63) | (fraction << 11), sign | (exponent - 1023 + 16383) as u16),
+    }
+}
+
 impl Value for f32 {
     unsafe fn take(thread: *mut Thread, args: &mut Args) -> f32 {
         f32::from_bits(unsafe { *cc::slot(thread, args.next()) } as u32)

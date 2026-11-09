@@ -373,6 +373,10 @@ natives! {
 pub fn aliases() -> Vec<(&'static str, *const ())> {
     vec![
         ("pizlonated___strdup", strdup::getter as *const ()),
+        ("pizlonated_strcoll_l", strcoll::getter as *const ()),
+        ("pizlonated___strcoll_l", strcoll::getter as *const ()),
+        ("pizlonated_strxfrm_l", strxfrm::getter as *const ()),
+        ("pizlonated___strxfrm_l", strxfrm::getter as *const ()),
         ("pizlonated___strndup", strndup::getter as *const ()),
         ("pizlonated___strtok_r", strtok_r::getter as *const ()),
         ("pizlonated___stpcpy", stpcpy::getter as *const ()),

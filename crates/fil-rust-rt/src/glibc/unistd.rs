@@ -95,6 +95,21 @@ natives! {
         unsafe { sys(thread, || libc::open(path.as_ptr(), libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC, mode)) }
     }
 
+    // Into `resolved`, which has to have room for the path, or a new string.
+    fn realpath(thread: *mut Thread, path: Ptr, resolved: Ptr) -> Ptr {
+        let path = unsafe { text(path) };
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+        if unsafe { sys(thread, || libc::realpath(path.as_ptr(), buffer.as_mut_ptr().cast())) }.is_null() {
+            return Ptr::NULL;
+        }
+        let length = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
+        if resolved.ptr.is_null() {
+            return unsafe { view::new_c_string(thread, &buffer[..length]) };
+        }
+        view::write(resolved, &buffer[..=length]);
+        resolved
+    }
+
     fn getcwd(thread: *mut Thread, buffer: Ptr, size: usize) -> Ptr {
         if !buffer.ptr.is_null() {
             if size == 0 {

@@ -126,7 +126,9 @@ let
         cargo test --offline ${target} -p fil-rust --features glibc \
           --test rt_bare --test rt_gc --test layout --test cpu --test libc_stand_ins \
           --test tables --test libc_core --test jumps --test libc_signals \
-          --test libc_stdio --test smoke --test calls --test misuse --test bindgen --test stdfil
+          --test libc_stdio --test smoke --test calls --test misuse --test bindgen --test stdfil \
+          --test libc_threads --test threads --test callbacks --test stress --test edges --test lifecycle \
+          --test cxx --test memory --test properties
       '';
     };
   };

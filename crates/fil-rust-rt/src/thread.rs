@@ -190,6 +190,8 @@ thread_local! {
 /// as the lock is released.
 unsafe fn detach(thread: *mut Thread) {
     unsafe { crate::signal::forget(thread) };
+    let _blocked = crate::signal::Blocked::all();
+    let _turn = crate::gc::take_turn();
     // A collection needs the slots to be flushed, or not in the list.
     let mut threads = lock_threads();
     threads.0.retain(|&entry| entry != thread as usize);
@@ -228,6 +230,10 @@ pub fn attach_new_thread() -> *mut Thread {
 
 fn attach() -> *mut Thread {
     let (low, top) = stack_bounds();
+    // In turn, or a thread collecting over and over could keep the list's
+    // lock to itself.
+    let blocked = crate::signal::Blocked::all();
+    let turn = crate::gc::take_turn();
     // A collection can't see the block until it's in the list.
     let mut threads = lock_threads();
     let thread = unsafe {
@@ -267,6 +273,8 @@ fn attach() -> *mut Thread {
     };
     threads.0.push(thread as usize);
     drop(threads);
+    drop(turn);
+    drop(blocked);
     CURRENT.with(|current| current.set(thread));
     unsafe { crate::signal::adopt(thread) };
     unsafe { crate::gc::rearm_under_stress(thread) };

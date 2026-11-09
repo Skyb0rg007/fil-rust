@@ -173,6 +173,11 @@ natives! {
         unsafe { parse(thread, string, end, |s, e| libc::strtof(s, e)) }
     }
 
+    // A `double`'s worth of the value, as a `long double`.
+    fn strtold(thread: *mut Thread, string: Ptr, end: Ptr) -> natives::LongDouble {
+        natives::LongDouble(unsafe { parse(thread, string, end, |s, e| libc::strtod(s, e)) })
+    }
+
     fn atoi(thread: *mut Thread, string: Ptr) -> c_int {
         unsafe { parse(thread, string, Ptr::NULL, |s, e| libc::strtol(s, e, 10)) as c_int }
     }
@@ -200,5 +205,28 @@ pub fn aliases() -> Vec<(&'static str, *const ())> {
         ("pizlonated_strtoumax", strtoull::getter as *const ()),
         ("pizlonated___isoc23_strtoimax", __isoc23_strtoll::getter as *const ()),
         ("pizlonated___isoc23_strtoumax", __isoc23_strtoull::getter as *const ()),
+        // The C locale's, which is the only one: the locale comes last and
+        // goes unread.
+        ("pizlonated_strtol_l", strtol::getter as *const ()),
+        ("pizlonated___strtol_l", strtol::getter as *const ()),
+        ("pizlonated_strtoul_l", strtoul::getter as *const ()),
+        ("pizlonated___strtoul_l", strtoul::getter as *const ()),
+        ("pizlonated_strtoll_l", strtoll::getter as *const ()),
+        ("pizlonated___strtoll_l", strtoll::getter as *const ()),
+        ("pizlonated_strtoull_l", strtoull::getter as *const ()),
+        ("pizlonated___strtoull_l", strtoull::getter as *const ()),
+        ("pizlonated___isoc23_strtol_l", __isoc23_strtol::getter as *const ()),
+        ("pizlonated___isoc23_strtoul_l", __isoc23_strtoul::getter as *const ()),
+        ("pizlonated___isoc23_strtoll_l", __isoc23_strtoll::getter as *const ()),
+        ("pizlonated___isoc23_strtoull_l", __isoc23_strtoull::getter as *const ()),
+        ("pizlonated_strtod_l", strtod::getter as *const ()),
+        ("pizlonated___strtod_l", strtod::getter as *const ()),
+        ("pizlonated___strtod_internal", strtod::getter as *const ()),
+        ("pizlonated_strtof_l", strtof::getter as *const ()),
+        ("pizlonated___strtof_l", strtof::getter as *const ()),
+        ("pizlonated___strtof_internal", strtof::getter as *const ()),
+        ("pizlonated_strtold_l", strtold::getter as *const ()),
+        ("pizlonated___strtold_l", strtold::getter as *const ()),
+        ("pizlonated___strtold_internal", strtold::getter as *const ()),
     ]
 }

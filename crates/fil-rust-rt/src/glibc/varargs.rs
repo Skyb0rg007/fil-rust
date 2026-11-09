@@ -77,16 +77,4 @@ impl Arguments {
     }
 }
 
-/// An x87 80-bit extended value, as a `double`.
-fn x87_to_f64(mantissa: u64, sign_exponent: u16) -> f64 {
-    let negative = sign_exponent & 0x8000 != 0;
-    let exponent = (sign_exponent & 0x7fff) as i32;
-    let magnitude = if exponent == 0 && mantissa == 0 {
-        0.0
-    } else if exponent == 0x7fff {
-        if mantissa << 1 == 0 { f64::INFINITY } else { f64::NAN }
-    } else {
-        (mantissa as f64) * 2f64.powi(exponent - 16383 - 63)
-    };
-    if negative { -magnitude } else { magnitude }
-}
+use crate::natives::x87_to_f64;

@@ -18,6 +18,9 @@ mod dir;
 mod env;
 mod error;
 mod formatting;
+mod locale;
+pub(crate) mod pthread;
+mod scanf;
 mod stdio;
 mod stdlib;
 mod signal;
@@ -25,6 +28,7 @@ mod string;
 mod time;
 mod unistd;
 mod varargs;
+pub(crate) mod wide;
 
 /// What the libc keeps per thread. It lives in the thread's `ThreadExtra`,
 /// which the collector marks, never in a `thread_local!`: registering a
@@ -38,11 +42,15 @@ pub struct ThreadState {
     dlerror: Ptr,
     /// Where `strtok` carries on from, or null.
     pub(crate) strtok: Ptr,
+    /// The values of `pthread_key_t`s, with the key's generation when set.
+    pub(crate) keys: Vec<(u64, Ptr)>,
+    /// What `uselocale` set, or null for the global locale.
+    pub(crate) locale: Ptr,
 }
 
 impl Default for ThreadState {
     fn default() -> Self {
-        ThreadState { errno: None, dlerror: Ptr::NULL, strtok: Ptr::NULL }
+        ThreadState { errno: None, dlerror: Ptr::NULL, strtok: Ptr::NULL, keys: Vec::new(), locale: Ptr::NULL }
     }
 }
 
@@ -54,6 +62,10 @@ impl ThreadState {
         }
         visit(self.dlerror.object());
         visit(self.strtok.object());
+        visit(self.locale.object());
+        for &(_, value) in &self.keys {
+            visit(value.object());
+        }
     }
 }
 
@@ -116,6 +128,13 @@ pub fn for_each_root(mut visit: impl FnMut(*mut Object)) {
     callbacks::for_each_root(&mut visit);
     stdio::for_each_root(&mut visit);
     dir::for_each_root(&mut visit);
+    pthread::for_each_root(&mut visit);
+}
+
+/// A thread Fil-C created is about to finish, its start function having
+/// returned.
+pub(crate) unsafe fn thread_ending(me: *mut Thread) {
+    unsafe { pthread::run_key_destructors(me) };
 }
 
 /// Flushes what the process buffers for Fil-C code, before it exits.
@@ -145,6 +164,14 @@ pub fn table() -> Vec<(&'static str, *const ())> {
     table.extend(stdio::aliases());
     table.extend(dir::table());
     table.extend(dir::aliases());
+    table.extend(pthread::table());
+    table.extend(pthread::aliases());
+    table.extend(locale::table());
+    table.extend(locale::aliases());
+    table.extend(wide::table());
+    table.extend(wide::aliases());
+    table.extend(scanf::table());
+    table.extend(scanf::aliases());
     table
 }
 

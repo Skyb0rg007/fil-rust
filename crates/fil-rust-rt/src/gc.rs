@@ -161,9 +161,12 @@ fn lock_turns() -> MutexGuard<'static, Turns> {
     TURNS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-struct Turn;
+pub(crate) struct Turn;
 
-fn take_turn() -> Turn {
+/// Waits for this thread's turn among collections and whatever else stops the
+/// world or changes the thread list, which is first come, first served: a
+/// thread that keeps collecting can't keep others from attaching.
+pub(crate) fn take_turn() -> Turn {
     let mut turns = lock_turns();
     let mine = turns.next;
     turns.next += 1;

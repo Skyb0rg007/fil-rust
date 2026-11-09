@@ -26,6 +26,24 @@ fn known(number: c_int) -> bool {
 }
 
 natives! {
+    // glibc's message, then `abort`.
+    fn __assert_fail(thread: *mut Thread, assertion: Ptr, file: Ptr, line: u32, function: Ptr) -> () {
+        let text = |at: Ptr| String::from_utf8_lossy(&view::c_string(at)).into_owned();
+        let program = std::env::args_os()
+            .next()
+            .and_then(|path| std::path::Path::new(&path).file_name().map(|name| name.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        let function = if function.ptr.is_null() { String::new() } else { format!("{}: ", text(function)) };
+        let message = format!("{program}: {}:{line}: {function}Assertion `{}' failed.\n", text(file), text(assertion));
+        unsafe {
+            crate::sys::plain::<()>(thread, || {
+                drop(std::io::stdout().flush());
+                drop(std::io::stderr().write_all(message.as_bytes()));
+                libc::abort()
+            })
+        };
+    }
+
     fn strerror(thread: *mut Thread, number: c_int) -> Ptr {
         unsafe { interned(thread, &error_text(number)) }
     }
