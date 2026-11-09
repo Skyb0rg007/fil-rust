@@ -184,7 +184,7 @@ pub use fil_rust_sys::Flavor;
 pub use handle::{FilBuf, FilHandle};
 pub use library::{EmbeddedLibrary, Library};
 pub use ptr::{Capability, FilPtr, Opaque, Ptr};
-pub use runtime::{Backend, Collection, Config, Fil, HeapStats, JoinHandle, Libc, Runtime};
+pub use runtime::{Collection, Config, Fil, HeapStats, JoinHandle, Libc, Runtime};
 pub use types::{FilType, Leaf, LeafKind, Place, Word};
 
 #[cfg(feature = "derive")]

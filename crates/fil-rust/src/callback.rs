@@ -1,5 +1,6 @@
 //! Rust closures callable from Fil-C.
 
+use fil_rust_rt::shim as rt;
 use std::any::Any;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -33,7 +34,7 @@ where
         let (args, sret) = Sig::callback_args(fil, argument_size);
         let ret = (self.f)(fil, args);
         Sig::callback_return(fil, &ret, sret)
-            .unwrap_or_else(|e| fail(fil, &format!("encoding a callback's return value: {e}")))
+            .unwrap_or_else(|e| fail(&format!("encoding a callback's return value: {e}")))
     }
 }
 
@@ -50,10 +51,10 @@ impl Registry {
 
 /// Reports a fatal error inside a callback. Unwinding can't cross back into
 /// Fil-C, so this ends the process with a Fil-C panic.
-pub(crate) fn fail(fil: &Fil<'_>, message: &str) -> ! {
+pub(crate) fn fail(message: &str) -> ! {
     let msg = std::ffi::CString::new(format!("fil-rust: {message}"))
         .unwrap_or_else(|_| c"fil-rust: callback failed".to_owned());
-    unsafe { (fil.shim().fr_panic)(msg.as_ptr()) };
+    unsafe { rt::fr_panic(msg.as_ptr()) };
     std::process::abort()
 }
 
@@ -79,13 +80,13 @@ pub(crate) unsafe extern "C" fn callback_entry(
     let previous = set_current_thread(thread);
     let callback = fil.lock(&inner.callbacks.map).get(&id).cloned();
     let Some(callback) = callback else {
-        fail(&fil, "a callback was invoked after it was dropped");
+        fail("a callback was invoked after it was dropped");
     };
     let result = catch_unwind(AssertUnwindSafe(|| callback.invoke(&fil, argument_size)));
     set_current_thread(previous);
     match result {
         Ok(size) => size,
-        Err(panic) => fail(&fil, &format!("a Rust callback panicked: {}", panic_message(&*panic))),
+        Err(panic) => fail(&format!("a Rust callback panicked: {}", panic_message(&*panic))),
     }
 }
 
@@ -123,7 +124,7 @@ impl<Sig: FilSig> Callback<Sig> {
         let id = inner.callbacks.next.fetch_add(1, Ordering::Relaxed);
         let erased: Arc<dyn Erased> = Arc::new(Typed::<Sig, F> { f, _marker: PhantomData });
         fil.lock(&inner.callbacks.map).insert(id, erased);
-        let raw = unsafe { (fil.shim().fr_closure_new)(fil.thread, id) };
+        let raw = unsafe { rt::fr_closure_new(fil.thread, id) };
         let closure = match fil.root(FilPtr::<Opaque>::from_raw(raw)) {
             Ok(handle) => handle,
             Err(e) => {
@@ -148,7 +149,7 @@ impl<Sig: FilSig> Drop for Callback<Sig> {
         if crate::runtime::in_forked_child() {
             return;
         }
-        let removed = lock_anywhere(self.inner, &self.inner.callbacks.map).remove(&self.id);
+        let removed = lock_anywhere(&self.inner.callbacks.map).remove(&self.id);
         // Drop the closure after releasing the lock: its destructor may do
         // anything, including creating or dropping other callbacks.
         drop(removed);

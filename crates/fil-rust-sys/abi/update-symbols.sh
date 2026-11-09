@@ -3,7 +3,9 @@
 #
 #   crates/fil-rust-sys/abi/update-symbols.sh <fil-c source tree>
 #
-# Run it inside nix-shell, once per Fil-C version. Each line of an output file
+# Run it inside nix-shell, once per Fil-C version, with the source tree checked
+# out at that version. It also checks the runtime's layouts against the tree's
+# headers, which aren't available otherwise. Each line of an output file
 # is one symbol the stub must define:
 #
 #   H name   a helper the compiler can call directly
@@ -40,3 +42,7 @@ generate() {
 
 generate "$FILC_ROOT/pizfix/lib/libpizlo.so" "$here/runtime_symbols_musl.txt"
 generate "$FILC_GLIBC_ROOT/lib/libpizlo.so" "$here/runtime_symbols_glibc.txt"
+
+cd "$here/../../.."
+FILC_RUNTIME_SRC=$source_tree/libpas/src/libpas \
+    cargo test -p fil-rust-rt --test layout -- --ignored

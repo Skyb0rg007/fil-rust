@@ -3,11 +3,12 @@
 use std::ffi::{CString, c_void};
 use std::path::{Path, PathBuf};
 
+use fil_rust_rt::shim as rt;
 use fil_rust_sys::{Flavor, RawPtr, dlerror_string, dlopen_path, loaded_objects};
 
 use crate::call::{FilFn, FilSig, Function};
 use crate::ptr::{FilPtr, Opaque};
-use crate::runtime::{Backend, Config, Inner};
+use crate::runtime::{Config, Inner};
 use crate::types::FilType;
 use crate::{Error, Fil, Result};
 
@@ -82,7 +83,7 @@ impl Library {
     /// The address of the symbol `name` (a function or a global variable).
     pub fn symbol<'f>(&self, fil: &Fil<'f>, name: &str) -> Result<FilPtr<'f, Opaque>> {
         let getter = self.getter(name)?;
-        let raw: RawPtr = unsafe { (fil.shim().fr_call_getter)(fil.thread, getter) };
+        let raw: RawPtr = unsafe { rt::fr_call_getter(fil.thread, getter) };
         Ok(FilPtr::from_raw(raw))
     }
 
@@ -108,10 +109,9 @@ impl Library {
 }
 
 /// Fails if the process has mapped what fil-rust means to stand in for. The
-/// real yolo libc would put two C libraries in one address space. On the Rust
-/// backend, the same goes for libpizlo, which would bring a second runtime, and
-/// for a Fil-C libc that wasn't loaded through here, which would have no thread
-/// to run on.
+/// real yolo libc would put two C libraries in one address space, libpizlo a
+/// second runtime, and a Fil-C libc that wasn't loaded through here would have
+/// no thread to run on.
 pub(crate) fn check_no_foreign_runtime(config: &Config, has_libc: bool) -> Result<()> {
     let flavor = config.flavor();
     for name in loaded_objects() {
@@ -126,9 +126,9 @@ pub(crate) fn check_no_foreign_runtime(config: &Config, has_libc: bool) -> Resul
             )));
         }
         let foreign_libc = !has_libc && flavor.libc_stand_ins().iter().any(|lib| lib.soname == base);
-        if config.backend() == Backend::Rust && (base == "libpizlo.so" || foreign_libc) {
+        if base == "libpizlo.so" || foreign_libc {
             return Err(Error::Load(format!(
-                "{name} was loaded into the process, but the Rust runtime stands in for it"
+                "{name} was loaded into the process, but fil-rust stands in for it"
             )));
         }
     }

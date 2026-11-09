@@ -70,7 +70,7 @@ pub struct Installed {
 fn load_stub(flavor: Flavor) -> Result<Installed, String> {
     let compat = flavor.compat_libs().ok_or_else(|| format!("{flavor:?} support wasn't built"))?;
     let flags = libc::RTLD_NOW | libc::RTLD_GLOBAL;
-    for lib in compat.iter().filter(|lib| lib.soname != "libpizlo.so") {
+    for lib in compat {
         unsafe { dlopen_bytes(lib.soname, lib.bytes, flags) }?;
     }
     let mut libc = std::ptr::null_mut();

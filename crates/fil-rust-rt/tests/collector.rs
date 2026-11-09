@@ -18,7 +18,7 @@ unsafe extern "C" fn collect_then_return(thread: *mut FilcThread, _: u64, _: usi
     unsafe {
         gc::collect(thread.cast());
         LIVE_IN_CALLBACK.store(gc::stats().live_bytes, Ordering::Relaxed);
-        (shim::table().fr_cc_set_word)(thread, 8, 0, 0);
+        shim::fr_cc_set_word(thread, 8, 0, 0);
     }
     8
 }
@@ -26,11 +26,10 @@ unsafe extern "C" fn collect_then_return(thread: *mut FilcThread, _: u64, _: usi
 #[test]
 fn arguments_are_alive_as_a_callback_starts() {
     install(Flavor::Musl).unwrap();
-    let table = shim::table();
-    unsafe { (table.fr_init)(no_main, collect_then_return) };
+    unsafe { shim::fr_init(no_main, collect_then_return) };
     gc::set_collection(gc::Collection::Manual);
     let (with_argument, without) = run(|thread| unsafe {
-        let closure = (table.fr_closure_new)(thread.cast(), 1);
+        let closure = shim::fr_closure_new(thread.cast(), 1);
         let closure = Ptr { ptr: closure.ptr.cast(), lower: closure.lower.cast() };
         let measure = |argument| {
             call(thread, closure, &[argument], &mut [Ptr::NULL]);

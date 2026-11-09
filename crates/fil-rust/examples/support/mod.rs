@@ -10,12 +10,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use fil_rust::{Config, Flavor, Runtime};
+use fil_rust::{Config, Flavor, Libc, Runtime};
 
-/// Starts the runtime from `FILC_FLAVOR` and the distribution root variables.
+/// Starts the runtime from `FILC_FLAVOR` and the distribution root variables,
+/// with the Fil-C libc, since the examples load libraries inside
+/// `Runtime::run`.
 pub fn runtime() -> Runtime {
     let config = Config::from_env().expect("set FILC_ROOT / FILC_GLIBC_ROOT (run in nix-shell)");
-    Runtime::start(config).expect("starting the Fil-C runtime")
+    Runtime::start(config.libc(Libc::Always)).expect("starting the Fil-C runtime")
 }
 
 /// Compiles `examples/c/<file>` into a shared library and returns its path.

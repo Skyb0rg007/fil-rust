@@ -1,19 +1,19 @@
 //! Starting the Fil-C runtime inside this (glibc) process, and running Rust
 //! code on its threads.
 
+use fil_rust_rt::shim as rt;
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 pub use fil_rust_rt::gc::{Collection, HeapStats};
-use fil_rust_sys::{FilcThread, Flavor, RawPtr, Shim, StartProgramFn};
+use fil_rust_sys::{FilcThread, Flavor, RawPtr};
 
 use crate::callback::Registry;
 use crate::handle::HandleTable;
@@ -22,24 +22,10 @@ use crate::ptr::FilPtr;
 use crate::types::{FilType, raw_add};
 use crate::{Error, Result, error};
 
-/// Which runtime hosts compiled Fil-C code.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Backend {
-    /// The distribution's own `libpizlo.so`, with its concurrent collector and
-    /// libc, on threads of its own.
-    #[default]
-    Pizlo,
-    /// `fil-rust-rt`. A process that doesn't need the Fil-C libc runs Fil-C on
-    /// the threads that ask for it and starts nothing else. One that does
-    /// has executor threads as well, but no collector thread.
-    Rust,
-}
-
 /// Whether the process loads the Fil-C libc.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Libc {
-    /// As the backend needs. [`Backend::Rust`] loads it for the first library
-    /// that imports from it, through [`Runtime::load`], which waits for any
+    /// For the first library that imports from it, through [`Runtime::load`], which waits for any
     /// [`Runtime::run`] in progress. Until then, [`Runtime::libc`] has none of
     /// its symbols.
     #[default]
@@ -59,7 +45,6 @@ pub struct Config {
     max_workers: usize,
     args: Vec<String>,
     search_path: Vec<PathBuf>,
-    backend: Backend,
     libc: Libc,
     collection: Collection,
 }
@@ -80,7 +65,6 @@ impl Config {
                 std::env::args().next().unwrap_or_else(|| "fil-rust".to_string()),
             ],
             search_path: Vec::new(),
-            backend: Backend::default(),
             libc: Libc::default(),
             collection: Collection::default(),
         }
@@ -102,9 +86,8 @@ impl Config {
     /// * `FILC_MUSL_ROOT` (or `FILC_ROOT`) / `FILC_GLIBC_ROOT`: the
     ///   distribution root for the chosen flavor;
     /// * `FIL_RUST_WORKERS`: number of executor threads (optional);
-    /// * `FIL_RUST_RUNTIME`: `pizlo` (default) or `rust`;
-    /// * `FIL_RUST_GC_STRESS`: on `rust`, collect at every nth safepoint and
-    ///   scribble over swept memory, to find references the collector missed.
+    /// * `FIL_RUST_GC_STRESS`: collect at every nth safepoint and scribble
+    ///   over swept memory, to find references the collector missed.
     pub fn from_env() -> Result<Config> {
         let flavor = match std::env::var("FILC_FLAVOR").as_deref() {
             Err(_) | Ok("musl") | Ok("") => Flavor::Musl,
@@ -128,28 +111,16 @@ impl Config {
         if let Some(n) = std::env::var("FIL_RUST_WORKERS").ok().and_then(|v| v.parse().ok()) {
             config = config.workers(n);
         }
-        match std::env::var("FIL_RUST_RUNTIME").as_deref() {
-            Err(_) | Ok("pizlo") | Ok("") => {}
-            Ok("rust") => config = config.runtime(Backend::Rust),
-            Ok(other) => return Err(Error::Load(format!("unknown FIL_RUST_RUNTIME {other:?}"))),
-        }
         Ok(config)
     }
 
-    /// The runtime that hosts Fil-C code.
-    pub fn runtime(mut self, backend: Backend) -> Config {
-        self.backend = backend;
-        self
-    }
-
-    /// When collections happen on [`Backend::Rust`]. libpizlo has its own
-    /// collector and takes no such setting.
+    /// When collections happen.
     pub fn collection(mut self, collection: Collection) -> Config {
         self.collection = collection;
         self
     }
 
-    /// Whether to load the Fil-C libc. [`Backend::Pizlo`] can't do without it.
+    /// Whether to load the Fil-C libc.
     pub fn libc(mut self, libc: Libc) -> Config {
         self.libc = libc;
         self
@@ -198,11 +169,6 @@ impl Config {
 
     pub fn flavor(&self) -> Flavor {
         self.flavor
-    }
-
-    /// The runtime that hosts Fil-C code.
-    pub fn backend(&self) -> Backend {
-        self.backend
     }
 
     /// The number of executor threads started up front.
@@ -272,9 +238,6 @@ struct Queue {
 
 pub(crate) struct Inner {
     pub(crate) config: Config,
-    pub(crate) shim: Shim,
-    /// The Rust backend, which has its own collector.
-    rust: bool,
     /// Where the Fil-C libc stands.
     mode: Mutex<Mode>,
     mode_cv: Condvar,
@@ -293,7 +256,6 @@ pub(crate) struct Inner {
 }
 
 static INNER: OnceLock<&'static Inner> = OnceLock::new();
-static SHIM: OnceLock<Shim> = OnceLock::new();
 static START_LOCK: Mutex<()> = Mutex::new(());
 
 /// Set in the child of a `fork`. The child has only the forking thread: the
@@ -326,10 +288,6 @@ thread_local! {
 /// The Fil-C libc's handle if it's loaded on the Rust backend, or null.
 pub(crate) fn loaded_libc_handle() -> *mut c_void {
     INNER.get().and_then(|inner| inner.libc.get()).map_or(std::ptr::null_mut(), Library::handle)
-}
-
-pub(crate) fn shim() -> Option<&'static Shim> {
-    SHIM.get()
 }
 
 pub(crate) fn current_thread() -> *mut FilcThread {
@@ -369,15 +327,10 @@ impl Runtime {
     pub fn start(config: Config) -> Result<Runtime> {
         let _guard = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(inner) = INNER.get() {
-            let same = inner.config.flavor == config.flavor
-                && inner.config.root == config.root
-                && inner.config.backend == config.backend;
+            let same = inner.config.flavor == config.flavor && inner.config.root == config.root;
             return if same { Ok(Runtime { inner }) } else { Err(Error::AlreadyStarted) };
         }
-        let inner = match config.backend {
-            Backend::Pizlo => unsafe { boot(config)? },
-            Backend::Rust => boot_bare(config)?,
-        };
+        let inner = boot(config)?;
         Ok(Runtime { inner })
     }
 
@@ -403,9 +356,9 @@ impl Runtime {
         self.inner.config.flavor
     }
 
-    /// The Fil-C user libc, for calling its functions, which on
-    /// [`Backend::Rust`] with [`Libc::Auto`] loads it, unless this is inside
-    /// [`Runtime::run`]. Then it has none of the symbols.
+    /// The Fil-C user libc, for calling its functions. With [`Libc::Auto`],
+    /// this loads it, unless this is inside [`Runtime::run`]. Then it has none
+    /// of the symbols.
     pub fn libc(&self) -> &'static Library {
         if self.inner.config.libc == Libc::Auto && self.inner.is_bare() && current_thread().is_null() {
             let _ = self.inner.start_libc();
@@ -423,9 +376,9 @@ impl Runtime {
     ///
     /// If called from a Fil-C thread that is already running Rust code (inside
     /// a job or a callback), `f` runs right there in a nested scope; otherwise
-    /// it runs on one of the runtime's executor threads while this thread
-    /// waits. With [`Backend::Rust`], it always runs on this thread. Panics in
-    /// `f` propagate to the caller.
+    /// it runs on this thread, or on one of the executors while this thread
+    /// waits once the Fil-C libc is loaded. Panics in `f` propagate to the
+    /// caller.
     pub fn run<R, F>(&self, f: F) -> R
     where
         F: for<'f> FnOnce(&Fil<'f>) -> R + Send,
@@ -456,8 +409,8 @@ impl Runtime {
         }
     }
 
-    /// Runs `f` on a Fil-C executor thread in the background. With
-    /// [`Backend::Rust`], that's a new thread.
+    /// Runs `f` in the background: on a new thread, or on an executor once the
+    /// Fil-C libc is loaded.
     pub fn spawn<R, F>(&self, f: F) -> JoinHandle<R>
     where
         F: for<'f> FnOnce(&Fil<'f>) -> R + Send + 'static,
@@ -532,26 +485,17 @@ impl Runtime {
         self.run(|fil| fil.collect_garbage())
     }
 
-    /// Changes when collections happen on [`Backend::Rust`].
+    /// Changes when collections happen.
     pub fn set_collection(&self, collection: Collection) -> Result<()> {
-        self.require_rust_collector()?;
         fil_rust_rt::gc::set_collection(collection);
         Ok(())
     }
 
-    /// The state of the heap on [`Backend::Rust`].
+    /// The state of the heap.
     pub fn heap_stats(&self) -> Result<HeapStats> {
-        self.require_rust_collector()?;
         Ok(fil_rust_rt::gc::stats())
     }
 
-    fn require_rust_collector(&self) -> Result<()> {
-        if self.inner.rust {
-            Ok(())
-        } else {
-            Err(Error::Unsupported("libpizlo's collector runs on its own terms".into()))
-        }
-    }
 }
 
 /// The result of [`Runtime::spawn`].
@@ -586,14 +530,7 @@ impl<R> JoinHandle<R> {
 }
 
 impl Inner {
-    fn new(
-        config: Config,
-        shim: Shim,
-        rust: bool,
-        libc: Option<Library>,
-        stand_in: Option<Library>,
-        runtime_lib: Library,
-    ) -> &'static Inner {
+    fn new(config: Config, libc: Option<Library>, stand_in: Option<Library>, runtime_lib: Library) -> &'static Inner {
         let mode = if libc.is_some() { Mode::Libc } else { Mode::Bare { running: 0 } };
         let cell = OnceLock::new();
         if let Some(libc) = libc {
@@ -601,8 +538,6 @@ impl Inner {
         }
         Box::leak(Box::new(Inner {
             config,
-            shim,
-            rust,
             mode: Mutex::new(mode),
             mode_cv: Condvar::new(),
             libc: cell,
@@ -688,7 +623,7 @@ impl Inner {
 
     fn push_job(&self, job: Job) {
         // `spawn` may be called from inside a job.
-        let mut queue = lock_anywhere(self, &self.queue);
+        let mut queue = lock_anywhere(&self.queue);
         queue.jobs.push_back(job);
         // Grow the pool if every executor is busy, so that jobs that block
         // can't starve the others (or deadlock waiting on them).
@@ -760,21 +695,20 @@ unsafe fn run_inline<R, F>(inner: &'static Inner, thread: *mut FilcThread, f: F)
 where
     F: for<'f> FnOnce(&Fil<'f>) -> R,
 {
-    let shim = &inner.shim;
-    let was_entered = unsafe { (shim.fr_is_entered)(thread) } != 0;
+    let was_entered = unsafe { rt::fr_is_entered(thread) } != 0;
     if !was_entered {
-        unsafe { (shim.fr_enter)(thread) };
+        unsafe { rt::fr_enter(thread) };
     }
-    struct Leave<'a>(&'a Shim, *mut FilcThread, bool);
-    impl Drop for Leave<'_> {
+    struct Leave(*mut FilcThread, bool);
+    impl Drop for Leave {
         fn drop(&mut self) {
-            if self.2 {
-                unsafe { (self.0.fr_exit)(self.1) };
+            if self.1 {
+                unsafe { rt::fr_exit(self.0) };
             }
         }
     }
-    let _leave = Leave(shim, thread, !was_entered);
-    in_native_frame(inner, thread, || {
+    let _leave = Leave(thread, !was_entered);
+    in_native_frame(thread, || {
         let fil = unsafe { Fil::new(inner, thread) };
         f(&fil)
     })
@@ -806,7 +740,7 @@ where
 /// Runs `f` inside a new native frame on `thread` (which must be entered).
 /// Objects tracked while `f` runs are released afterwards. A panic in `f` is
 /// carried across the C frame and resumed here.
-pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(inner: &Inner, thread: *mut FilcThread, f: F) -> R {
+pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(thread: *mut FilcThread, f: F) -> R {
     struct Payload<F, R> {
         f: Option<F>,
         result: Option<std::thread::Result<R>>,
@@ -820,7 +754,7 @@ pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(inner: &Inner, thread: *mut F
 
     let mut payload = Payload { f: Some(f), result: None };
     unsafe {
-        (inner.shim.fr_with_native_frame)(
+        rt::fr_with_native_frame(
             thread,
             trampoline::<F, R>,
             (&mut payload as *mut Payload<F, R>).cast(),
@@ -832,13 +766,9 @@ pub(crate) fn in_native_frame<R, F: FnOnce() -> R>(inner: &Inner, thread: *mut F
     }
 }
 
-/// The Fil-C main thread, which takes signals that land on Rust threads.
-static MAIN_TID: AtomicI32 = AtomicI32::new(0);
-
 unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) {
     let inner = *INNER.get().expect("runtime initialized before executors start");
-    // Name the thread for debuggers and `ps`. (On glibc, filc_start_program
-    // runs `main` on the boot thread itself; on musl, on a new thread.)
+    // Name the thread for debuggers and `ps`.
     let name: &CStr = if is_main != 0 { c"fil-c-main" } else { c"fil-c-worker" };
     unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
     // On the main thread too: it calls into Fil-C (to start executors), and
@@ -849,7 +779,6 @@ unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) 
     // constructor creating threads holds it.
     set_current_thread(thread);
     if is_main != 0 {
-        MAIN_TID.store(unsafe { libc::gettid() }, Ordering::Release);
         // The main Fil-C thread starts the executors, then stays around to
         // start more on demand (only a Fil-C thread can create Fil-C threads).
         let mut spawned = {
@@ -860,7 +789,7 @@ unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) 
         };
         let mut request = spawned;
         loop {
-            in_native_frame(inner, thread, || {
+            in_native_frame(thread, || {
                 let fil = unsafe { Fil::new(inner, thread) };
                 if let Err(e) = spawn_workers(&fil, request) {
                     eprintln!("fil-rust: failed to start Fil-C executor threads: {e}");
@@ -869,18 +798,18 @@ unsafe extern "C" fn thread_main_entry(thread: *mut FilcThread, is_main: c_int) 
                 }
             });
             inner.mark_ready();
-            unsafe { (inner.shim.fr_exit)(thread) };
+            unsafe { rt::fr_exit(thread) };
             request = inner.wait_for_spawn_requests(&mut spawned);
-            unsafe { (inner.shim.fr_enter)(thread) };
+            unsafe { rt::fr_enter(thread) };
         }
     }
     let mut first = true;
     loop {
-        unsafe { (inner.shim.fr_exit)(thread) };
+        unsafe { rt::fr_exit(thread) };
         let job = inner.next_job(first);
         first = false;
-        unsafe { (inner.shim.fr_enter)(thread) };
-        in_native_frame(inner, thread, || {
+        unsafe { rt::fr_enter(thread) };
+        in_native_frame(thread, || {
             let fil = unsafe { Fil::new(inner, thread) };
             inner.handles.flush_pending(&fil);
             job(&fil);
@@ -893,7 +822,7 @@ fn spawn_workers(fil: &Fil<'_>, count: usize) -> Result<()> {
     let pthread_create = fil
         .libc()
         .function::<fn(crate::Ptr, crate::Ptr, crate::Ptr, crate::Ptr) -> i32>(fil, "pthread_create")?;
-    let worker = FilPtr::from_raw(unsafe { (fil.shim().fr_worker_function)() });
+    let worker = FilPtr::from_raw(unsafe { rt::fr_worker_function() });
     for _ in 0..count {
         let tid = fil.alloc_bytes(16)?;
         let rc = pthread_create.call(fil, (tid.cast(), FilPtr::null(), worker, FilPtr::null()))?;
@@ -914,147 +843,7 @@ extern "C" fn flush_at_exit() {
     }
 }
 
-unsafe fn boot(config: Config) -> Result<&'static Inner> {
-    use fil_rust_sys::{dlopen_bytes, dlopen_path, dlsym_checked};
-
-    if config.libc == Libc::Never {
-        return Err(Error::Unsupported("libpizlo can't run without the Fil-C libc".into()));
-    }
-    if config.collection != Collection::default() {
-        return Err(Error::Unsupported("libpizlo's collector runs on its own terms".into()));
-    }
-    let flavor = config.flavor;
-    let unsupported = || {
-        Error::Unsupported(format!(
-            "support for the {flavor:?} flavor was not built (enable the `{}` feature)",
-            if flavor == Flavor::Musl { "musl" } else { "glibc" }
-        ))
-    };
-    let compat = flavor.compat_libs().ok_or_else(unsupported)?;
-    let shim_bytes = flavor.shim().ok_or_else(unsupported)?;
-
-    let lib_dir = config.lib_dir();
-    if !lib_dir.join("libpizlo.so").exists() {
-        return Err(Error::Load(format!(
-            "{} does not contain libpizlo.so; is {} a {flavor:?} Fil-C distribution?",
-            lib_dir.display(),
-            config.root.display()
-        )));
-    }
-
-    // Order matters: the compat stand-ins must be loaded before anything from
-    // the distribution, so that Fil-C objects bind to them by soname instead
-    // of pulling in the real yolo libc through their RUNPATH.
-    let global = libc::RTLD_NOW | libc::RTLD_GLOBAL;
-    let mut compat_handles = Vec::new();
-    for lib in compat {
-        compat_handles.push(unsafe { dlopen_bytes(lib.soname, lib.bytes, global) }.map_err(Error::Load)?);
-    }
-    let runtime_path = lib_dir.join("libpizlo.so");
-    let runtime_handle = unsafe { dlopen_path(&runtime_path, global) }.map_err(Error::Load)?;
-    // Where the host libc behaves differently from the yolo libc libpizlo
-    // was built for, send libpizlo's calls to the stand-in's version. Nothing
-    // has run Fil-C code yet, so nothing is calling through these entries.
-    let redirects = flavor
-        .import_redirects()
-        .iter()
-        .map(|(symbol, replacement)| {
-            unsafe { dlsym_checked(compat_handles[flavor.stand_in_index()], replacement) }
-                .map(|f| (*symbol, f as *const c_void))
-        })
-        .collect::<std::result::Result<Vec<_>, String>>()
-        .map_err(Error::Load)?;
-    if !redirects.is_empty() {
-        unsafe { fil_rust_sys::redirect_imports(&runtime_path, &redirects) }.map_err(Error::Load)?;
-    }
-    let mut user_handles = Vec::new();
-    for path in config.user_libs() {
-        user_handles.push(unsafe { dlopen_path(&path, global) }.map_err(Error::Load)?);
-    }
-    crate::library::check_no_foreign_runtime(&config, true)?;
-
-    let shim_handle = unsafe { dlopen_bytes("libfilrust_shim.so", shim_bytes, libc::RTLD_NOW) }
-        .map_err(Error::Load)?;
-    let shim = unsafe { Shim::load(shim_handle) }.map_err(Error::Load)?;
-    let abi = unsafe { (shim.fr_abi_version)() };
-    if abi != fil_rust_sys::SHIM_ABI_VERSION {
-        return Err(Error::Load(format!("shim ABI version {abi} does not match the crate")));
-    }
-    let shim_is_glibc = unsafe { (shim.fr_runtime_is_glibc_flavor)() } != 0;
-    if shim_is_glibc != (flavor == Flavor::Glibc) {
-        return Err(Error::Load("runtime shim was built for the wrong flavor".into()));
-    }
-    let _ = SHIM.set(shim);
-
-    let start_program: StartProgramFn = unsafe {
-        std::mem::transmute(dlsym_checked(runtime_handle, "filc_start_program\0").map_err(Error::Load)?)
-    };
-    let libc_start_main: fil_rust_sys::Getter = unsafe {
-        std::mem::transmute(
-            dlsym_checked(user_handles[0], "pizlonated___libc_start_main\0").map_err(Error::Load)?,
-        )
-    };
-
-    let libc = Library::from_handle(user_handles[0], config.user_libs()[0].clone());
-    let runtime_lib = Library::from_handle(runtime_handle, runtime_path.clone());
-    let inner = Inner::new(config, shim, false, Some(libc), None, runtime_lib);
-    let _ = INNER.set(inner);
-    unsafe { libc::pthread_atfork(None, None, Some(mark_forked)) };
-    install_panic_hook();
-    unsafe { (shim.fr_init)(thread_main_entry, crate::callback::callback_entry) };
-
-    // filc_start_program never returns: it parks the calling thread and runs
-    // the Fil-C program (whose `main` is our executor) on its own thread.
-    let (argc, argv) = leaked_argv(&inner.config);
-    let main_getter = shim.fr_main_getter;
-    std::thread::Builder::new()
-        .name("fil-c-boot".into())
-        .spawn(move || unsafe {
-            start_program(argc, argv as *mut *mut c_char, libc_start_main, main_getter);
-        })
-        .map_err(|e| Error::Load(format!("spawning the boot thread: {e}")))?;
-    inner.wait_until_ready()?;
-
-    // Route signals that Fil-C handles but that land on Rust threads to the
-    // Fil-C main thread (see compat_signals.inc).
-    unsafe {
-        type SignalsInit = unsafe extern "C" fn(*const c_void, libc::pid_t, *const c_void);
-        let init: SignalsInit = std::mem::transmute(
-            dlsym_checked(compat_handles[flavor.stand_in_index()], "fil_rust_signals_init\0").map_err(Error::Load)?,
-        );
-        let get_my_thread = dlsym_checked(runtime_handle, "filc_get_my_thread\0").map_err(Error::Load)?;
-        let mut info: libc::Dl_info = std::mem::zeroed();
-        if libc::dladdr(get_my_thread, &mut info) == 0 {
-            return Err(Error::Load("cannot find libpizlo's load address".into()));
-        }
-        init(get_my_thread, MAIN_TID.load(Ordering::Acquire), info.dli_fbase);
-    }
-
-    let rt = Runtime { inner };
-    rt.run(|fil| -> Result<()> {
-        if unsafe { (fil.shim().fr_check_thread_layout)(fil.thread) } == 0 {
-            return Err(Error::Load("runtime shim disagrees with libpizlo on filc_thread".into()));
-        }
-        Ok(())
-    })?;
-    unsafe { libc::atexit(flush_at_exit) };
-    Ok(inner)
-}
-
-/// argv for the Fil-C side, which lives for the rest of the process.
-fn leaked_argv(config: &Config) -> (c_int, usize) {
-    let args: Vec<CString> = config
-        .args
-        .iter()
-        .map(|a| CString::new(a.as_str()).unwrap_or_else(|_| c"fil-rust".to_owned()))
-        .collect();
-    let argc = args.len() as c_int;
-    let mut argv: Vec<*mut c_char> = args.into_iter().map(CString::into_raw).collect();
-    argv.push(std::ptr::null_mut());
-    (argc, Box::leak(argv.into_boxed_slice()).as_mut_ptr() as usize)
-}
-
-/// Loads the Fil-C libc into a process on the Rust backend, and starts its
+/// Loads the Fil-C libc into the process, and starts its
 /// `main`. Nothing may be running Fil-C code. What's already loaded stays, and
 /// libraries keep binding to the stand-in by name, finding the real one's
 /// symbols in the global scope.
@@ -1070,7 +859,7 @@ unsafe fn load_and_start_libc(inner: &'static Inner) -> Result<()> {
     let libc_start_main: fil_rust_rt::abi::GetterFn = unsafe {
         std::mem::transmute(dlsym_checked(handles[0], "pizlonated___libc_start_main\0").map_err(Error::Load)?)
     };
-    let main: fil_rust_rt::abi::GetterFn = unsafe { std::mem::transmute(inner.shim.fr_main_getter) };
+    let main: fil_rust_rt::abi::GetterFn = unsafe { std::mem::transmute(rt::fr_main_getter as *const ()) };
     let _ = inner.libc.set(Library::from_handle(handles[0], config.user_libs()[0].clone()));
     let args: Vec<Vec<u8>> = config.args.iter().map(|arg| arg.clone().into_bytes()).collect();
     std::thread::Builder::new()
@@ -1089,26 +878,34 @@ unsafe fn load_and_start_libc(inner: &'static Inner) -> Result<()> {
 /// Library constructors run on this stack, so it's as big as a real `main`'s.
 const MAIN_STACK_SIZE: usize = 8 << 20;
 
-/// Starts the Rust runtime, which is only a matter of loading it: threads
-/// attach when they first run Fil-C code.
-fn boot_bare(config: Config) -> Result<&'static Inner> {
+/// Starts the runtime, which is only a matter of loading it: threads attach
+/// when they first run Fil-C code.
+fn boot(config: Config) -> Result<&'static Inner> {
     let flavor = config.flavor;
     if flavor != Flavor::Musl {
         return Err(Error::Unsupported(format!("the Rust runtime doesn't support the {flavor:?} flavor yet")));
     }
+    // Nothing is loaded from the distribution yet, but libraries find their
+    // dependencies there: a wrong root should fail here, not at the first load.
+    let marker = config.lib_dir().join("libpizlo.so");
+    if !marker.is_file() {
+        return Err(Error::Load(format!(
+            "{} isn't a Fil-C {flavor:?} distribution: there's no {}",
+            config.root.display(),
+            marker.display()
+        )));
+    }
     let installed = fil_rust_rt::install(flavor).map_err(Error::Load)?;
     fil_rust_rt::gc::set_collection(config.collection);
     crate::library::check_no_foreign_runtime(&config, false)?;
-    let shim = fil_rust_rt::shim::table();
-    let _ = SHIM.set(shim);
     let stand_in = Library::from_handle(installed.libc as *mut c_void, PathBuf::from("libc.so"));
     let runtime_lib = Library::from_handle(installed.runtime as *mut c_void, PathBuf::from("libpizlo.so"));
     let always = config.libc == Libc::Always;
-    let inner = Inner::new(config, shim, true, None, Some(stand_in), runtime_lib);
+    let inner = Inner::new(config, None, Some(stand_in), runtime_lib);
     let _ = INNER.set(inner);
     unsafe { libc::pthread_atfork(None, None, Some(mark_forked)) };
     install_panic_hook();
-    unsafe { (shim.fr_init)(thread_main_entry, crate::callback::callback_entry) };
+    unsafe { rt::fr_init(thread_main_entry, crate::callback::callback_entry) };
     if always {
         inner.start_libc()?;
     }
@@ -1159,10 +956,6 @@ impl<'f> Fil<'f> {
         Fil { inner, thread, _brand: PhantomData }
     }
 
-    pub(crate) fn shim(&self) -> &'static Shim {
-        &self.inner.shim
-    }
-
     /// The runtime this thread belongs to.
     pub fn runtime(&self) -> Runtime {
         Runtime { inner: self.inner }
@@ -1173,7 +966,7 @@ impl<'f> Fil<'f> {
     pub fn scope<R>(&self, f: impl for<'g> FnOnce(&Fil<'g>) -> R) -> R {
         let inner = self.inner;
         let thread = self.thread;
-        in_native_frame(inner, thread, || {
+        in_native_frame(thread, || {
             let fil = unsafe { Fil::new(inner, thread) };
             f(&fil)
         })
@@ -1186,9 +979,9 @@ impl<'f> Fil<'f> {
     /// Fil-C memory is off limits while exited. Pointers from the enclosing
     /// scope stay alive.
     pub fn exited<R>(&self, f: impl FnOnce() -> R + Send) -> R {
-        unsafe { (self.shim().fr_exit)(self.thread) };
+        unsafe { rt::fr_exit(self.thread) };
         let result = catch_unwind(AssertUnwindSafe(f));
-        unsafe { (self.shim().fr_enter)(self.thread) };
+        unsafe { rt::fr_enter(self.thread) };
         match result {
             Ok(value) => value,
             Err(panic) => resume_unwind(panic),
@@ -1199,7 +992,7 @@ impl<'f> Fil<'f> {
     /// deferred signals). Call it in long-running loops that don't otherwise
     /// call into Fil-C.
     pub fn pollcheck(&self) {
-        unsafe { (self.shim().fr_pollcheck)(self.thread) };
+        unsafe { rt::fr_pollcheck(self.thread) };
     }
 
     /// The Fil-C user libc.
@@ -1294,18 +1087,13 @@ impl<'f> Fil<'f> {
         Ok(self.bytes(s.to_bytes_with_nul())?.cast())
     }
 
-    /// Requests a garbage collection cycle and waits for it to finish. With
-    /// [`Backend::Rust`], this thread is the one collecting, unless the
-    /// [`Collection`] is [`Collection::Never`]. Every thread has to reach a
+    /// Collects garbage on this thread and returns when that's done, unless
+    /// the [`Collection`] is [`Collection::Never`]. Every thread has to reach a
     /// safepoint first, so one that's entered and never calls into Fil-C or
     /// [`Fil::pollcheck`] holds this up.
     pub fn collect_garbage(&self) -> Result<()> {
-        if self.inner.rust {
-            unsafe { fil_rust_rt::gc::collect(self.thread.cast()) };
-            return Ok(());
-        }
-        let gc = self.runtime_library().function::<fn()>(self, "zgc_request_and_wait")?;
-        gc.call(self, ())
+        unsafe { fil_rust_rt::gc::collect(self.thread.cast()) };
+        Ok(())
     }
 
     /// `fflush(NULL)` in the Fil-C libc, if there is one.
@@ -1330,17 +1118,16 @@ impl<'f> Fil<'f> {
         if size > isize::MAX as usize / 2 || !align.is_power_of_two() {
             return Err(Error::OutOfBounds);
         }
-        Ok(unsafe { (self.shim().fr_allocate)(self.thread, size, align) })
+        Ok(unsafe { rt::fr_allocate(self.thread, size, align) })
     }
 
     pub(crate) fn copy_out_raw(&self, at: RawPtr, buf: &mut [u8]) -> Result<()> {
-        let shim = self.shim();
-        error::check(unsafe { (shim.fr_check)(at, buf.len(), 0) })?;
+        error::check(unsafe { rt::fr_check(at, buf.len(), 0) })?;
         let mut done = 0;
         while done < buf.len() {
             let n = (buf.len() - done).min(COPY_CHUNK);
             error::check(unsafe {
-                (shim.fr_copy_out)(self.thread, raw_add(at, done), buf[done..].as_mut_ptr().cast(), n)
+                rt::fr_copy_out(self.thread, raw_add(at, done), buf[done..].as_mut_ptr().cast(), n)
             })?;
             done += n;
             if done < buf.len() {
@@ -1351,13 +1138,12 @@ impl<'f> Fil<'f> {
     }
 
     pub(crate) fn copy_in_raw(&self, at: RawPtr, bytes: &[u8]) -> Result<()> {
-        let shim = self.shim();
-        error::check(unsafe { (shim.fr_check)(at, bytes.len(), 1) })?;
+        error::check(unsafe { rt::fr_check(at, bytes.len(), 1) })?;
         let mut done = 0;
         while done < bytes.len() {
             let n = (bytes.len() - done).min(COPY_CHUNK);
             error::check(unsafe {
-                (shim.fr_copy_in)(self.thread, raw_add(at, done), bytes[done..].as_ptr().cast(), n)
+                rt::fr_copy_in(self.thread, raw_add(at, done), bytes[done..].as_ptr().cast(), n)
             })?;
             done += n;
             if done < bytes.len() {
@@ -1368,23 +1154,23 @@ impl<'f> Fil<'f> {
     }
 
     pub(crate) fn memmove_raw(&self, dst: RawPtr, src: RawPtr, len: usize) -> Result<()> {
-        error::check(unsafe { (self.shim().fr_memmove)(self.thread, dst, src, len) })
+        error::check(unsafe { rt::fr_memmove(self.thread, dst, src, len) })
     }
 
     pub(crate) fn strlen_raw(&self, at: RawPtr) -> Result<usize> {
         let mut len = 0usize;
-        error::check(unsafe { (self.shim().fr_strlen)(at, &mut len) })?;
+        error::check(unsafe { rt::fr_strlen(at, &mut len) })?;
         Ok(len)
     }
 
     pub(crate) fn load_ptr_raw(&self, at: RawPtr) -> Result<RawPtr> {
         let mut out = RawPtr::NULL;
-        error::check(unsafe { (self.shim().fr_load_ptr)(self.thread, at, &mut out) })?;
+        error::check(unsafe { rt::fr_load_ptr(self.thread, at, &mut out) })?;
         Ok(out)
     }
 
     pub(crate) fn store_ptr_raw(&self, at: RawPtr, value: RawPtr) -> Result<()> {
-        error::check(unsafe { (self.shim().fr_store_ptr)(self.thread, at, value) })
+        error::check(unsafe { rt::fr_store_ptr(self.thread, at, value) })
     }
 
     /// Acquires `mutex` without blocking the garbage collector: if it's
@@ -1394,9 +1180,9 @@ impl<'f> Fil<'f> {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
-                unsafe { (self.shim().fr_exit)(self.thread) };
+                unsafe { rt::fr_exit(self.thread) };
                 let guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
-                unsafe { (self.shim().fr_enter)(self.thread) };
+                unsafe { rt::fr_enter(self.thread) };
                 guard
             }
         }
@@ -1408,13 +1194,12 @@ impl<'f> Fil<'f> {
 /// entered; see [`lock_anywhere`]).
 pub(crate) fn outside_runtime<R>(f: impl FnOnce() -> R) -> R {
     let thread = current_thread();
-    let shim = match shim() {
-        Some(shim) if !thread.is_null() && unsafe { (shim.fr_is_entered)(thread) } != 0 => shim,
-        _ => return f(),
-    };
-    unsafe { (shim.fr_exit)(thread) };
+    if thread.is_null() || unsafe { rt::fr_is_entered(thread) } == 0 {
+        return f();
+    }
+    unsafe { rt::fr_exit(thread) };
     let result = catch_unwind(AssertUnwindSafe(f));
-    unsafe { (shim.fr_enter)(thread) };
+    unsafe { rt::fr_enter(thread) };
     match result {
         Ok(value) => value,
         Err(panic) => resume_unwind(panic),
@@ -1427,19 +1212,19 @@ pub(crate) fn outside_runtime<R>(f: impl FnOnce() -> R) -> R {
 /// collector's handshakes would wait for it, and lock holders that re-enter
 /// the runtime could deadlock with it. So on such a thread, a contended lock
 /// is waited for outside the runtime.
-pub(crate) fn lock_anywhere<'m, T>(inner: &Inner, mutex: &'m Mutex<T>) -> std::sync::MutexGuard<'m, T> {
+pub(crate) fn lock_anywhere<'m, T>(mutex: &'m Mutex<T>) -> std::sync::MutexGuard<'m, T> {
     match mutex.try_lock() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => {
             let thread = current_thread();
-            let entered = !thread.is_null() && unsafe { (inner.shim.fr_is_entered)(thread) } != 0;
+            let entered = !thread.is_null() && unsafe { rt::fr_is_entered(thread) } != 0;
             if entered {
-                unsafe { (inner.shim.fr_exit)(thread) };
+                unsafe { rt::fr_exit(thread) };
             }
             let guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
             if entered {
-                unsafe { (inner.shim.fr_enter)(thread) };
+                unsafe { rt::fr_enter(thread) };
             }
             guard
         }

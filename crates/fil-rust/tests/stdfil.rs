@@ -1,5 +1,4 @@
 //! The parts of `stdfil.h` that ask the runtime about itself, seen from C.
-//! Backend-neutral.
 
 mod common;
 

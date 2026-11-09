@@ -10,7 +10,7 @@ use std::sync::Barrier;
 use std::time::Duration;
 
 use common::{fixture, flavor};
-use fil_rust::{Backend, Collection, Config, Error, Libc, Ptr, Runtime};
+use fil_rust::{Collection, Config, Error, Libc, Ptr, Runtime};
 
 const CHILD: &str = "FIL_RUST_RT_LIBC_CHILD";
 
@@ -34,7 +34,7 @@ fn passes(case: &str) {
 }
 
 fn config() -> Config {
-    Config::from_env_for(flavor()).unwrap().runtime(Backend::Rust)
+    Config::from_env_for(flavor()).unwrap()
 }
 
 /// Whether the Fil-C libc is in the process.

@@ -1,6 +1,5 @@
 //! Processes, System V IPC, timers and the remaining system calls, seen from C
-//! through the unmodified libc. This is backend-neutral, so what passes here
-//! means the same on both.
+//! through the unmodified libc.
 
 mod common;
 
@@ -95,9 +94,7 @@ fn privileged_calls_get_their_arguments() {
 
 #[test]
 fn quota_commands_are_recognized() {
-    if runtime().config().backend() == fil_rust::Backend::Rust {
-        check("asking_for_a_quota");
-    }
+    check("asking_for_a_quota");
 }
 
 #[test]

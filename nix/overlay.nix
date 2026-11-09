@@ -12,7 +12,4 @@ final: prev:
   # (Not null elsewhere: splicing would fill a null in with the build
   # machine's package. env.nix checks the platform.)
   optfil = final.callPackage ./optfil.nix { };
-
-  # The Fil-C runtime sources the shim is compiled against.
-  filc-runtime-src = final.callPackage ./filc-runtime-src.nix { };
 }

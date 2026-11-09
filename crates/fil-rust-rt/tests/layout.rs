@@ -1,5 +1,9 @@
 //! Checks the layouts in `abi.rs` against the headers of the runtime they were
 //! taken from, by having a C compiler assert each one.
+//!
+//! The headers are in Fil-C's source, which isn't pinned through Nix, so this
+//! runs by hand, when the pinned Fil-C version changes: `abi/update-symbols.sh`
+//! in fil-rust-sys runs it against a checkout of that version.
 
 use std::fmt::Write;
 use std::mem::{offset_of, size_of};
@@ -8,10 +12,11 @@ use std::process::Command;
 use fil_rust_rt::abi::*;
 
 fn env(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set (run the tests in nix-shell)"))
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
 }
 
 #[test]
+#[ignore = "needs a Fil-C checkout in FILC_RUNTIME_SRC; run by abi/update-symbols.sh"]
 fn layouts_match_the_runtime_headers() {
     let values: &[(&str, usize)] = &[
         ("sizeof(filc_object)", OBJECT_SIZE),
@@ -74,7 +79,7 @@ fn layouts_match_the_runtime_headers() {
     let file = format!("{directory}/layout.c");
     std::fs::write(&file, source).unwrap();
 
-    let clang = env("FILC_HOST_CLANG");
+    let clang = std::env::var("FILC_HOST_CLANG").unwrap_or_else(|_| "clang".into());
     let resource = Command::new(&clang).arg("-print-resource-dir").output().unwrap();
     let resource = String::from_utf8(resource.stdout).unwrap();
     let mut cmd = Command::new(&clang);

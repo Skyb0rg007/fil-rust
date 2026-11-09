@@ -1,5 +1,4 @@
-//! Sockets, seen from C through the unmodified libc. This is backend-neutral,
-//! so what passes here means the same on both.
+//! Sockets, seen from C through the unmodified libc.
 
 mod common;
 

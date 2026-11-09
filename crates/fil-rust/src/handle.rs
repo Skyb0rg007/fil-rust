@@ -1,5 +1,6 @@
 //! Keeping Fil-C objects alive beyond a scope, and Rust-owned Fil-C buffers.
 
+use fil_rust_rt::shim as rt;
 use std::marker::PhantomData;
 use std::sync::Mutex;
 
@@ -37,7 +38,7 @@ impl HandleTable {
         let index = match state.free.pop() {
             Some(index) => index,
             None => {
-                let capacity = unsafe { (fil.shim().fr_root_capacity)() };
+                let capacity = unsafe { rt::fr_root_capacity() };
                 if state.next >= capacity {
                     return Err(Error::HandleTableFull);
                 }
@@ -46,7 +47,7 @@ impl HandleTable {
             }
         };
         // Holding the lock serializes chunk creation in the shim.
-        if let Err(e) = error::check(unsafe { (fil.shim().fr_root_set)(fil.thread, index, value) }) {
+        if let Err(e) = error::check(unsafe { rt::fr_root_set(fil.thread, index, value) }) {
             state.free.push(index);
             return Err(e);
         }
@@ -55,18 +56,18 @@ impl HandleTable {
 
     pub(crate) fn get(&self, fil: &Fil<'_>, index: usize) -> RawPtr {
         let mut out = RawPtr::NULL;
-        let status = unsafe { (fil.shim().fr_root_get)(fil.thread, index, &mut out) };
+        let status = unsafe { rt::fr_root_get(fil.thread, index, &mut out) };
         debug_assert_eq!(status, 0);
         out
     }
 
-    pub(crate) fn release(&self, inner: &Inner, index: usize) {
+    pub(crate) fn release(&self, index: usize) {
         // In a forked child the lock may be held forever by a thread that
         // didn't survive the fork; the child can't use the runtime anyway.
         if crate::runtime::in_forked_child() {
             return;
         }
-        lock_anywhere(inner, &self.pending).push(index);
+        lock_anywhere(&self.pending).push(index);
     }
 
     pub(crate) fn flush_pending(&self, fil: &Fil<'_>) {
@@ -76,7 +77,7 @@ impl HandleTable {
         }
         let mut state = fil.lock(&self.state);
         for index in indices {
-            unsafe { (fil.shim().fr_root_set)(fil.thread, index, RawPtr::NULL) };
+            unsafe { rt::fr_root_set(fil.thread, index, RawPtr::NULL) };
             state.free.push(index);
         }
     }
@@ -120,7 +121,7 @@ impl<T: ?Sized> FilHandle<T> {
 
 impl<T: ?Sized> Drop for FilHandle<T> {
     fn drop(&mut self) {
-        self.inner.handles.release(self.inner, self.index);
+        self.inner.handles.release(self.index);
     }
 }
 
@@ -203,7 +204,7 @@ impl std::ops::DerefMut for FilBuf {
 
 impl Drop for FilBuf {
     fn drop(&mut self) {
-        self.inner.handles.release(self.inner, self.index);
+        self.inner.handles.release(self.index);
     }
 }
 

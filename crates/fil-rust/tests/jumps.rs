@@ -1,4 +1,4 @@
-//! `setjmp` and `longjmp`, on either backend.
+//! `setjmp` and `longjmp`.
 
 mod common;
 

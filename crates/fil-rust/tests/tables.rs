@@ -1,6 +1,5 @@
 //! Pointer tables, weak references, weak maps and finalizer queues, seen from
-//! C. Backend-neutral, but for one upstream bug: libpizlo's concurrent collector
-//! and the Rust one have to agree on what a full collection leaves behind.
+//! C.
 
 mod common;
 
@@ -60,12 +59,9 @@ fn finalizers_without_a_queue() {
     check("finalizers_without_a_queue");
 }
 
-/// libpizlo hands these back after collecting them, issue 6 in
+/// Stock libpizlo hands these back after collecting them, issue 6 in
 /// docs/upstream-filc-issues.md.
 #[test]
 fn weak_things_reached_by_finalizable_objects() {
-    if runtime().config().backend() != fil_rust::Backend::Rust {
-        return;
-    }
     check("weak_things_reached_by_finalizable_objects");
 }

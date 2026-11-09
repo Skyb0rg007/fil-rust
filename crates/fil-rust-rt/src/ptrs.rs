@@ -19,12 +19,15 @@ pub mod atomic16 {
     unsafe fn cas_raw(target: *mut u128, expected: u128, new: u128) -> u128 {
         let (mut low, mut high) = (expected as u64, (expected >> 64) as u64);
         unsafe {
-            // rbx can't be an operand: LLVM keeps it for itself.
+            // rbx can't be named as an operand: LLVM keeps it for itself. But
+            // a `reg` operand can still be given rbx, and the xchg would then
+            // replace the address with the new value, so the address is in a
+            // fixed register.
             core::arch::asm!(
                 "xchg {new_low}, rbx",
-                "lock cmpxchg16b [{target}]",
+                "lock cmpxchg16b [rdi]",
                 "mov rbx, {new_low}",
-                target = in(reg) target,
+                in("rdi") target,
                 new_low = inout(reg) new as u64 => _,
                 inout("rax") low,
                 inout("rdx") high,

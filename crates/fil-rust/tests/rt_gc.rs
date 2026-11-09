@@ -13,14 +13,14 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use common::{fixture, flavor, without_core_dumps};
-use fil_rust::{Backend, Collection, Config, Error, Fil, FilHandle, Library, Ptr, Runtime};
+use fil_rust::{Collection, Config, Error, Fil, FilHandle, Library, Ptr, Runtime};
 
 fn stressed() -> bool {
     std::env::var_os("FIL_RUST_GC_STRESS").is_some()
 }
 
 fn config() -> Config {
-    Config::from_env_for(flavor()).unwrap().runtime(Backend::Rust)
+    Config::from_env_for(flavor()).unwrap()
 }
 
 fn runtime() -> Runtime {

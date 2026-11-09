@@ -1,12 +1,13 @@
-//! The table of `fr_*` functions the `fil-rust` crate is written against: the
-//! same one its C shim gives it for libpizlo.
+//! The `fr_*` functions the `fil-rust` crate is written against. They report
+//! failures as `fil_rust_sys::status` codes rather than panicking, so the safe
+//! API can turn them into errors.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr::{null, null_mut, read_volatile};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-use fil_rust_sys::{CallbackFn, FilcThread, PtrInfo, RawPtr, SHIM_ABI_VERSION, Shim, ThreadMainFn, status};
+use fil_rust_sys::{CallbackFn, FilcThread, PtrInfo, RawPtr, ThreadMainFn, status};
 
 use crate::abi::*;
 use crate::failure::{internal_panic, safety_panic, user_panic};
@@ -53,19 +54,7 @@ pub unsafe fn for_each_root(mut visit: impl FnMut(*mut Object)) {
     }
 }
 
-unsafe extern "C" fn fr_abi_version() -> u32 {
-    SHIM_ABI_VERSION
-}
-
-unsafe extern "C" fn fr_sizeof_thread() -> usize {
-    size_of::<Thread>()
-}
-
-unsafe extern "C" fn fr_runtime_is_glibc_flavor() -> c_int {
-    0
-}
-
-unsafe extern "C" fn fr_init(thread_main: ThreadMainFn, callback: CallbackFn) {
+pub unsafe extern "C" fn fr_init(thread_main: ThreadMainFn, callback: CallbackFn) {
     THREAD_MAIN.store(thread_main as usize, Ordering::Release);
     CALLBACK.store(callback as usize, Ordering::Release);
 }
@@ -88,36 +77,28 @@ unsafe extern "C" fn worker_entry(thread: *mut Thread, _: *mut u8, _: usize) -> 
 }
 
 /// The program's `main`, which is the first executor.
-unsafe extern "C" fn fr_main_getter(_: *mut FilcThread, _: *const c_void) -> RawPtr {
+pub unsafe extern "C" fn fr_main_getter(_: *mut FilcThread, _: *const c_void) -> RawPtr {
     static CELL: AtomicPtr<FunctionObject> = AtomicPtr::new(null_mut());
     to_raw(function_object(&CELL, main_entry))
 }
 
-unsafe extern "C" fn fr_my_thread() -> *mut FilcThread {
-    thread::current().cast()
-}
-
-unsafe extern "C" fn fr_check_thread_layout(thread: *mut FilcThread) -> c_int {
-    (to_thread(thread) == thread::current()) as c_int
-}
-
-unsafe extern "C" fn fr_enter(t: *mut FilcThread) {
+pub unsafe extern "C" fn fr_enter(t: *mut FilcThread) {
     unsafe { thread::enter(to_thread(t)) };
 }
 
-unsafe extern "C" fn fr_exit(t: *mut FilcThread) {
+pub unsafe extern "C" fn fr_exit(t: *mut FilcThread) {
     unsafe { thread::exit(to_thread(t)) };
 }
 
-unsafe extern "C" fn fr_is_entered(t: *mut FilcThread) -> c_int {
+pub unsafe extern "C" fn fr_is_entered(t: *mut FilcThread) -> c_int {
     unsafe { crate::helpers::is_entered(to_thread(t)) as c_int }
 }
 
-unsafe extern "C" fn fr_pollcheck(t: *mut FilcThread) {
+pub unsafe extern "C" fn fr_pollcheck(t: *mut FilcThread) {
     unsafe { thread::poll(to_thread(t)) };
 }
 
-unsafe extern "C" fn fr_with_native_frame(t: *mut FilcThread, body: unsafe extern "C" fn(*mut c_void), arg: *mut c_void) {
+pub unsafe extern "C" fn fr_with_native_frame(t: *mut FilcThread, body: unsafe extern "C" fn(*mut c_void), arg: *mut c_void) {
     let thread = to_thread(t);
     unsafe {
         let frame = NativeFrame::push(thread);
@@ -127,24 +108,24 @@ unsafe extern "C" fn fr_with_native_frame(t: *mut FilcThread, body: unsafe exter
 }
 
 /// The executor loop as a `pthread_create` start routine.
-unsafe extern "C" fn fr_worker_function() -> RawPtr {
+pub unsafe extern "C" fn fr_worker_function() -> RawPtr {
     static CELL: AtomicPtr<FunctionObject> = AtomicPtr::new(null_mut());
     to_raw(function_object(&CELL, worker_entry))
 }
 
-unsafe extern "C" fn fr_panic(message: *const c_char) {
+pub unsafe extern "C" fn fr_panic(message: *const c_char) {
     user_panic(format_args!("{}", unsafe { CStr::from_ptr(message) }.to_string_lossy()));
 }
 
-unsafe extern "C" fn fr_args_check_failure(actual: usize, expected: usize) {
+pub unsafe extern "C" fn fr_args_check_failure(actual: usize, expected: usize) {
     safety_panic(format_args!("argument size mismatch (actual = {actual}, expected = {expected})."));
 }
 
-unsafe extern "C" fn fr_root_capacity() -> usize {
+pub unsafe extern "C" fn fr_root_capacity() -> usize {
     ROOT_CAPACITY
 }
 
-unsafe extern "C" fn fr_root_set(_: *mut FilcThread, index: usize, value: RawPtr) -> c_int {
+pub unsafe extern "C" fn fr_root_set(_: *mut FilcThread, index: usize, value: RawPtr) -> c_int {
     if index >= ROOT_CAPACITY {
         return status::OUT_OF_BOUNDS;
     }
@@ -156,7 +137,7 @@ unsafe extern "C" fn fr_root_set(_: *mut FilcThread, index: usize, value: RawPtr
     status::OK
 }
 
-unsafe extern "C" fn fr_root_get(t: *mut FilcThread, index: usize, out: *mut RawPtr) -> c_int {
+pub unsafe extern "C" fn fr_root_get(t: *mut FilcThread, index: usize, out: *mut RawPtr) -> c_int {
     unsafe { *out = RawPtr::NULL };
     if index >= ROOT_CAPACITY {
         return status::OUT_OF_BOUNDS;
@@ -201,7 +182,7 @@ fn access_status(ptr: Ptr, size: usize, write: bool) -> c_int {
     status::OK
 }
 
-unsafe extern "C" fn fr_ptr_info_get(raw: RawPtr, out: *mut PtrInfo) -> c_int {
+pub unsafe extern "C" fn fr_ptr_info_get(raw: RawPtr, out: *mut PtrInfo) -> c_int {
     let ptr = to_ptr(raw);
     unsafe {
         *out = PtrInfo::default();
@@ -217,11 +198,11 @@ unsafe extern "C" fn fr_ptr_info_get(raw: RawPtr, out: *mut PtrInfo) -> c_int {
     status::OK
 }
 
-unsafe extern "C" fn fr_check(raw: RawPtr, size: usize, write: c_int) -> c_int {
+pub unsafe extern "C" fn fr_check(raw: RawPtr, size: usize, write: c_int) -> c_int {
     access_status(to_ptr(raw), size, write != 0)
 }
 
-unsafe extern "C" fn fr_allocate(t: *mut FilcThread, size: usize, alignment: usize) -> RawPtr {
+pub unsafe extern "C" fn fr_allocate(t: *mut FilcThread, size: usize, alignment: usize) -> RawPtr {
     let thread = to_thread(t);
     unsafe {
         thread::poll(thread);
@@ -231,7 +212,7 @@ unsafe extern "C" fn fr_allocate(t: *mut FilcThread, size: usize, alignment: usi
     }
 }
 
-unsafe extern "C" fn fr_copy_in(_: *mut FilcThread, dst: RawPtr, src: *const c_void, size: usize) -> c_int {
+pub unsafe extern "C" fn fr_copy_in(_: *mut FilcThread, dst: RawPtr, src: *const c_void, size: usize) -> c_int {
     let result = access_status(to_ptr(dst), size, true);
     if result == status::OK && size != 0 {
         unsafe { std::ptr::copy_nonoverlapping(src.cast::<u8>(), dst.ptr.cast(), size) };
@@ -239,7 +220,7 @@ unsafe extern "C" fn fr_copy_in(_: *mut FilcThread, dst: RawPtr, src: *const c_v
     result
 }
 
-unsafe extern "C" fn fr_copy_out(_: *mut FilcThread, src: RawPtr, dst: *mut c_void, size: usize) -> c_int {
+pub unsafe extern "C" fn fr_copy_out(_: *mut FilcThread, src: RawPtr, dst: *mut c_void, size: usize) -> c_int {
     let result = access_status(to_ptr(src), size, false);
     if result == status::OK && size != 0 {
         unsafe { std::ptr::copy_nonoverlapping(src.ptr.cast::<u8>(), dst.cast(), size) };
@@ -247,7 +228,7 @@ unsafe extern "C" fn fr_copy_out(_: *mut FilcThread, src: RawPtr, dst: *mut c_vo
     result
 }
 
-unsafe extern "C" fn fr_memmove(t: *mut FilcThread, dst: RawPtr, src: RawPtr, size: usize) -> c_int {
+pub unsafe extern "C" fn fr_memmove(t: *mut FilcThread, dst: RawPtr, src: RawPtr, size: usize) -> c_int {
     let (dst, src) = (to_ptr(dst), to_ptr(src));
     let mut result = access_status(dst, size, true);
     if result == status::OK {
@@ -259,7 +240,7 @@ unsafe extern "C" fn fr_memmove(t: *mut FilcThread, dst: RawPtr, src: RawPtr, si
     result
 }
 
-unsafe extern "C" fn fr_strlen(raw: RawPtr, out: *mut usize) -> c_int {
+pub unsafe extern "C" fn fr_strlen(raw: RawPtr, out: *mut usize) -> c_int {
     let ptr = to_ptr(raw);
     let result = access_status(ptr, 0, false);
     if result != status::OK {
@@ -284,7 +265,7 @@ fn word_access_status(ptr: Ptr, write: bool) -> c_int {
     result
 }
 
-unsafe extern "C" fn fr_load_ptr(t: *mut FilcThread, base: RawPtr, out: *mut RawPtr) -> c_int {
+pub unsafe extern "C" fn fr_load_ptr(t: *mut FilcThread, base: RawPtr, out: *mut RawPtr) -> c_int {
     unsafe { *out = RawPtr::NULL };
     let base = to_ptr(base);
     let result = word_access_status(base, false);
@@ -299,7 +280,7 @@ unsafe extern "C" fn fr_load_ptr(t: *mut FilcThread, base: RawPtr, out: *mut Raw
     status::OK
 }
 
-unsafe extern "C" fn fr_store_ptr(t: *mut FilcThread, base: RawPtr, value: RawPtr) -> c_int {
+pub unsafe extern "C" fn fr_store_ptr(t: *mut FilcThread, base: RawPtr, value: RawPtr) -> c_int {
     let base = to_ptr(base);
     let result = word_access_status(base, true);
     if result == status::OK {
@@ -308,11 +289,7 @@ unsafe extern "C" fn fr_store_ptr(t: *mut FilcThread, base: RawPtr, value: RawPt
     result
 }
 
-unsafe extern "C" fn fr_track(t: *mut FilcThread, raw: RawPtr) {
-    unsafe { thread::track(to_thread(t), to_ptr(raw).object()) };
-}
-
-unsafe extern "C" fn fr_call_getter(t: *mut FilcThread, getter: *mut c_void) -> RawPtr {
+pub unsafe extern "C" fn fr_call_getter(t: *mut FilcThread, getter: *mut c_void) -> RawPtr {
     let thread = to_thread(t);
     unsafe {
         let getter = std::mem::transmute::<*mut c_void, GetterFn>(getter);
@@ -322,7 +299,7 @@ unsafe extern "C" fn fr_call_getter(t: *mut FilcThread, getter: *mut c_void) -> 
     }
 }
 
-unsafe extern "C" fn fr_check_function(raw: RawPtr) -> c_int {
+pub unsafe extern "C" fn fr_check_function(raw: RawPtr) -> c_int {
     let ptr = to_ptr(raw);
     if ptr.lower.is_null() {
         return status::NULL_CAPABILITY;
@@ -334,7 +311,7 @@ unsafe extern "C" fn fr_check_function(raw: RawPtr) -> c_int {
     status::OK
 }
 
-unsafe extern "C" fn fr_cc_begin(t: *mut FilcThread, size: usize) {
+pub unsafe extern "C" fn fr_cc_begin(t: *mut FilcThread, size: usize) {
     let thread = to_thread(t);
     unsafe {
         cc::ensure_total(thread, size);
@@ -353,7 +330,7 @@ unsafe fn slot_ok(thread: *mut Thread, size: usize, offset: usize) -> bool {
         && size <= CC_INLINE_SIZE + unsafe { (*thread).cc_outline_size }
 }
 
-unsafe extern "C" fn fr_cc_set_word(t: *mut FilcThread, size: usize, offset: usize, value: u64) -> c_int {
+pub unsafe extern "C" fn fr_cc_set_word(t: *mut FilcThread, size: usize, offset: usize, value: u64) -> c_int {
     let thread = to_thread(t);
     unsafe {
         if !slot_ok(thread, size, offset) {
@@ -365,7 +342,7 @@ unsafe extern "C" fn fr_cc_set_word(t: *mut FilcThread, size: usize, offset: usi
     status::OK
 }
 
-unsafe extern "C" fn fr_cc_set_ptr(t: *mut FilcThread, size: usize, offset: usize, value: RawPtr) -> c_int {
+pub unsafe extern "C" fn fr_cc_set_ptr(t: *mut FilcThread, size: usize, offset: usize, value: RawPtr) -> c_int {
     let thread = to_thread(t);
     unsafe {
         if !slot_ok(thread, size, offset) {
@@ -377,7 +354,7 @@ unsafe extern "C" fn fr_cc_set_ptr(t: *mut FilcThread, size: usize, offset: usiz
     status::OK
 }
 
-unsafe extern "C" fn fr_cc_get_word(t: *mut FilcThread, size: usize, offset: usize, out: *mut u64) -> c_int {
+pub unsafe extern "C" fn fr_cc_get_word(t: *mut FilcThread, size: usize, offset: usize, out: *mut u64) -> c_int {
     let thread = to_thread(t);
     unsafe {
         *out = 0;
@@ -389,7 +366,7 @@ unsafe extern "C" fn fr_cc_get_word(t: *mut FilcThread, size: usize, offset: usi
     status::OK
 }
 
-unsafe extern "C" fn fr_cc_get_ptr(t: *mut FilcThread, size: usize, offset: usize, out: *mut RawPtr) -> c_int {
+pub unsafe extern "C" fn fr_cc_get_ptr(t: *mut FilcThread, size: usize, offset: usize, out: *mut RawPtr) -> c_int {
     let thread = to_thread(t);
     unsafe {
         *out = RawPtr::NULL;
@@ -403,7 +380,7 @@ unsafe extern "C" fn fr_cc_get_ptr(t: *mut FilcThread, size: usize, offset: usiz
     status::OK
 }
 
-unsafe extern "C" fn fr_call(t: *mut FilcThread, function: RawPtr, argument_size: usize, return_size: *mut usize) -> c_int {
+pub unsafe extern "C" fn fr_call(t: *mut FilcThread, function: RawPtr, argument_size: usize, return_size: *mut usize) -> c_int {
     let thread = to_thread(t);
     unsafe {
         *return_size = 0;
@@ -497,7 +474,7 @@ unsafe extern "C" fn callback_entry(thread: *mut Thread, callee_lower: *mut u8, 
     }
 }
 
-unsafe extern "C" fn fr_closure_new(t: *mut FilcThread, id: u64) -> RawPtr {
+pub unsafe extern "C" fn fr_closure_new(t: *mut FilcThread, id: u64) -> RawPtr {
     static BASE: AtomicPtr<FunctionObject> = AtomicPtr::new(null_mut());
     let thread = to_thread(t);
     let base = function_object(&BASE, callback_entry);
@@ -505,48 +482,5 @@ unsafe extern "C" fn fr_closure_new(t: *mut FilcThread, id: u64) -> RawPtr {
         let result = crate::natives::closure_new(thread, base, Ptr { ptr: id as *mut u8, lower: null_mut() });
         thread::track(thread, result.object());
         to_raw(result)
-    }
-}
-
-/// The table for the `fil-rust` crate.
-pub fn table() -> Shim {
-    Shim {
-        fr_abi_version,
-        fr_sizeof_thread,
-        fr_runtime_is_glibc_flavor,
-        fr_init,
-        fr_main_getter,
-        fr_my_thread,
-        fr_check_thread_layout,
-        fr_enter,
-        fr_exit,
-        fr_is_entered,
-        fr_pollcheck,
-        fr_with_native_frame,
-        fr_worker_function,
-        fr_panic,
-        fr_args_check_failure,
-        fr_root_capacity,
-        fr_root_set,
-        fr_root_get,
-        fr_ptr_info_get,
-        fr_check,
-        fr_allocate,
-        fr_copy_in,
-        fr_copy_out,
-        fr_memmove,
-        fr_strlen,
-        fr_load_ptr,
-        fr_store_ptr,
-        fr_track,
-        fr_call_getter,
-        fr_check_function,
-        fr_cc_begin,
-        fr_cc_set_word,
-        fr_cc_set_ptr,
-        fr_cc_get_word,
-        fr_cc_get_ptr,
-        fr_call,
-        fr_closure_new,
     }
 }

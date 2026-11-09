@@ -1,6 +1,5 @@
 //! Libraries with no libc imports, hosted by the Rust runtime on Rust's own
-//! threads. `FIL_RUST_RUNTIME=pizlo` runs what isn't specific to that hosting
-//! on libpizlo instead, as a check that the two behave alike.
+//! threads.
 
 mod common;
 
@@ -10,17 +9,10 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use common::{fixture, flavor};
-use fil_rust::{Backend, Config, Error, FilHandle, FilPtr, Library, Ptr, Runtime};
-
-fn backend() -> Backend {
-    match std::env::var("FIL_RUST_RUNTIME").as_deref() {
-        Ok("pizlo") => Backend::Pizlo,
-        _ => Backend::Rust,
-    }
-}
+use fil_rust::{Config, Error, FilHandle, FilPtr, Library, Ptr, Runtime};
 
 fn config() -> Config {
-    Config::from_env_for(flavor()).unwrap().runtime(backend())
+    Config::from_env_for(flavor()).unwrap()
 }
 
 fn runtime() -> Runtime {
@@ -88,10 +80,8 @@ fn child() {
 
 #[test]
 fn starts_nothing_and_maps_nothing_of_the_distribution() {
-    if backend() == Backend::Rust {
-        let output = run_child("alone");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    }
+    let output = run_child("alone");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -210,10 +200,6 @@ fn several_threads_run_at_once() {
 
 #[test]
 fn thread_locals_belong_to_the_thread() {
-    // On libpizlo, `run` picks an executor.
-    if backend() != Backend::Rust {
-        return;
-    }
     let rt = runtime();
     let library = library();
     let add = move |value| rt.run(|fil| library.function::<fn(i32) -> i32>(fil, "add_to_thread").unwrap().call(fil, (value,)).unwrap());
@@ -259,6 +245,6 @@ fn the_runtime_library_answers_without_a_libc() {
         fil.collect_garbage().unwrap();
         fil.flush().unwrap();
     });
-    rt.run(|fil| assert_eq!(fil.libc().has_symbol("strlen"), backend() == Backend::Pizlo));
+    rt.run(|fil| assert!(!fil.libc().has_symbol("strlen")));
 }
 

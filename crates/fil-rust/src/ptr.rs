@@ -1,5 +1,6 @@
 //! Capability-carrying pointers into Fil-C memory.
 
+use fil_rust_rt::shim as rt;
 use std::ffi::{CString, c_char};
 use std::fmt;
 use std::marker::PhantomData;
@@ -134,8 +135,7 @@ impl<'f, T: ?Sized> FilPtr<'f, T> {
     /// Reports the capability's bounds and flags (`None` without a capability).
     pub fn capability(self) -> Option<Capability> {
         let mut info = PtrInfo::default();
-        let shim = crate::runtime::shim()?;
-        let status = unsafe { (shim.fr_ptr_info_get)(self.raw, &mut info) };
+        let status = unsafe { rt::fr_ptr_info_get(self.raw, &mut info) };
         if status != 0 {
             return None;
         }
@@ -164,8 +164,7 @@ impl<'f, T: ?Sized> FilPtr<'f, T> {
     /// Checks that `len` bytes starting here could be read (or, with `write`,
     /// written) right now.
     pub fn check(self, len: usize, write: bool) -> Result<()> {
-        let shim = crate::runtime::shim().ok_or(Error::NullCapability)?;
-        crate::error::check(unsafe { (shim.fr_check)(self.raw, len, write as i32) })
+        crate::error::check(unsafe { rt::fr_check(self.raw, len, write as i32) })
     }
 
     /// Copies bytes out of Fil-C memory into `buf`.

@@ -1,23 +1,18 @@
-//! The musl flavor runs a libpizlo compiled against musl's headers on top of
-//! the host glibc (see "Fil-C on the host glibc" in docs/DESIGN.md). These
-//! tests audit that boundary:
+//! The musl flavor's libc mode runs Fil-C's musl on top of the host glibc,
+//! with the runtime passing musl-laid-out structs to glibc (see "Fil-C on the
+//! host glibc" in docs/DESIGN.md). These tests audit that boundary:
 //!
-//! * every libc symbol libpizlo imports is on a reviewed list
-//!   (`tests/abi/<flavor>_<arch>_imports.txt`), so a new Fil-C version that imports
-//!   something new fails here until someone checks it;
-//! * the layouts and constants libpizlo hands to libc, built once against
+//! * the layouts and constants the runtime hands to libc, built once against
 //!   musl's headers and once against glibc's, differ only in the reviewed
 //!   ways listed below;
 //! * the reviewed differences actually work, end to end.
 
 mod common;
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::{fixture, flavor, runtime};
-use fil_rust::Flavor;
+use common::{fixture, runtime};
 
 fn tmp() -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("abi-audit");
@@ -29,51 +24,20 @@ fn env(var: &str) -> String {
     std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set (run the tests in nix-shell)"))
 }
 
-fn libpizlo_imports() -> BTreeSet<String> {
-    let lib = common::config().lib_dir().join("libpizlo.so");
-    let out = Command::new("nm").args(["-D", "--undefined-only"]).arg(&lib).output().expect("running nm");
-    assert!(out.status.success());
-    String::from_utf8(out.stdout).unwrap().lines().filter_map(|l| l.split_whitespace().last()).map(String::from).collect()
-}
-
-#[test]
-fn libpizlo_imports_are_reviewed() {
-    let name = format!(
-        "tests/abi/{}_{}_imports.txt",
-        format!("{:?}", flavor()).to_lowercase(),
-        std::env::consts::ARCH
-    );
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(&name);
-    let reviewed: BTreeSet<String> = std::fs::read_to_string(&path)
-        .unwrap()
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(String::from)
-        .collect();
-    let actual = libpizlo_imports();
-    let new: Vec<_> = actual.difference(&reviewed).collect();
-    let gone: Vec<_> = reviewed.difference(&actual).collect();
-    assert!(
-        new.is_empty() && gone.is_empty(),
-        "libpizlo's imports changed; review these against the host libc and update {name}\nnew: {new:?}\ngone: {gone:?}"
-    );
-}
-
-/// Differences between musl's and glibc's headers that libpizlo passes
+/// Differences between musl's and glibc's headers that the runtime passes
 /// across, and why each is safe.
 const REVIEWED: &[(&str, &str)] = &[
     // musl reserves extra space at the end; glibc writes less than the
-    // (musl-sized, bounds-checked) buffer libpizlo passes.
+    // (musl-sized, bounds-checked) buffer the runtime passes.
     ("sizeof struct rusage", "musl buffer is larger"),
     ("sizeof struct sysinfo", "musl buffer is larger"),
     ("sizeof struct sched_param", "musl buffer is larger; glibc only uses sched_priority at offset 0"),
     ("alignof struct sched_param", "musl buffer is larger"),
-    // musl splits these size_t fields into int + padding. libpizlo zeroes the
+    // musl splits these size_t fields into int + padding. the runtime zeroes the
     // msghdr it builds, so glibc reads the right 8-byte value; on receive the
     // low 4 bytes (little-endian) hold the value.
-    ("field struct msghdr.msg_iovlen", "libpizlo zeroes the struct"),
-    ("field struct msghdr.msg_controllen", "libpizlo zeroes the struct"),
+    ("field struct msghdr.msg_iovlen", "the runtime zeroes the struct"),
+    ("field struct msghdr.msg_controllen", "the runtime zeroes the struct"),
     // The control buffer comes from user memory, so its padding may be
     // dirty: the stand-in's sendmsg/sendmmsg zero it, as musl's do. See
     // `ancillary_data_with_dirty_padding`.
@@ -83,9 +47,9 @@ const REVIEWED: &[(&str, &str)] = &[
     ("field struct semid_ds.sem_nsems", "little-endian low bytes"),
     // musl passes the real kernel bit, which is a no-op on 64-bit.
     ("const O_LARGEFILE", "kernel ignores it on 64-bit"),
-    // Compile-time minimums; libpizlo uses neither.
-    ("const MINSIGSTKSZ", "unused by libpizlo"),
-    ("const PTHREAD_STACK_MIN", "unused by libpizlo"),
+    // Compile-time minimums; the runtime uses neither.
+    ("const MINSIGSTKSZ", "unused by the runtime"),
+    ("const PTHREAD_STACK_MIN", "unused by the runtime"),
 ];
 
 /// Further differences on aarch64, where glibc's pthread objects are larger.
@@ -96,9 +60,9 @@ const REVIEWED_ARCH: &[(&str, &str)] = &[
     // Every thread start and runtime mutex goes through them.
     ("sizeof pthread_attr_t", "stand-in wrappers"),
     ("sizeof pthread_mutex_t", "stand-in wrappers"),
-    // libpizlo imports no mutexattr or condattr functions.
-    ("sizeof pthread_mutexattr_t", "not passed by libpizlo"),
-    ("sizeof pthread_condattr_t", "not passed by libpizlo"),
+    // the runtime calls no mutexattr or condattr functions.
+    ("sizeof pthread_mutexattr_t", "not passed by the runtime"),
+    ("sizeof pthread_condattr_t", "not passed by the runtime"),
 ];
 #[cfg(not(target_arch = "aarch64"))]
 const REVIEWED_ARCH: &[(&str, &str)] = &[];
@@ -163,11 +127,4 @@ fn sysv_semaphores() {
         let s = Sockets::load(fil, fixture("sockets.c")).unwrap();
         assert_eq!(s.sem_roundtrip(fil, 3).unwrap(), 0);
     });
-}
-
-#[test]
-fn flavor_matches_the_audit() {
-    // The layout audit only matters for musl, but runs for both: it checks
-    // the headers, not the loaded runtime.
-    assert!(matches!(flavor(), Flavor::Musl | Flavor::Glibc));
 }

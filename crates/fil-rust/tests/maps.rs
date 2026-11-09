@@ -1,5 +1,4 @@
 //! `mmap` and what goes with it, seen from C through the unmodified libc.
-//! This is backend-neutral, so what passes here means the same on both.
 
 mod common;
 

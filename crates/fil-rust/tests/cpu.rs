@@ -1,7 +1,6 @@
 //! What Fil-C code can find out about the processor: `cpuid`, `xgetbv` and
 //! `__builtin_cpu_supports`, checked against what Rust finds out itself.
-//! Backend-neutral but for issue 7 in docs/upstream-filc-issues.md, and only
-//! for x86-64.
+//! Only for x86-64.
 #![cfg(target_arch = "x86_64")]
 
 mod common;
@@ -46,13 +45,11 @@ fn cpuid_and_xgetbv_are_the_processors() {
     });
 }
 
-/// libpizlo says no to everything unless `__builtin_cpu_init` was called, and
-/// to what's past the first word of `__cpu_features2` even then: issue 7.
+/// Stock libpizlo says no to everything unless `__builtin_cpu_init` was
+/// called, and to what's past the first word of `__cpu_features2` even then:
+/// issue 7 in docs/upstream-filc-issues.md.
 #[test]
 fn builtin_cpu_supports_agrees_with_the_processor() {
-    if runtime().config().backend() != fil_rust::Backend::Rust {
-        return;
-    }
     let expected = [
         is_x86_feature_detected!("sse4.2"),
         is_x86_feature_detected!("avx2"),
@@ -79,13 +76,10 @@ fn builtin_cpu_is_knows_the_vendor() {
     assert_eq!(runtime().run(|fil| cpu().vendor(fil).unwrap()), expected);
 }
 
-/// libpizlo panics on these, as they're past the end of its `__cpu_features2`:
-/// issue 7.
+/// Stock libpizlo panics on these, as they're past the end of its
+/// `__cpu_features2`: issue 7.
 #[test]
 fn microarchitecture_levels() {
-    if runtime().config().backend() != fil_rust::Backend::Rust {
-        return;
-    }
     let v2 = ["cmpxchg16b", "popcnt", "sse3", "sse4.1", "sse4.2", "ssse3"].iter().all(|&f| match f {
         "cmpxchg16b" => is_x86_feature_detected!("cmpxchg16b"),
         "popcnt" => is_x86_feature_detected!("popcnt"),

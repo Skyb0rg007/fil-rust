@@ -21,6 +21,7 @@
 //! On both, larger aggregates are returned through a hidden first argument
 //! (`sret`).
 
+use fil_rust_rt::shim as rt;
 use std::marker::PhantomData;
 
 use fil_rust_sys::RawPtr;
@@ -230,35 +231,33 @@ fn from_words<'f, T: FilType + ?Sized>(
 /// Writes `words` into the cc buffers and calls `function`. Returns the size
 /// of the return values.
 fn invoke(fil: &Fil<'_>, function: RawPtr, words: &[RawWord]) -> Result<usize> {
-    let shim = fil.shim();
     let size = words.len() * 8;
-    unsafe { (shim.fr_cc_begin)(fil.thread, size) };
+    unsafe { rt::fr_cc_begin(fil.thread, size) };
     for (i, word) in words.iter().enumerate() {
         let status = match *word {
-            RawWord::Bits(bits) => unsafe { (shim.fr_cc_set_word)(fil.thread, size, i * 8, bits) },
-            RawWord::Ptr(p) => unsafe { (shim.fr_cc_set_ptr)(fil.thread, size, i * 8, p) },
+            RawWord::Bits(bits) => unsafe { rt::fr_cc_set_word(fil.thread, size, i * 8, bits) },
+            RawWord::Ptr(p) => unsafe { rt::fr_cc_set_ptr(fil.thread, size, i * 8, p) },
         };
         error::check(status)?;
     }
     let mut return_size = 0usize;
-    error::check(unsafe { (shim.fr_call)(fil.thread, function, size, &mut return_size) })?;
+    error::check(unsafe { rt::fr_call(fil.thread, function, size, &mut return_size) })?;
     Ok(return_size)
 }
 
 /// Copies `kinds.len()` words out of the cc buffer of `size` bytes.
 fn read_words(fil: &Fil<'_>, size: usize, kinds: &[Option<LeafKind>]) -> Result<Vec<RawWord>> {
-    let shim = fil.shim();
     kinds
         .iter()
         .enumerate()
         .map(|(i, kind)| {
             if *kind == Some(LeafKind::Ptr) {
                 let mut p = RawPtr::NULL;
-                error::check(unsafe { (shim.fr_cc_get_ptr)(fil.thread, size, i * 8, &mut p) })?;
+                error::check(unsafe { rt::fr_cc_get_ptr(fil.thread, size, i * 8, &mut p) })?;
                 Ok(RawWord::Ptr(p))
             } else {
                 let mut bits = 0u64;
-                error::check(unsafe { (shim.fr_cc_get_word)(fil.thread, size, i * 8, &mut bits) })?;
+                error::check(unsafe { rt::fr_cc_get_word(fil.thread, size, i * 8, &mut bits) })?;
                 Ok(RawWord::Bits(bits))
             }
         })
@@ -338,7 +337,7 @@ macro_rules! impl_sig {
 
             #[allow(non_snake_case, unused_mut, unused_variables)]
             fn callback_args<'f>(fil: &Fil<'f>, argument_size: usize) -> (Self::Args<'f>, Option<Place<'f>>) {
-                let fail = |msg: String| -> ! { crate::callback::fail(fil, &msg) };
+                let fail = |msg: String| -> ! { crate::callback::fail(&msg) };
                 let ret_class = classify::<R>().unwrap_or_else(|e| fail(e.to_string()));
                 $(let $a = classify::<$a>().unwrap_or_else(|e| fail(e.to_string()));)*
                 let mut kinds: Vec<Option<LeafKind>> = Vec::new();
@@ -352,7 +351,7 @@ macro_rules! impl_sig {
                 )*
                 let needed = kinds.len() * 8;
                 if argument_size < needed {
-                    unsafe { (fil.shim().fr_args_check_failure)(argument_size, needed) };
+                    unsafe { rt::fr_args_check_failure(argument_size, needed) };
                     unreachable!("fr_args_check_failure does not return");
                 }
                 // Copy every slot out before decoding: decoding may allocate,
@@ -383,13 +382,12 @@ macro_rules! impl_sig {
                     }
                     Class::Words(_) => encode_value::<R>(fil, value, &mut words)?,
                 }
-                let shim = fil.shim();
                 let size = words.len() * 8;
-                unsafe { (shim.fr_cc_begin)(fil.thread, size) };
+                unsafe { rt::fr_cc_begin(fil.thread, size) };
                 for (i, word) in words.iter().enumerate() {
                     let status = match *word {
-                        RawWord::Bits(bits) => unsafe { (shim.fr_cc_set_word)(fil.thread, size, i * 8, bits) },
-                        RawWord::Ptr(p) => unsafe { (shim.fr_cc_set_ptr)(fil.thread, size, i * 8, p) },
+                        RawWord::Bits(bits) => unsafe { rt::fr_cc_set_word(fil.thread, size, i * 8, bits) },
+                        RawWord::Ptr(p) => unsafe { rt::fr_cc_set_ptr(fil.thread, size, i * 8, p) },
                     };
                     error::check(status)?;
                 }
@@ -478,8 +476,7 @@ impl<Sig> std::fmt::Debug for FilFn<'_, Sig> {
 impl<'f, Sig: FilSig> FilFn<'f, Sig> {
     /// Checks that `ptr` is a callable Fil-C function.
     pub fn from_ptr(ptr: FilPtr<'f, Opaque>) -> Result<Self> {
-        let shim = crate::runtime::shim().ok_or(Error::NotAFunction)?;
-        error::check(unsafe { (shim.fr_check_function)(ptr.raw()) })?;
+        error::check(unsafe { rt::fr_check_function(ptr.raw()) })?;
         Ok(FilFn { raw: ptr.raw(), _marker: PhantomData })
     }
 

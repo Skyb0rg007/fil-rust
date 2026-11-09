@@ -59,40 +59,21 @@ let
 
   # The configurations, by name.
   suites = {
-    musl = {
-      description = "Every test in the workspace, against the musl distribution";
-    };
-
-    gc-stress = {
-      description = "The memory, concurrency and property tests with the collector running constantly";
-      flags = [
-        "-p"
-        "fil-rust"
-      ]
-      ++ lib.concatMap
-        (t: [
-          "--test"
-          t
-        ])
-        [
-          "memory"
-          "threads"
-          "callbacks"
-          "cxx"
-          "edges"
-          "lifecycle"
-          "misuse"
-          "properties"
-          "stress"
-        ];
-      env = {
-        # Collect after every allocation, and scribble over freed memory.
-        FUGC_MIN_THRESHOLD = "0";
-        FUGC_SCRIBBLE = "1";
-        FIL_RUST_STRESS = "8";
-        PROPTEST_CASES = "1000";
-      };
-    };
+    musl =
+      if host.isx86_64 then
+        {
+          description = "Every test in the workspace, against the musl distribution";
+        }
+      else
+        {
+          # Only the libc-free tests: libc mode is going away with the switch to
+          # a Rust libc, which serves glibc first.
+          description = "The runtime's tests and the libc-free ones, against the musl distribution";
+          run = ''
+            cargo test --offline ${target} -p fil-rust-rt
+            cargo test --offline ${target} -p fil-rust --test rt_bare --test rt_gc --test layout
+          '';
+        };
 
     examples = {
       description = "Runs every example and the bindgen demo";
@@ -116,50 +97,34 @@ let
     };
   }
   // lib.optionalAttrs host.isx86_64 {
-    rust-rt = {
-      description = "The Rust runtime's tests, and what's neutral about the backends on both";
+    musl-gc-stress = {
+      description = "The musl tests with the collector running constantly and scribbling over swept memory";
       run = ''
-        cargo test --offline ${target} -p fil-rust-rt
-        FIL_RUST_RUNTIME=rust cargo test --offline ${target} -p fil-rust \
-          --test rt_bare --test rt_gc --test rt_libc --test sys --test layout --test boot --test edges \
-          --test jumps --test cxx --test signals --test maps --test sockets --test system --test tables --test stdfil --test cpu \
-          --test smoke --test calls --test memory --test threads --test lifecycle --test stress \
-          --test startup --test callbacks --test embedded --test process --test properties \
-          --test misuse --test bindgen --test ui --test abi_audit
-        FIL_RUST_RUNTIME=pizlo cargo test --offline ${target} -p fil-rust --test rt_bare --test sys --test boot --test jumps
-      '';
-    };
-
-    rust-rt-gc-stress = {
-      description = "The same with the Rust collector running constantly and scribbling over swept memory";
-      run = ''
-        export FIL_RUST_RUNTIME=rust
         FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust-rt
         FIL_RUST_GC_STRESS=1 cargo test --offline ${target} -p fil-rust --test rt_gc --test layout
         # Every 8th: with threads, each collection waits for all of them.
         FIL_RUST_GC_STRESS=8 cargo test --offline ${target} -p fil-rust --test rt_bare --test rt_libc --test sys --test jumps --test signals --test maps --test sockets --test system --test tables --test stdfil --test cpu \
           --test smoke --test calls --test memory --test threads --test callbacks --test properties \
           --test process --test startup
-        # After every allocation, as gc-stress has libpizlo do, for what loops
-        # through big buffers: collecting every 8th safepoint, cxx and edges
-        # didn't finish in 400 seconds each. `stress` is left out: with six
-        # threads allocating, every allocation stops them all, and one of its
-        # tests alone takes about seven minutes.
+        # After every allocation, for what loops through big buffers:
+        # collecting every 8th safepoint, cxx and edges didn't finish in 400
+        # seconds each. `stress` is left out: with six threads allocating,
+        # every allocation stops them all, and one of its tests alone takes
+        # about seven minutes.
         FIL_RUST_GC_STRESS_ALLOCATIONS=1 PROPTEST_CASES=1000 cargo test --offline ${target} -p fil-rust \
           --test memory --test threads --test callbacks --test cxx --test edges --test lifecycle \
           --test misuse --test properties
       '';
     };
 
+    # The glibc flavor has no libc yet: until the Rust one serves it, this
+    # only builds the tests (clippy checks them too).
     glibc = {
-      description = "fil-rust's tests against the glibc distribution";
-      flags = [
-        "-p"
-        "fil-rust"
-        "--features"
-        "glibc"
-      ];
+      description = "Builds fil-rust's tests against the glibc distribution";
       env.FILC_FLAVOR = "glibc";
+      run = ''
+        cargo test --offline ${target} -p fil-rust --features glibc --no-run
+      '';
     };
   };
 in

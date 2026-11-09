@@ -155,15 +155,15 @@ script needs:
 - `FILC_GLIBC_ROOT`, `FILC_GLIBC_CC`, `FILC_GLIBC_CXX`: the glibc
   distribution (`nix/optfil.nix`). Its compilers expect to live at
   `/opt/fil`, so they run inside `bwrap` with the distribution mounted there.
-- `FILC_RUNTIME_SRC` and the header paths that `crates/fil-rust-sys/build.rs`
-  uses to compile the runtime shim.
+- `FILC_MUSL_INCLUDE` and `FILC_LINUX_INCLUDE`, the headers the ABI audit
+  compares against the host glibc's.
 - `LIBCLANG_PATH`, for `fil-rust-bindgen`.
 
 Tests compile their fixtures with the compiler of the selected flavor:
 
     cargo test                                       # musl
     FILC_FLAVOR=glibc cargo test --features glibc    # glibc
-    FUGC_MIN_THRESHOLD=0 cargo test                  # with constant garbage collection
+    FIL_RUST_GC_STRESS=1 cargo test                  # collecting at every safepoint
     cargo test --workspace                           # every crate, including the generator
                                                      # (FIL_RUST_BLESS=1 updates tests/generated)
 
@@ -177,10 +177,9 @@ The tests are separate derivations in `passthru.tests` (`nix/tests.nix`):
 
     nix-build -A tests              # all of them
     nix-build -A tests.musl         # the whole workspace, musl flavor
-    nix-build -A tests.glibc        # fil-rust against the glibc flavor (x86-64)
-    nix-build -A tests.gc-stress    # memory/thread/property/stress tests, constant GC
-    nix-build -A tests.rust-rt      # the Rust runtime (x86-64)
-    nix-build -A tests.rust-rt-gc-stress  # the same, with constant collections
+                                    # (on aarch64, only the libc-free tests)
+    nix-build -A tests.musl-gc-stress  # the same, with constant collections (x86-64)
+    nix-build -A tests.glibc        # builds fil-rust's tests for the glibc flavor (x86-64)
     nix-build -A tests.examples     # runs every example and bindgen-demo
     nix-build -A tests.clippy       # clippy, warnings as errors
 

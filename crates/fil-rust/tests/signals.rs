@@ -210,9 +210,6 @@ fn waiting_for_signals() {
 /// Both of these are upstream bugs: docs/upstream-filc-issues.md.
 #[test]
 fn dispositions_the_rust_runtime_gets_right() {
-    if runtime().config().backend() != fil_rust::Backend::Rust {
-        return;
-    }
     assert_eq!(handlers(|fil, s| s.faults_can_be_left_at_default(fil).unwrap()), 1);
     assert_eq!(handlers(|fil, s| s.disposition_changes_under_a_queued_signal(fil).unwrap()), 1);
     assert_eq!(handlers(|fil, s| s.queued_signal_reaches_the_old_handler(fil).unwrap()), 1);
