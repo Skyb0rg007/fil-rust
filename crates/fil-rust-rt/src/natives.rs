@@ -152,6 +152,12 @@ impl Rest {
     pub unsafe fn next<T: Value>(&mut self, thread: *mut Thread) -> T {
         unsafe { T::take(thread, &mut self.args) }
     }
+
+    /// Skips to the next multiple of `alignment`, where an argument aligned
+    /// to more than a word starts.
+    pub fn align(&mut self, alignment: usize) {
+        self.args.offset = self.args.offset.next_multiple_of(alignment);
+    }
 }
 
 impl Value for Rest {

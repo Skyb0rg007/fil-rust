@@ -443,7 +443,7 @@ impl Runtime {
     pub fn load(&self, path: impl AsRef<Path>) -> Result<Library> {
         let path = path.as_ref().to_path_buf();
         if self.inner.is_bare() {
-            let data = std::fs::read(&path).map_err(|e| Error::Load(format!("reading {}: {e}", path.display())))?;
+            let data = read_library(&path)?;
             self.prepare_for(&path.display().to_string(), &data)?;
         }
         self.run(move |fil| fil.load(&path))
@@ -917,6 +917,14 @@ fn boot(config: Config) -> Result<&'static Inner> {
     Ok(inner)
 }
 
+/// A library file's bytes, failing as [`Fil::load`] would on what isn't one.
+fn read_library(path: &Path) -> Result<Vec<u8>> {
+    if !path.is_file() {
+        return Err(Error::Load(format!("{} does not exist", path.display())));
+    }
+    std::fs::read(path).map_err(|e| Error::Load(format!("reading {}: {e}", path.display())))
+}
+
 fn refuse_libc_import(inner: &Inner, name: &str, data: &[u8]) -> Result<()> {
     match crate::library::libc_import(inner, data) {
         Some(symbol) => Err(Error::Unsupported(format!(
@@ -1021,7 +1029,7 @@ impl<'f> Fil<'f> {
         let path = path.as_ref().to_path_buf();
         let inner = self.inner;
         if inner.is_bare() {
-            let data = std::fs::read(&path).map_err(|e| Error::Load(format!("reading {}: {e}", path.display())))?;
+            let data = read_library(&path)?;
             refuse_libc_import(inner, &path.display().to_string(), &data)?;
         }
         // Library constructors enter the runtime themselves, so the loader

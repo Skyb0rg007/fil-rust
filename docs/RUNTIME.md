@@ -517,11 +517,27 @@ Each ends green in Nix and is committed.
   threads moving terminators; the environment seen both ways) and `libc_signals` (signals with no
   libc main thread, timers, `dlsym`, exit handlers, constructor arguments). glibc's own
   `at_quick_exit` traps in Fil-C (docs/upstream-filc-issues.md, 8).
-- **L4. stdio.** The `va_list` decoder, FILE objects, `__uflow` and `__overflow`, the `fopen`
-  family, printf, `getline`, `puts`, `DIR *`. Tests: Fil-C `printf` and Rust `println!` in order;
-  inline `getc_unlocked` and `feof_unlocked`; corrupted FILE fields stay safe; use after `fclose`
-  traps; capped `%s`; `%n`; fork with buffered output; `smoke`, `calls`, `misuse`, `bindgen`,
-  `stdfil` on glibc.
+- **L4. stdio: done.** Variadic arguments from a call or a `va_list` (each at its natural
+  alignment: a `long double` takes 16 bytes at a 16-byte boundary). A `FILE` is a 216-byte object in
+  glibc's layout with null buffer pointers, so the headers' inline `getc` and `putc` call
+  `__uflow` and `__overflow`; the libc writes its EOF and error bits into `_flags` for
+  `feof_unlocked`, and finds the stream by the object's identity, never by what's in it. stdin,
+  stdout and stderr are Rust's `std::io`, so Fil-C output stays in order with `println!`; other
+  streams are host `FILE *`s, and an `errno` the host sets comes back. Formatting happens entered,
+  I/O exited under the stream's lock. An open stream lives until `fclose`, as in C, and is flushed
+  at `exit`, rather than dropped unflushed when unreachable; `fclose` frees the object, so a later
+  use traps. The printf family parses the format in Rust and hands the host's `snprintf` one
+  conversion at a time with copied values: `%s` needs a terminator in its object unless a precision
+  bounds it, and then reads no further than the object's end; `%ls` reads `wchar_t`s the same way;
+  `%n` stores through a checked pointer; too few arguments fail; `%Lf` goes through a `double`.
+  `fork` holds every stream's lock. A `DIR` is an opaque object holding the last entry, so the entry
+  dies with `closedir`. Memory streams (`fmemopen`, `open_memstream`) and `scanf` wait for need.
+  Tests on glibc: `libc_stdio` (the same fixture built for Fil-C and for the host writes the same
+  transcript of formats, streams, lines, positions, the inline `getc` and `putc`, pipes and
+  directories; output in order with Rust's; a scribbled-over `FILE` still works; a forged `FILE`,
+  use after `fclose` or `closedir`, an unterminated `%s`, a too-wide `%n`, an overflowing
+  `sprintf` and missing arguments trap; buffered streams survive a fork), `smoke`, `calls`,
+  `misuse`, `bindgen`, `stdfil`.
 - **L5. pthreads and C++.** pthreads; the C locale's `newlocale`, `uselocale` and `*_l`; wide
   characters; `__isoc23_sscanf`; what else libc++ calls on tested paths. Tests on glibc: `threads`,
   `callbacks`, `stress`, `edges`, `lifecycle`, `cxx`, `std::thread`, key destructors.

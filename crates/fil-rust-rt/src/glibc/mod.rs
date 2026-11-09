@@ -14,13 +14,17 @@ use crate::thread;
 
 mod callbacks;
 mod ctype;
+mod dir;
 mod env;
 mod error;
+mod formatting;
+mod stdio;
 mod stdlib;
 mod signal;
 mod string;
 mod time;
 mod unistd;
+mod varargs;
 
 /// What the libc keeps per thread. It lives in the thread's `ThreadExtra`,
 /// which the collector marks, never in a `thread_local!`: registering a
@@ -110,12 +114,13 @@ pub(crate) unsafe fn interned(me: *mut Thread, bytes: &[u8]) -> Ptr {
 pub fn for_each_root(mut visit: impl FnMut(*mut Object)) {
     env::for_each_root(&mut visit);
     callbacks::for_each_root(&mut visit);
+    stdio::for_each_root(&mut visit);
+    dir::for_each_root(&mut visit);
 }
 
 /// Flushes what the process buffers for Fil-C code, before it exits.
 pub(crate) unsafe fn flush_all(me: *mut Thread) {
-    use std::io::Write;
-    unsafe { crate::sys::plain(me, || drop(std::io::stdout().flush())) };
+    unsafe { stdio::flush_all(me) };
 }
 
 /// Stub slots for every native here, keyed by symbol.
@@ -136,6 +141,10 @@ pub fn table() -> Vec<(&'static str, *const ())> {
     table.extend(signal::table());
     table.extend(signal::aliases());
     table.extend(callbacks::table());
+    table.extend(stdio::table());
+    table.extend(stdio::aliases());
+    table.extend(dir::table());
+    table.extend(dir::aliases());
     table
 }
 

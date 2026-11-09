@@ -106,6 +106,12 @@ fn load_stub(flavor: Flavor) -> Result<Installed, String> {
     Ok(Installed { runtime: handle as usize, libc: stand_ins[0] as usize })
 }
 
+/// The libc functions and variables the glibc flavor has natives for, by
+/// their C names.
+pub fn libc_names() -> Vec<&'static str> {
+    glibc::table().into_iter().map(|(name, _)| name.trim_start_matches("pizlonated_")).collect()
+}
+
 /// What implements the runtime stub's symbols, by name.
 fn runtime_table() -> std::collections::HashMap<&'static str, *const ()> {
     let mut implemented: std::collections::HashMap<_, _> = helpers::table().into_iter().collect();
