@@ -497,14 +497,18 @@ Each ends green in Nix and is committed.
   `stdfil`'s `snprintf` to L4.
 - **L3. libc core.** Done so far: the race-tolerant view (`view.rs`: one bounds check, relaxed byte
   loads, scans that stop at the object's end), `double` arguments, strings, memory, ctype tables,
-  `strto*` and `__isoc23_*` over the host's parsers, and allocation; `tables` on glibc, and
-  `libc_core`, whose fixture must write the same transcript built for Fil-C and for the host, with
-  misuse failing and other threads moving terminators. A parse that runs into the end of an
-  unterminated buffer fails; one that stops before it doesn't. To do: environment; time; `strerror`;
-  system-call wrappers sharing the `zsys_*` bodies; `epoll` with Fil-C's 16-byte event; `signal`,
-  `sigaction` and routing; `setjmp` and `longjmp`; exit handlers; `qsort`, `bsearch`; `dl*`;
-  constructor arguments. Tests still to come: `jumps` on glibc; the same transcript checks for
-  what's left; environment changes seen both ways; signals with no libc main thread.
+  `strto*` and `__isoc23_*` over the host's parsers, allocation, `strerror` and its kind (interned,
+  read-only), the environment over `std::env`, time over the host's (a `struct tm` crosses as a
+  copy, its zone name interned), and the system calls: the `zsys_*` natives under glibc's names
+  where they match, and glibc's own wrappers (`stat`, `getcwd(NULL, 0)`, `sleep`, `send`, the `*64`
+  twins). Tests: `tables` on glibc, and `libc_core`, whose fixture must write the same transcript
+  built for Fil-C and for the host, with misuse failing, other threads moving terminators, and the
+  environment seen both ways. A parse that runs into the end of an unterminated buffer fails; one
+  that stops before it doesn't. Compiled code asks for `environ` once and keeps its storage, so its
+  snapshot is made again when Fil-C code changes the environment; Rust's changes reach it then, and
+  `getenv` at once. To do: `signal`, `sigaction` and routing, the `sig*set` functions; `setjmp` and
+  `longjmp`; timers, whose `timer_t` is a pointer here; exit handlers; `qsort`, `bsearch`; `dl*`;
+  constructor arguments. Tests still to come: `jumps` on glibc; signals with no libc main thread.
 - **L4. stdio.** The `va_list` decoder, FILE objects, `__uflow` and `__overflow`, the `fopen`
   family, printf, `getline`, `puts`, `DIR *`. Tests: Fil-C `printf` and Rust `println!` in order;
   inline `getc_unlocked` and `feof_unlocked`; corrupted FILE fields stay safe; use after `fclose`

@@ -10,8 +10,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/utsname.h>
+#include <time.h>
+#include <unistd.h>
 
-static char out[1 << 16];
+extern char **environ;
+extern int __xpg_strerror_r(int, char *, size_t);
+
+static char out[1 << 18];
 static size_t used;
 
 static void text(const char *s) { while (*s && used < sizeof out) out[used++] = *s++; }
@@ -186,6 +196,107 @@ static void allocation(void)
     line("malloc"); free(NULL); field(malloc_usable_size(NULL));
 }
 
+static void errors(void)
+{
+    for (int number = -1; number < 140; number++) {
+        line("strerror"); field(number); str(strerror(number));
+        const char *description = strerrordesc_np(number);
+        str(description ? description : "(none)");
+    }
+    char small[8];
+    line("__xpg_strerror_r");
+    field(__xpg_strerror_r(ENOENT, small, sizeof small)); str(small);
+    char big[128];
+    field(__xpg_strerror_r(ENOENT, big, sizeof big)); str(big);
+    field(__xpg_strerror_r(100000, big, sizeof big));
+    line("strerror_r"); str(strerror_r(EINVAL, big, sizeof big));
+    for (int signal = 0; signal < 66; signal += 5) {
+        line("strsignal"); field(signal); str(strsignal(signal));
+        const char *description = sigdescr_np(signal);
+        str(description ? description : "(none)");
+    }
+}
+
+static int in_environ(const char *entry)
+{
+    for (char **e = environ; *e; e++)
+        if (!strcmp(*e, entry)) return 1;
+    return 0;
+}
+
+static void environment(void)
+{
+    const char *name = "FIL_RUST_LIBC_CORE_VARIABLE";
+    errno = 0;
+    line("getenv"); field(getenv(name) == NULL); field(getenv("") == NULL); field(getenv("A=B") == NULL);
+    line("setenv"); field(setenv(name, "one", 0)); str(getenv(name)); field(in_environ("FIL_RUST_LIBC_CORE_VARIABLE=one"));
+    field(setenv(name, "two", 0)); str(getenv(name));
+    field(setenv(name, "two", 1)); str(getenv(name)); field(in_environ("FIL_RUST_LIBC_CORE_VARIABLE=two"));
+    field(setenv("", "x", 1)); error(); field(setenv("A=B", "x", 1)); error();
+    line("putenv"); static char entry[] = "FIL_RUST_LIBC_CORE_VARIABLE=three"; field(putenv(entry)); str(getenv(name));
+    line("unsetenv"); field(unsetenv(name)); field(getenv(name) == NULL); field(in_environ("FIL_RUST_LIBC_CORE_VARIABLE=three"));
+    field(unsetenv("A=B")); error();
+}
+
+static void tm_fields(const struct tm *tm)
+{
+    field(tm->tm_sec); field(tm->tm_min); field(tm->tm_hour); field(tm->tm_mday); field(tm->tm_mon);
+    field(tm->tm_year); field(tm->tm_wday); field(tm->tm_yday); field(tm->tm_isdst); field(tm->tm_gmtoff);
+    str(tm->tm_zone ? tm->tm_zone : "(null)");
+}
+
+static void times(void)
+{
+    static const time_t moments[] = { 0, 86400 * 365, 951782400, 1700000000, -1, 4102444800 };
+    for (unsigned i = 0; i < sizeof moments / sizeof *moments; i++) {
+        struct tm tm;
+        char buffer[128];
+        line("gmtime_r"); field(moments[i]); field(gmtime_r(&moments[i], &tm) == &tm); tm_fields(&tm);
+        line("timegm"); field(timegm(&tm));
+        line("localtime_r"); field(localtime_r(&moments[i], &tm) == &tm); tm_fields(&tm);
+        line("mktime"); field(mktime(&tm)); tm_fields(&tm);
+        line("strftime"); field(strftime(buffer, sizeof buffer, "%Y-%m-%d %H:%M:%S %Z %z %a %b %j %%", &tm)); str(buffer);
+        field(strftime(buffer, 4, "%Y-%m-%d", &tm));
+        line("asctime_r"); str(asctime_r(&tm, buffer));
+        line("ctime_r"); str(ctime_r(&moments[i], buffer));
+        line("localtime"); tm_fields(localtime(&moments[i])); tm_fields(gmtime(&moments[i]));
+    }
+    struct tm odd = { .tm_year = 124, .tm_mon = 13, .tm_mday = 40, .tm_hour = 25, .tm_isdst = -1 };
+    line("mktime normalizes"); field(mktime(&odd)); tm_fields(&odd);
+    line("difftime"); field((long long)difftime(100, 40));
+    tzset();
+    line("tzname"); str(tzname[0]); str(tzname[1]); field(timezone); field(daylight);
+}
+
+static void calls(void)
+{
+    int fds[2];
+    char buffer[64];
+    errno = 0;
+    line("pipe"); field(pipe(fds)); field(write(fds[1], "through", 7)); field(read(fds[0], buffer, sizeof buffer)); bytes(buffer, 7);
+    field(lseek(fds[0], 0, SEEK_SET)); error();
+    int copy = dup(fds[0]);
+    field(copy > 2); field(fcntl(copy, F_GETFD)); field(fcntl(copy, F_SETFD, FD_CLOEXEC)); field(fcntl(copy, F_GETFD));
+    field(close(copy)); field(close(fds[0])); field(close(fds[1]));
+    line("bad fds"); field(close(-1)); error(); field(isatty(-1)); error(); field(read(-1, buffer, 1)); error();
+    line("open"); field(open("/nonexistent/file", O_RDONLY)); error();
+    struct stat st;
+    line("stat"); field(stat("/", &st)); field(S_ISDIR(st.st_mode)); field(stat("/nonexistent", &st)); error();
+    field(lstat("/", &st)); field(S_ISDIR(st.st_mode));
+    int root = open("/", O_RDONLY | O_DIRECTORY);
+    field(fstat(root, &st)); field(S_ISDIR(st.st_mode)); field(close(root));
+    line("access"); field(access("/", R_OK)); field(access("/nonexistent", F_OK)); error();
+    line("getcwd"); field(getcwd(buffer, 1) == NULL); error();
+    char *cwd = getcwd(NULL, 0);
+    char full[4096];
+    field(cwd != NULL); field(!strcmp(cwd, getcwd(full, sizeof full))); free(cwd);
+    field(getcwd(NULL, 1) == NULL); error();
+    line("sysconf"); field(sysconf(_SC_PAGESIZE)); field(getpagesize()); field(sysconf(-1)); error();
+    struct utsname names;
+    line("uname"); field(uname(&names)); str(names.sysname);
+    line("ids"); field(getpid() == getpid()); field(getuid() == geteuid()); field(sched_yield());
+}
+
 size_t transcript_length(void)
 {
     if (!used) {
@@ -193,6 +304,10 @@ size_t transcript_length(void)
         classes();
         numbers();
         allocation();
+        errors();
+        environment();
+        times();
+        calls();
     }
     return used;
 }
@@ -267,3 +382,14 @@ long read_moving(int rounds)
     }
     return total;
 }
+
+/* The environment, shared with Rust. */
+int set_from_c(void) { return setenv("FIL_RUST_FROM_C", "c-value", 1); }
+
+int sees_from_rust(void)
+{
+    const char *value = getenv("FIL_RUST_FROM_RUST");
+    return value && !strcmp(value, "rust-value");
+}
+
+int environ_sees_from_rust(void) { return in_environ("FIL_RUST_FROM_RUST=rust-value"); }

@@ -1,7 +1,8 @@
 //! The glibc flavor's libc core against the host's: the same fixture, built
-//! for each, must write the same transcript of string, memory, ctype, parsing
-//! and allocation results. Misuse fails as compiled code would, and other
-//! threads moving a string's terminator change answers, never safety.
+//! for each, must write the same transcript of string, memory, ctype, parsing,
+//! allocation, error text, environment, time and system call results. Misuse
+//! fails as compiled code would, other threads moving a string's terminator
+//! change answers, never safety, and the environment is the one Rust sees.
 #![cfg(feature = "glibc")]
 
 mod common;
@@ -144,4 +145,22 @@ fn moving_terminators_change_answers_not_safety() {
     let total = runtime().run(|fil| library.function::<fn(i32) -> i64>(fil, "read_moving").unwrap().call(fil, (ROUNDS * 10,)).unwrap());
     mover.join().unwrap();
     assert!(total >= 0, "a length past the buffer");
+}
+
+#[test]
+fn the_environment_is_shared_with_rust() {
+    if !glibc() {
+        return;
+    }
+    let library = library();
+    let call = |name: &str| runtime().run(|fil| library.function::<fn() -> i32>(fil, name).unwrap().call(fil, ()).unwrap());
+    // SAFETY: the tests here touch only their own variables.
+    unsafe { std::env::set_var("FIL_RUST_FROM_RUST", "rust-value") };
+    assert_eq!(call("sees_from_rust"), 1, "getenv doesn't see what Rust set");
+    assert_eq!(call("set_from_c"), 0);
+    assert_eq!(std::env::var("FIL_RUST_FROM_C").as_deref(), Ok("c-value"), "Rust doesn't see what setenv set");
+    // environ is made again when Fil-C code changes the environment.
+    assert_eq!(call("environ_sees_from_rust"), 1, "environ doesn't have what Rust set");
+    unsafe { std::env::remove_var("FIL_RUST_FROM_RUST") };
+    assert_eq!(call("sees_from_rust"), 0, "getenv still sees what Rust removed");
 }

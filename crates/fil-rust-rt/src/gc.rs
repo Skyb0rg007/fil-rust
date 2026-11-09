@@ -926,6 +926,7 @@ fn run() {
         shim::for_each_root(|object| marker.mark(object));
         start::for_each_root(|object| marker.mark(object));
         crate::signal::for_each_root(|object| marker.mark(object));
+        crate::glibc::for_each_root(|object| marker.mark(object));
         for &entry in &threads.0 {
             marker.mark_thread(thread_at(entry));
         }
