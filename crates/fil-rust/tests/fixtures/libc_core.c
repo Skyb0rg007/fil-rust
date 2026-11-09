@@ -11,6 +11,7 @@
 #include <wchar.h>
 #include <wctype.h>
 #include <malloc.h>
+#include <math.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -467,6 +468,55 @@ static void scanning(void)
     line("sscanf pointer"); field(sscanf("0x1234", "%p", &p)); field((long long)(uintptr_t)p);
 }
 
+static void real(double value)
+{
+    char buffer[64];
+    snprintf(buffer, sizeof buffer, " %.12g", value);
+    text(buffer);
+}
+
+static void mathematics(void)
+{
+    static const double inputs[] = { 0.0, -0.0, 0.5, 1.0, -2.5, 3.75, 100.0, 1e-310, INFINITY, -INFINITY, NAN };
+    for (size_t i = 0; i < sizeof inputs / sizeof *inputs; i++) {
+        double x = inputs[i];
+        line("unary"); real(x); real(sin(x)); real(cos(x)); real(tan(x)); real(exp(x)); real(expm1(x));
+        real(atan(x)); real(sinh(x)); real(tanh(x)); real(cbrt(x)); real(fabs(x)); real(floor(x));
+        real(ceil(x)); real(round(x)); real(trunc(x)); real(rint(x)); real(erf(x)); real(logb(x));
+        line("domain"); real(sqrt(x)); error(); real(log(x)); error(); real(log10(x)); error();
+        real(log2(x)); error(); real(log1p(x)); error(); real(acos(x)); error(); real(asin(x)); error();
+        real(acosh(x)); error(); real(atanh(x)); error(); real(tgamma(x)); error(); real(lgamma(x)); error();
+        line("float"); real(sinf((float)x)); real(sqrtf((float)x)); error(); real(powf((float)x, 1.5f)); error();
+        real(floorf((float)x)); real(hypotf((float)x, 2.0f));
+        line("long double"); real((double)cosl(x)); real((double)sqrtl(x)); error(); real((double)fabsl(x));
+        /* Within double's range: long double goes through double. */
+        real((double)powl(x, 0.5L)); error();
+        int exponent = 0;
+        double whole = 0;
+        line("parts"); real(frexp(x, &exponent)); field(isfinite(x) ? exponent : 0); real(modf(x, &whole)); real(whole);
+        real(ldexp(x, 3)); real(scalbn(x, -2)); field(isfinite(x) && x != 0 ? ilogb(x) : 0);
+        if (isfinite(x) && fabs(x) < 1e18) {
+            line("rounding"); field(lrint(x)); field(lround(x)); field(llrint(x)); field(llround(x));
+        }
+        for (size_t j = 0; j < sizeof inputs / sizeof *inputs; j++) {
+            double y = inputs[j];
+            int quotient = 0;
+            line("binary"); real(pow(x, y)); error(); real(atan2(x, y)); real(fmod(x, y)); error();
+            real(remainder(x, y)); error(); real(remquo(x, y, &quotient)); error();
+            field(isfinite(x) && isfinite(y) && y != 0 ? quotient & 7 : 0); real(copysign(x, y));
+            real(fmin(x, y)); real(fmax(x, y)); real(fdim(x, y)); error(); real(hypot(x, y)); real(nextafter(x, y));
+            real(fma(x, y, 1.0));
+        }
+    }
+    double s, c;
+    sincos(0.75, &s, &c);
+    line("sincos"); real(s); real(c);
+    line("nan"); field(isnan(nan(""))); field(isnan(nanf("1"))); field(isnan((double)nanl("")));
+    line("exp overflow"); real(exp(1000)); error(); real(exp(-1000)); error(); real(pow(10, 400)); error();
+    line("abs"); field(abs(-5)); field(abs(INT_MIN + 1)); field(labs(-7L)); field(llabs(-9LL));
+    line("bessel"); real(j0(1.5)); real(j1(1.5)); real(y0(1.5)); real(y1(1.5)); real(y0(0)); error();
+}
+
 size_t transcript_length(void)
 {
     if (!used) {
@@ -483,6 +533,7 @@ size_t transcript_length(void)
         locales();
         wides();
         scanning();
+        mathematics();
     }
     return used;
 }

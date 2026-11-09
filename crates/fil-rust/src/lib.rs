@@ -29,8 +29,8 @@
 //! # Model
 //!
 //! * [`Runtime`] is the process-wide Fil-C runtime. Rust code that touches
-//!   Fil-C runs on the runtime's threads via [`Runtime::run`] or
-//!   [`Runtime::spawn`], receiving a [`Fil`] token.
+//!   Fil-C runs through [`Runtime::run`], on the calling thread, or
+//!   [`Runtime::spawn`], on a new one, receiving a [`Fil`] token.
 //! * [`FilPtr<'f, T>`] is a Fil-C pointer (address + capability), valid in the
 //!   scope `'f` of a `Fil`. The garbage collector keeps it alive in that scope;
 //!   all reads and writes go through checked copies.
@@ -48,30 +48,34 @@
 //!
 //! # Flavors
 //!
-//! Fil-C comes in two flavors, which differ in the user libc that Fil-C code
-//! links against:
+//! Fil-C comes in two flavors, which differ in the libc that Fil-C code links
+//! against:
 //!
+//! * [`Flavor::Glibc`] (the `glibc` feature): the "optfil" distribution,
+//!   normally installed at `/opt/fil`. Point [`Config::glibc`] at it. Its libc
+//!   is the runtime's own, written in Rust over the host's glibc, so Fil-C and
+//!   Rust share one environment, one set of standard streams, one time zone.
+//!   Not every libc function is there; one that isn't fails by name when it's
+//!   called. It exists only for x86-64.
 //! * [`Flavor::Musl`] (the `musl` feature, on by default): the "pizfix"
 //!   binary distribution. Point [`Config::musl`] at the directory containing
-//!   `pizfix/`.
-//! * [`Flavor::Glibc`] (the `glibc` feature): the "optfil" distribution,
-//!   normally installed at `/opt/fil`. Point [`Config::glibc`] at it. It
-//!   exists only for x86-64; on aarch64, only the musl flavor is available.
+//!   `pizfix/`. It has no libc, for now: it loads libraries that use none, and
+//!   turns down the rest. On aarch64, it's the only flavor.
 //!
 //! Both features can be enabled at once; the flavor is chosen when the
 //! runtime starts, and a process holds one runtime.
 //! [`Config::from_env`] reads `FILC_FLAVOR` and the matching root variable.
 //! Either way the Rust program itself stays linked to the system's glibc: the
-//! Fil-C runtime is loaded next to it, with small built-in stand-ins for the
-//! distribution's "yolo" libc.
+//! Fil-C runtime is loaded next to it, with built-in stand-ins for the
+//! distribution's runtime and libc.
 //!
 //! # Threads and blocking
 //!
-//! Fil-C code only runs on Fil-C threads. [`Runtime::run`] and
-//! [`Runtime::spawn`] hand jobs to a pool of executor threads, which grows on
-//! demand up to [`Config::max_workers`], so jobs that wait on each other don't
-//! starve. Threads that Fil-C code creates itself (`pthread_create`,
-//! `std::thread`) work as usual and may call Rust [`Callback`]s.
+//! Any thread can run Fil-C code: [`Runtime::run`] makes the calling thread a
+//! Fil-C thread the first time, and it stays one until it exits. The runtime
+//! starts no threads of its own. Threads that Fil-C code creates itself
+//! (`pthread_create`, `std::thread`) work as usual and may call Rust
+//! [`Callback`]s.
 //!
 //! While Rust code holds a [`Fil`], its thread is *entered*: the garbage
 //! collector waits for it at every handshake. So **don't block while
@@ -81,8 +85,8 @@
 //! [`Fil::exited`], which leaves the runtime for the duration of a closure;
 //! long CPU-bound loops that don't call into Fil-C should call
 //! [`Fil::pollcheck`] now and then. Calling Fil-C functions that block (a
-//! Fil-C `pthread_mutex_lock`, `read`, `sleep`) is fine: Fil-C's own libc
-//! exits the runtime around blocking system calls.
+//! Fil-C `pthread_mutex_lock`, `read`, `sleep`) is fine: the libc exits the
+//! runtime around them.
 //!
 //! Some blocking is less obvious. On glibc, the first use on a thread of a
 //! `thread_local!` whose value needs dropping registers its destructor under
@@ -94,10 +98,11 @@
 //! starts it wraps the panic hook installed at that point so that it runs
 //! exited (a panic hook installed later replaces that wrapper).
 //!
-//! A child process made by `fork()` after the runtime started has none of
-//! its threads, so [`Runtime::run`], [`Runtime::spawn`] and
-//! [`JoinHandle::join`] panic there; values that came from the runtime are
-//! leaked when dropped. Starting programs with `std::process::Command` is
+//! A child process made by Rust's `fork()` after the runtime started has only
+//! the forking thread, while the runtime still counts the others, so
+//! [`Runtime::run`], [`Runtime::spawn`] and [`JoinHandle::join`] panic there;
+//! values that came from the runtime are leaked when dropped. (Fil-C code's
+//! own `fork` is fine.) Starting programs with `std::process::Command` is
 //! fine (it uses `posix_spawn` or `exec`s right away).
 //!
 //! # Errors, panics, and exceptions
@@ -184,7 +189,7 @@ pub use fil_rust_sys::Flavor;
 pub use handle::{FilBuf, FilHandle};
 pub use library::{EmbeddedLibrary, Library};
 pub use ptr::{Capability, FilPtr, Opaque, Ptr};
-pub use runtime::{Collection, Config, Fil, HeapStats, JoinHandle, Libc, Runtime};
+pub use runtime::{Collection, Config, Fil, HeapStats, JoinHandle, Runtime};
 pub use types::{FilType, Leaf, LeafKind, Place, Word};
 
 #[cfg(feature = "derive")]

@@ -306,3 +306,14 @@ pub fn check_special(ptr: Ptr, special: usize, name: &str) {
         safety_panic(format_args!("cannot access pointer as {name} with ptr != aux (ptr = {:p}).", ptr.ptr));
     }
 }
+
+/// A tracked copy of `bytes`, with a terminator.
+pub(crate) unsafe fn c_string(thread: *mut Thread, bytes: &[u8]) -> Ptr {
+    unsafe {
+        let object = allocate(thread, bytes.len() + 1, 0);
+        crate::thread::track(thread, object);
+        let copy = Ptr::for_object(object);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), copy.ptr, bytes.len());
+        copy
+    }
+}

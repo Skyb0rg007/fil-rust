@@ -7,7 +7,7 @@ use std::io::Write;
 use crate::abi::*;
 use crate::natives::natives;
 use crate::object::{self, Access};
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::view::{self, Bytes};
 use crate::{ptrs, thread};
 

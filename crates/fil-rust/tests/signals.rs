@@ -93,10 +93,9 @@ fn rust_stack_overflow_is_still_detected_on_rust_threads() {
 }
 
 #[test]
-fn rust_stack_overflow_on_an_executor_thread_ends_the_process() {
-    // Executors are Fil-C threads whose stack guard Rust doesn't know about;
-    // the overflow still ends the process with a fatal signal, not a hang
-    // or silent corruption.
+fn rust_stack_overflow_in_a_job_ends_the_process() {
+    // The overflow ends the process with a fatal signal, not a hang or silent
+    // corruption.
     let o = run_child("rust-overflow-in-job");
     let sig = std::os::unix::process::ExitStatusExt::signal(&o.status);
     assert!(matches!(sig, Some(libc::SIGSEGV | libc::SIGBUS | libc::SIGABRT)), "status {:?}:\n{}", o.status, stderr(&o));
@@ -131,7 +130,7 @@ fn signals_from_outside_reach_fil_c_handlers() {
     });
     assert_eq!(before, 0);
     // Sent to the process, so any thread that doesn't block SIGUSR1 may
-    // take it: Rust threads, the executors, or the Fil-C main thread.
+    // take it: Rust threads that never ran Fil-C code, or ones that did.
     for _ in 0..3 {
         unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) };
     }

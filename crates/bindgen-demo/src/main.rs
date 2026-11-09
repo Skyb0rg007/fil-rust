@@ -3,10 +3,9 @@
 //! (see build.rs): a C dependency that stays memory-safe, with no library
 //! to install, no hand-written declarations, and no `unsafe`.
 //!
-//!     cargo run -p bindgen-demo
 //!     FILC_FLAVOR=glibc cargo run -p bindgen-demo --features glibc
 
-use fil_rust::{Callback, Config, EmbeddedLibrary, Libc, Runtime};
+use fil_rust::{Callback, Config, EmbeddedLibrary, Runtime};
 
 include!(concat!(env!("OUT_DIR"), "/inventory.rs"));
 use inventory_ffi::*;
@@ -15,8 +14,7 @@ use inventory_ffi::*;
 static INVENTORY: EmbeddedLibrary = fil_rust::include_library!("inventory");
 
 fn main() -> fil_rust::Result<()> {
-    // With the Fil-C libc: the library is loaded inside `Runtime::run`.
-    let rt = Runtime::start(Config::from_env()?.libc(Libc::Always))?;
+    let rt = Runtime::start(Config::from_env()?)?;
 
     rt.run(|fil| -> fil_rust::Result<()> {
         let inv_lib = Inventory::load_embedded(fil, &INVENTORY)?;

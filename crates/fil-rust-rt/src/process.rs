@@ -8,7 +8,7 @@ use crate::gc;
 use crate::natives::natives;
 use crate::object::Access;
 use crate::ptrs;
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::{iovecs_of, plain, sys, text};
 use crate::thread;
 

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use crate::abi::*;
 use crate::natives::natives;
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::thread::{self, NativeFrame};
 use crate::{globals, object, ptrs, view};
 
@@ -207,14 +207,14 @@ unsafe extern "C" fn environ(me: *mut Thread, _: *const Origin) -> Ptr {
     unsafe { refresh_environ(me, true) }
 }
 
-/// The program's name as the host started it, and its last component.
+/// The program's name, as constructors get it, and its last component.
 fn invocation_names(me: *mut Thread) -> [Ptr; 2] {
     // Not a `OnceLock`: waiting for one while entered could hold up a
     // collection that the thread making the names needs.
     static NAMES: Mutex<Option<[(usize, usize); 2]>> = Mutex::new(None);
     let mut names = unsafe { thread::lock_entered(me, &NAMES) };
     let made = names.get_or_insert_with(|| unsafe {
-        let name = std::env::args_os().next().unwrap_or_default().into_vec();
+        let name = globals::program_name();
         let short = name.rsplit(|&byte| byte == b'/').next().unwrap_or(&[]).to_vec();
         [name, short].map(|name| {
             let holder = holder(me);

@@ -1,83 +1,88 @@
-//! How the runtime sits in the process for each flavor: which objects are
-//! mapped, which libc each side uses, and which threads run Fil-C code.
+//! How the runtime sits in the process with a libc: for the glibc flavor,
+//! a library that uses the libc maps nothing of the distribution but the
+//! library itself, starts no thread, and runs on the caller's thread, the
+//! libc being the runtime's own over the host's; the musl flavor, which has
+//! no libc, turns such a library down by name.
 
 mod common;
 
-use std::ffi::c_char;
+use std::process::Command;
 
-use common::{flavor, runtime};
-use fil_rust::{Flavor, Ptr};
+use common::{config, fixture, flavor, runtime};
+use fil_rust::{Error, Flavor};
 
-fn thread_name(tid: &str) -> String {
-    std::fs::read_to_string(format!("/proc/self/task/{tid}/comm")).unwrap_or_default().trim().to_string()
+const CHILD: &str = "FIL_RUST_BOOT_CHILD";
+
+fn thread_count() -> usize {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status.lines().find(|line| line.starts_with("Threads:")).unwrap();
+    line.split_whitespace().nth(1).unwrap().parse().unwrap()
 }
 
-fn thread_names() -> Vec<String> {
-    std::fs::read_dir("/proc/self/task")
-        .unwrap()
-        .map(|e| thread_name(e.unwrap().file_name().to_str().unwrap()))
-        .collect()
-}
-
-#[test]
-fn jobs_run_on_fil_c_executor_threads() {
-    let rt = runtime();
-    let caller = unsafe { libc::gettid() };
-    let tid = rt.run(|fil| fil.libc().function::<fn() -> i32>(fil, "gettid").unwrap().call(fil, ()).unwrap());
-    assert_ne!(tid, caller);
-    assert_eq!(thread_name(&tid.to_string()), "fil-c-worker");
-
-    // One Fil-C main thread (the executor spawner) and at least the
-    // configured number of executors.
-    let names = thread_names();
-    assert_eq!(names.iter().filter(|n| *n == "fil-c-main").count(), 1, "{names:?}");
-    let workers = names.iter().filter(|n| *n == "fil-c-worker").count();
-    assert!(workers >= rt.config().worker_count(), "{names:?}");
-}
-
-#[test]
-fn the_yolo_libc_is_replaced_by_stand_ins() {
-    let rt = runtime();
+/// Files mapped from the distribution, but for the libraries under test.
+fn distribution_mappings() -> Vec<String> {
     let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
-    let paths: Vec<&str> = maps.lines().filter_map(|l| l.split_whitespace().nth(5)).collect();
-    let real_yolo: &[&str] = match rt.flavor() {
-        Flavor::Musl => &["libyoloc.so", "ld-fil1-x86_64.so"],
-        Flavor::Glibc => &["libyolocimpl.so", "libyolomimpl.so", "ld-fil1-x86_64.so"],
-    };
-    for name in real_yolo {
-        assert!(
-            !paths.iter().any(|p| p.starts_with('/') && p.ends_with(&format!("/{name}"))),
-            "the distribution's {name} is mapped"
-        );
-    }
-    // The stand-ins are loaded from memory.
-    assert!(paths.iter().any(|p| *p == format!("/memfd:{}", real_yolo[0])), "no stand-in for {}", real_yolo[0]);
-    // And the runtime is the stub, from memory, not the distribution's.
-    let libpizlo = rt.config().lib_dir().join("libpizlo.so");
-    let real = paths.iter().any(|p| *p == libpizlo.to_str().unwrap());
-    let stub = paths.contains(&"/memfd:libpizlo.so");
-    assert!(stub && !real);
+    let root = config().root().to_str().unwrap().to_string();
+    maps.lines().filter(|line| line.contains(&root)).map(str::to_string).collect()
+}
+
+/// What's mapped from memory: the runtime's stand-ins.
+fn memory_files() -> Vec<String> {
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    let mut names: Vec<String> =
+        maps.lines().filter_map(|line| line.split_whitespace().nth(5)).filter_map(|path| path.strip_prefix("/memfd:")).map(|name| name.trim_end_matches(" (deleted)").to_string()).collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 #[test]
-fn each_side_has_its_own_libc() {
+#[ignore = "run by the other tests, in a process of its own"]
+fn child() {
+    if std::env::var_os(CHILD).is_none() {
+        return;
+    }
+    let before = thread_count();
     let rt = runtime();
-    assert_eq!(rt.flavor(), flavor());
-    // The Rust side is always linked to the host glibc.
-    let host = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) }.to_str().unwrap().to_string();
-    assert!(host.starts_with("2."));
-
-    // The Fil-C side uses the flavor's own user libc.
-    let fil_c_glibc = rt.run(|fil| {
-        let libc = fil.libc();
-        if !libc.has_symbol("gnu_get_libc_version") {
-            return None;
-        }
-        let version = libc.function::<fn() -> Ptr<c_char>>(fil, "gnu_get_libc_version").unwrap();
-        Some(version.call(fil, ()).unwrap().read_string(fil).unwrap())
+    let library = rt.load(fixture("basic.c")).unwrap();
+    let (caller, tid, text) = rt.run(|fil| {
+        let gettid = fil.libc().function::<fn() -> i32>(fil, "gettid").unwrap();
+        let tid = gettid.call(fil, ()).unwrap();
+        let buffer = fil.alloc_bytes(32).unwrap();
+        let format = library.function::<fn(fil_rust::Ptr<u8>, usize, i32, fil_rust::Ptr<std::ffi::c_char>) -> i32>(fil, "format_into").unwrap();
+        format.call(fil, (buffer, 32, 7, fil.c_str("seven").unwrap())).unwrap();
+        (unsafe { libc::gettid() }, tid, buffer.cast::<std::ffi::c_char>().read_string(fil).unwrap())
     });
-    match rt.flavor() {
-        Flavor::Musl => assert_eq!(fil_c_glibc, None),
-        Flavor::Glibc => assert!(fil_c_glibc.unwrap().starts_with("2.")),
+    assert_eq!(tid, caller, "the libc ran on another thread");
+    assert_eq!(text, "7:seven");
+    assert_eq!(thread_count(), before, "something started a thread");
+    let mappings = distribution_mappings();
+    assert!(mappings.is_empty(), "{mappings:#?}");
+    let memory = memory_files();
+    for name in ["libpizlo.so", "libc.so.6666", "libm.so.6666", "libpthread.so.6660", "libdl.so.6662"] {
+        assert!(memory.iter().any(|file| file == name), "no stand-in for {name}: {memory:?}");
+    }
+}
+
+#[test]
+fn a_library_using_the_libc_brings_in_nothing_else() {
+    if flavor() != Flavor::Glibc {
+        return;
+    }
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", "child", "--nocapture", "--ignored", "--test-threads=1"]).env(CHILD, "1");
+    let output = common::without_core_dumps(&mut command).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn musl_turns_down_a_library_that_needs_a_libc() {
+    if flavor() != Flavor::Musl {
+        return;
+    }
+    match runtime().load(fixture("basic.c")) {
+        Err(Error::Unsupported(message)) => assert!(message.contains("libc") && message.contains("glibc"), "{message}"),
+        Err(other) => panic!("another error: {other}"),
+        Ok(_) => panic!("loaded a library that needs a libc"),
     }
 }

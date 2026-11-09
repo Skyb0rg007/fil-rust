@@ -2,9 +2,11 @@
 
 Call [Fil-C](https://fil-c.org/) shared libraries from safe Rust.
 
-Fil-C is a memory-safe implementation of C and C++. fil-rust loads the Fil-C
-runtime into an ordinary glibc-linked Rust process, opens Fil-C libraries, and
-calls their functions without giving up Fil-C's guarantees. Every pointer Rust
+Fil-C is a memory-safe implementation of C and C++. fil-rust opens Fil-C
+libraries in an ordinary glibc-linked Rust process and calls their functions
+without giving up Fil-C's guarantees. The Fil-C runtime is a Rust library
+(`fil-rust-rt`): it starts no threads, its collector runs only when Rust lets
+it, and Fil-C code runs on the thread that calls it. Every pointer Rust
 hands to Fil-C carries a real capability, and every access Rust makes to Fil-C
 memory is checked for bounds and liveness.
 
@@ -55,9 +57,15 @@ fn main() -> fil_rust::Result<()> {
   threads, and `FilBuf` is Fil-C memory that Rust owns and can use as a slice.
 - **Callbacks.** `Callback<fn(..) -> R>` turns a Rust closure into a C
   function pointer that Fil-C can call from any thread.
-- **Threads.** Rust threads run Fil-C work on an elastic pool of Fil-C
-  executor threads (`Runtime::run`, `Runtime::spawn`). Fil-C code can create
-  its own threads too.
+- **Threads.** Any Rust thread can run Fil-C code (`Runtime::run`, or
+  `Runtime::spawn` for a new one); it runs on that thread, which joins the
+  runtime on its first call. Fil-C code can create its own threads too.
+- **A libc in Rust.** On the glibc flavor, the libc a library imports is
+  served by Rust over the host's libc, so Fil-C and Rust share one
+  environment, one set of standard streams (`printf` and `println!` stay in
+  order), one time zone and one process. Every argument is checked in Rust
+  before the host sees it. A function that isn't implemented fails by name
+  when it's called, not when the library loads.
 - **C++.** C++ libraries work, including `std::thread`, and exceptions that
   escape to Rust become `Error::Exception`.
 - **Bindings from headers.** `fil-rust-bindgen` turns a C header into
@@ -67,10 +75,13 @@ fn main() -> fil_rust::Result<()> {
   from a build script, and `include_library!` embeds the result in the
   program, so a C dependency ships inside the binary and stays memory-safe
   (see `crates/bindgen-demo`).
-- **Both flavors, two architectures.** Libraries built with the musl ("pizfix") or the glibc
-  ("optfil") Fil-C distribution can be loaded. Enable the `glibc` feature for
-  the latter. The Rust program always stays linked to the system glibc.
-  x86-64 and aarch64 (musl only) are supported.
+- **Two flavors, two architectures.** Libraries built with the glibc
+  ("optfil") Fil-C distribution can use libc, libm and libpthread; enable the
+  `glibc` feature and set `FILC_FLAVOR=glibc`. Libraries built with the musl
+  ("pizfix") distribution can be loaded as long as they import nothing from
+  libc; one that does is refused with `Error::Unsupported`. The Rust program
+  always stays linked to the system glibc. x86-64 is supported, and aarch64
+  with the musl flavor only.
 
 Safety violations in Fil-C code are Fil-C panics: they end the process with a
 diagnostic, just as in a pure Fil-C program. See the crate docs and
@@ -78,24 +89,23 @@ diagnostic, just as in a pure Fil-C program. See the crate docs and
 
 ## Examples
 
-The examples build their C/C++ sources with the Fil-C compiler at run time.
-Run them from the dev shell:
+The examples build their C/C++ sources with the glibc flavor's Fil-C
+compiler at run time. Run them from the dev shell:
 
-    cargo run --example hello      # scalars, strings, arrays, libc
-    cargo run --example structs    # derive(FilType), structs by value, linked lists
-    cargo run --example callbacks  # qsort with a Rust comparator, callbacks from C threads
-    cargo run --example threads    # concurrent calls, background jobs, FilBuf, FilHandle
-    cargo run --example cxx        # C++ objects and exceptions
-    cargo run --example safety     # what errors look like, and a Fil-C panic
-
-    FILC_FLAVOR=glibc cargo run --features glibc --example hello
+    export FILC_FLAVOR=glibc
+    cargo run --features glibc --example hello      # scalars, strings, arrays, libc
+    cargo run --features glibc --example structs    # derive(FilType), structs by value, linked lists
+    cargo run --features glibc --example callbacks  # qsort with a Rust comparator, callbacks from C threads
+    cargo run --features glibc --example threads    # concurrent calls, background jobs, FilBuf, FilHandle
+    cargo run --features glibc --example cxx        # C++ objects and exceptions
+    cargo run --features glibc --example safety     # what errors look like, and a Fil-C panic
 
 `crates/bindgen-demo` is a separate crate whose build script compiles its C
 library with `fil-rust-build` and generates the bindings from its header
-with `fil-rust-bindgen`; the program embeds the library, so it needs only the
-Fil-C distribution's runtime to run:
+with `fil-rust-bindgen`; the program embeds the library, so it needs nothing
+from the Fil-C distribution to run:
 
-    cargo run -p bindgen-demo
+    cargo run -p bindgen-demo --features glibc
 
 ## Building C into the program
 
@@ -141,8 +151,8 @@ generated module's docs.
 ## Development
 
 The repository is a Cargo workspace; the crates live under `crates/`
-(`fil-rust`, `fil-rust-sys`, `fil-rust-macros`, `fil-rust-bindgen`,
-`fil-rust-build` and `bindgen-demo`), and every dependency is declared once, in the top-level
+(`fil-rust`, `fil-rust-rt`, `fil-rust-sys`, `fil-rust-macros`,
+`fil-rust-bindgen`, `fil-rust-build` and `bindgen-demo`), and every dependency is declared once, in the top-level
 `Cargo.toml`. `cargo` commands at the top level act on `fil-rust` unless told
 otherwise (`--workspace`, `-p`).
 
@@ -155,17 +165,20 @@ script needs:
 - `FILC_GLIBC_ROOT`, `FILC_GLIBC_CC`, `FILC_GLIBC_CXX`: the glibc
   distribution (`nix/optfil.nix`). Its compilers expect to live at
   `/opt/fil`, so they run inside `bwrap` with the distribution mounted there.
-- `FILC_MUSL_INCLUDE` and `FILC_LINUX_INCLUDE`, the headers the ABI audit
-  compares against the host glibc's.
+- `FILC_MUSL_INCLUDE` and `FILC_LINUX_INCLUDE`, the headers `fil-rust-rt`'s
+  layout test compiles its musl probe against.
 - `LIBCLANG_PATH`, for `fil-rust-bindgen`.
 
 Tests compile their fixtures with the compiler of the selected flavor:
 
-    cargo test                                       # musl
-    FILC_FLAVOR=glibc cargo test --features glibc    # glibc
-    FIL_RUST_GC_STRESS=1 cargo test                  # collecting at every safepoint
-    cargo test --workspace                           # every crate, including the generator
+    FILC_FLAVOR=glibc cargo test --features glibc    # everything
+    cargo test --lib --test rt_bare --test rt_gc     # musl: the libc-free tests
+    FIL_RUST_GC_STRESS=1 ...                         # collecting at every safepoint
+    cargo test --workspace --features fil-rust/glibc # every crate, including the generator
                                                      # (FIL_RUST_BLESS=1 updates tests/generated)
+
+`FIL_RUST_GC_STRESS=8` collects at every eighth safepoint, and
+`FIL_RUST_GC_STRESS_ALLOCATIONS=1` at allocations too.
 
 `PROPTEST_CASES` sets how many cases each property test tries, and
 `FIL_RUST_STRESS` multiplies the stress tests' iterations. The compile-fail
@@ -176,12 +189,13 @@ tests (`tests/ui`) compare compiler messages; after a toolchain bump,
 The tests are separate derivations in `passthru.tests` (`nix/tests.nix`):
 
     nix-build -A tests              # all of them
-    nix-build -A tests.musl         # the whole workspace, musl flavor
-                                    # (on aarch64, only the libc-free tests)
-    nix-build -A tests.musl-gc-stress  # the same, with constant collections (x86-64)
-    nix-build -A tests.glibc        # fil-rust's tests that run on the glibc flavor so far (x86-64)
-    nix-build -A tests.examples     # runs every example and bindgen-demo
-    nix-build -A tests.clippy       # clippy, warnings as errors
+    nix-build -A tests.glibc            # every fil-rust test, glibc flavor (x86-64)
+    nix-build -A tests.glibc-gc-stress  # the same, with constant collections (x86-64)
+    nix-build -A tests.musl             # fil-rust-rt, and the libc-free tests on musl
+    nix-build -A tests.examples         # runs every example and bindgen-demo (x86-64)
+    nix-build -A tests.clippy           # clippy, warnings as errors
+
+Pass `--cores 4` or so: the suites run their tests in parallel.
 
 The pinned
 nixpkgs and rust-overlay live only in `nix/pkgs.nix`; `default.nix` and
@@ -209,8 +223,17 @@ work the same way, so they need that emulation inside the build sandbox
 
 ### Bumping Fil-C
 
-Change `version` in `nix/filc.nix` (and `nix/optfil.nix`,
-`nix/filc-runtime-src.nix`) and update the hashes:
+Change `version` in `nix/filc.nix` and `nix/optfil.nix` and update the
+hashes:
 
     nix-prefetch-url https://github.com/pizlonator/fil-c/releases/download/v<version>/filc-<version>-linux-x86_64.tar.xz
     nix-prefetch-url https://github.com/pizlonator/fil-c/releases/download/v<version>/filc-<version>-linux-aarch64.tar.xz
+    nix-prefetch-url https://github.com/pizlonator/fil-c/releases/download/v<version>/optfil-<version>-linux-x86_64.tar.xz
+
+Then, with a Fil-C checkout at the new version (not pinned through Nix: it's
+large), regenerate what's derived from it:
+
+    crates/fil-rust-sys/abi/update-symbols.sh <checkout>   # symbol lists, layout cross-check
+    crates/fil-rust-sys/csrc/filc/update.sh <checkout> v<version>  # the vendored support library
+
+and review the diff: a changed helper or layout is a change to `fil-rust-rt`.

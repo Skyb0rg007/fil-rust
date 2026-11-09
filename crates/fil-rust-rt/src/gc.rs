@@ -25,7 +25,7 @@ use crate::abi::*;
 use crate::failure::internal_panic;
 use crate::heap::heap;
 use crate::thread::{self, extra};
-use crate::{globals, maps, ptrs, shim, start, tables};
+use crate::{globals, maps, ptrs, shim, tables};
 
 /// When collections happen. A collection is the only thing that gives memory
 /// back, `free` included.
@@ -494,7 +494,7 @@ pub unsafe fn fork(thread: *mut Thread) -> (libc::pid_t, i32) {
     let mut world = lock_world();
     let mut turns = lock_turns();
     let (result, error) = {
-        let _roots = (shim::hold(), start::hold(), globals::hold(), lock_collector());
+        let _roots = (shim::hold(), globals::hold(), lock_collector());
         let _heap = heap().hold();
         unsafe {
             *libc::__errno_location() = 0;
@@ -927,7 +927,6 @@ fn run() {
     unsafe {
         globals::for_each_root(|object| marker.root(object));
         shim::for_each_root(|object| marker.mark(object));
-        start::for_each_root(|object| marker.mark(object));
         crate::signal::for_each_root(|object| marker.mark(object));
         crate::glibc::for_each_root(|object| marker.mark(object));
         for &entry in &threads.0 {

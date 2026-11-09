@@ -15,9 +15,9 @@ use crate::abi::*;
 use crate::failure::{internal_panic, safety_panic};
 use crate::natives::natives;
 use crate::object::{self, Access};
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::thread::{self, NativeFrame, extra};
-use crate::{globals, ptrs};
+use crate::ptrs;
 
 #[cfg(target_arch = "x86_64")]
 std::arch::global_asm!(
@@ -195,9 +195,6 @@ unsafe fn block_all_signals() -> libc::sigset_t {
 /// `stack_size` bytes, or the host's default for 0. Returns 0 or an error
 /// number.
 pub(crate) unsafe fn create(thread: *mut Thread, function: Ptr, argument: Ptr, zthread: Ptr, tid: Ptr, stack_size: usize) -> c_int {
-    if !globals::ctors_started() {
-        safety_panic(format_args!("cannot create threads before global constructors have started being run."));
-    }
     object::check_function_call(function);
     unsafe {
         thread::exit(thread);

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use crate::abi::*;
 use crate::natives::natives;
 use crate::object::Access;
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::{one_out, plain};
 use crate::thread::{self, NativeFrame};
 use crate::view::{self, Bytes};

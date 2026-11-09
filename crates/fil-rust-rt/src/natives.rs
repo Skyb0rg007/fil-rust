@@ -134,7 +134,11 @@ pub fn x87_to_f64(mantissa: u64, sign_exponent: u16) -> f64 {
     } else if exponent == 0x7fff {
         if mantissa << 1 == 0 { f64::INFINITY } else { f64::NAN }
     } else {
-        (mantissa as f64) * 2f64.powi(exponent - 16383 - 63)
+        // In two steps: for a result near the bottom of `double`'s range,
+        // the power of two alone would underflow.
+        let power = exponent - 16383 - 63;
+        let first = power.clamp(-1000, 1000);
+        (mantissa as f64) * 2f64.powi(first) * 2f64.powi(power - first)
     };
     if negative { -magnitude } else { magnitude }
 }
@@ -524,17 +528,5 @@ natives! {
             }
             Thrown::Value(cc::promote_to_heap(thread, result.return_size))
         }
-    }
-
-    fn zrun_deferred_global_ctors(thread: *mut Thread) -> () {
-        unsafe { crate::globals::run_deferred_ctors(thread) };
-    }
-
-    fn zregister_sys_errno_handler(thread: *mut Thread, handler: Ptr) -> () {
-        crate::start::register_errno_handler(handler);
-    }
-
-    fn zregister_sys_dlerror_handler(thread: *mut Thread, handler: Ptr) -> () {
-        crate::start::register_dlerror_handler(handler);
     }
 }

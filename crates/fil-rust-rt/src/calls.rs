@@ -13,7 +13,7 @@ use crate::failure::{internal_panic, safety_panic};
 use crate::natives::{Rest, natives};
 use crate::object::{self, Access};
 use crate::ptrs;
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::{array_size, input, iovecs_of, is_internal_signal, maybe_in, maybe_out, one_in, one_out, output, plain, sys, text};
 use crate::thread;
 

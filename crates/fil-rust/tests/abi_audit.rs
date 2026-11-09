@@ -1,18 +1,18 @@
-//! The musl flavor's libc mode runs Fil-C's musl on top of the host glibc,
-//! with the runtime passing musl-laid-out structs to glibc (see "Fil-C on the
-//! host glibc" in docs/DESIGN.md). These tests audit that boundary:
-//!
-//! * the layouts and constants the runtime hands to libc, built once against
-//!   musl's headers and once against glibc's, differ only in the reviewed
-//!   ways listed below;
-//! * the reviewed differences actually work, end to end.
+//! The glibc flavor's boundary with the host libc. Natives hand Fil-C's
+//! structs to the host's glibc as they are, so the two sets of headers must
+//! agree but where reviewed; and the libc stand-ins must export everything the
+//! distribution's libc does, at every version, or the loader refuses
+//! libraries built against it.
+#![cfg(feature = "glibc")]
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::{fixture, runtime};
+use common::{fixture, fixture_with, flavor, runtime};
+use fil_rust::Flavor;
 
 fn tmp() -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("abi-audit");
@@ -20,89 +20,110 @@ fn tmp() -> PathBuf {
     dir
 }
 
-fn env(var: &str) -> String {
-    std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set (run the tests in nix-shell)"))
+fn glibc() -> bool {
+    flavor() == Flavor::Glibc
 }
 
-/// Differences between musl's and glibc's headers that the runtime passes
-/// across, and why each is safe.
+/// Differences between the Fil-C glibc's headers and the host's, and why
+/// each is safe.
 const REVIEWED: &[(&str, &str)] = &[
-    // musl reserves extra space at the end; glibc writes less than the
-    // (musl-sized, bounds-checked) buffer the runtime passes.
-    ("sizeof struct rusage", "musl buffer is larger"),
-    ("sizeof struct sysinfo", "musl buffer is larger"),
-    ("sizeof struct sched_param", "musl buffer is larger; glibc only uses sched_priority at offset 0"),
-    ("alignof struct sched_param", "musl buffer is larger"),
-    // musl splits these size_t fields into int + padding. the runtime zeroes the
-    // msghdr it builds, so glibc reads the right 8-byte value; on receive the
-    // low 4 bytes (little-endian) hold the value.
-    ("field struct msghdr.msg_iovlen", "the runtime zeroes the struct"),
-    ("field struct msghdr.msg_controllen", "the runtime zeroes the struct"),
-    // The control buffer comes from user memory, so its padding may be
-    // dirty: the stand-in's sendmsg/sendmmsg zero it, as musl's do. See
-    // `ancillary_data_with_dirty_padding`.
-    ("alignof struct cmsghdr", "CMSG_ALIGN is 8 in both"),
-    ("field struct cmsghdr.cmsg_len", "padding zeroed by the stand-in"),
-    // unsigned short + padding in musl: the low bytes hold the value.
-    ("field struct semid_ds.sem_nsems", "little-endian low bytes"),
-    // musl passes the real kernel bit, which is a no-op on 64-bit.
-    ("const O_LARGEFILE", "kernel ignores it on 64-bit"),
-    // Compile-time minimums; the runtime uses neither.
-    ("const MINSIGSTKSZ", "unused by the runtime"),
-    ("const PTHREAD_STACK_MIN", "unused by the runtime"),
+    // Fil-C's isn't packed, so a pointer in the data stays aligned: the
+    // natives convert every event.
+    ("sizeof struct epoll_event", "converted by the epoll natives"),
+    ("alignof struct epoll_event", "converted by the epoll natives"),
+    ("field struct epoll_event.data", "converted by the epoll natives"),
 ];
 
-/// Further differences on aarch64, where glibc's pthread objects are larger.
-#[cfg(target_arch = "aarch64")]
-const REVIEWED_ARCH: &[(&str, &str)] = &[
-    // glibc's state fits in musl's size, but its init functions clear the
-    // whole glibc size: the stand-in's wrappers use a glibc-sized copy.
-    // Every thread start and runtime mutex goes through them.
-    ("sizeof pthread_attr_t", "stand-in wrappers"),
-    ("sizeof pthread_mutex_t", "stand-in wrappers"),
-    // the runtime calls no mutexattr or condattr functions.
-    ("sizeof pthread_mutexattr_t", "not passed by the runtime"),
-    ("sizeof pthread_condattr_t", "not passed by the runtime"),
-];
-#[cfg(not(target_arch = "aarch64"))]
-const REVIEWED_ARCH: &[(&str, &str)] = &[];
+const PROBE: &str = "tests/abi/layout_probe.c";
 
-fn probe(name: &str, args: &[String]) -> Vec<String> {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/abi/layout_probe.c");
-    let exe = tmp().join(name);
-    // FILC_TARGET_CC is the target's C compiler when cross-compiling.
+/// The host's layouts.
+fn host_probe() -> Vec<String> {
+    let exe = tmp().join("probe-host");
     let cc = ["FILC_TARGET_CC", "CC"].into_iter().find_map(|v| std::env::var(v).ok()).unwrap_or_else(|| "cc".into());
-    let status = Command::new(cc)
-        .arg("-w")
-        .args(args)
-        .arg(&src)
-        .arg("-o")
-        .arg(&exe)
-        .status()
-        .expect("running the host C compiler");
-    assert!(status.success(), "building the {name} layout probe");
+    let status = Command::new(cc).arg("-w").arg(Path::new(env!("CARGO_MANIFEST_DIR")).join(PROBE)).arg("-o").arg(&exe).status().unwrap();
+    assert!(status.success(), "building the host's layout probe");
     let out = Command::new(&exe).output().unwrap();
     String::from_utf8(out.stdout).unwrap().lines().map(String::from).collect()
 }
 
+const CHILD: &str = "FIL_RUST_ABI_AUDIT_CHILD";
+
 #[test]
-fn musl_and_glibc_layouts_differ_only_in_reviewed_ways() {
-    let musl = probe(
-        "probe-musl",
-        &["-nostdinc".into(), "-isystem".into(), env("FILC_MUSL_INCLUDE"), "-isystem".into(), env("FILC_LINUX_INCLUDE")],
-    );
-    let glibc = probe("probe-glibc", &[]);
-    assert_eq!(musl.len(), glibc.len());
-    assert!(musl.len() > 600, "the probe should cover the whole boundary");
+#[ignore = "run by the other tests, in a process of its own"]
+fn child() {
+    if std::env::var_os(CHILD).is_none() {
+        return;
+    }
+    let probe = fixture_with("../abi/layout_probe.c", &["-w", "-Dmain=layout_probe"]);
+    let rt = runtime();
+    let library = rt.load(probe).unwrap();
+    rt.run(|fil| library.function::<fn() -> i32>(fil, "layout_probe").unwrap().call(fil, ()).unwrap());
+    rt.flush().unwrap();
+}
+
+/// The Fil-C glibc's layouts, as compiled code sees them.
+fn fil_probe() -> Vec<String> {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    // Quiet, so the harness writes nothing before the probe's first line.
+    command.args(["--exact", "child", "--nocapture", "--ignored", "--test-threads=1", "--quiet"]).env(CHILD, "1");
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    stdout.lines().filter(|line| ["sizeof ", "alignof ", "field ", "const "].iter().any(|kind| line.starts_with(kind))).map(String::from).collect()
+}
+
+#[test]
+fn fil_c_and_host_layouts_differ_only_in_reviewed_ways() {
+    if !glibc() {
+        return;
+    }
+    let (host, fil) = (host_probe(), fil_probe());
+    assert_eq!(fil.len(), host.len());
+    assert!(host.len() > 600, "the probe should cover the whole boundary");
+    let key = |line: &str| line.rsplitn(if line.starts_with("field") { 3 } else { 2 }, ' ').last().unwrap().to_string();
     let mut unreviewed = Vec::new();
-    for (m, g) in musl.iter().zip(&glibc) {
-        let key = |l: &str| l.rsplitn(if l.starts_with("field") { 3 } else { 2 }, ' ').last().unwrap().to_string();
-        assert_eq!(key(m), key(g));
-        if m != g && !REVIEWED.iter().chain(REVIEWED_ARCH).any(|(k, _)| *k == key(m)) {
-            unreviewed.push(format!("musl: {m}\nglibc: {g}"));
+    for (f, h) in fil.iter().zip(&host) {
+        assert_eq!(key(f), key(h));
+        if f != h && !REVIEWED.iter().any(|(k, _)| *k == key(f)) {
+            unreviewed.push(format!("Fil-C: {f}\nhost:  {h}"));
         }
     }
     assert!(unreviewed.is_empty(), "unreviewed differences:\n{}", unreviewed.join("\n"));
+}
+
+/// A library's defined `pizlonated_` symbols, with their versions.
+fn exports(path: &Path) -> BTreeSet<String> {
+    let output = Command::new("readelf").args(["--dyn-syms", "-W"]).arg(path).output().expect("running readelf");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            // Num, Value, Size, Type, Bind, Vis, Ndx, Name.
+            let (&ndx, &name) = (fields.get(6)?, fields.get(7)?);
+            (ndx != "UND" && name.starts_with("pizlonated_")).then(|| name.replace("@@", "@"))
+        })
+        .collect()
+}
+
+#[test]
+fn the_stand_ins_export_what_the_distribution_does() {
+    if !glibc() {
+        return;
+    }
+    let lib_dir = common::config().lib_dir();
+    let stand_ins = Flavor::Glibc.libc_stand_ins();
+    assert_eq!(stand_ins.len(), 4);
+    for stand_in in stand_ins {
+        let copy = tmp().join(stand_in.soname);
+        std::fs::write(&copy, stand_in.bytes).unwrap();
+        let (ours, theirs) = (exports(&copy), exports(&lib_dir.join(stand_in.soname)));
+        assert!(!theirs.is_empty(), "{} exports nothing", stand_in.soname);
+        let missing: Vec<_> = theirs.difference(&ours).collect();
+        let extra: Vec<_> = ours.difference(&theirs).collect();
+        assert!(missing.is_empty() && extra.is_empty(), "{}: missing {missing:?}, extra {extra:?}", stand_in.soname);
+    }
 }
 
 fil_rust::foreign! {
@@ -114,6 +135,9 @@ fil_rust::foreign! {
 
 #[test]
 fn ancillary_data_with_dirty_padding() {
+    if !glibc() {
+        return;
+    }
     runtime().run(|fil| {
         let s = Sockets::load(fil, fixture("sockets.c")).unwrap();
         assert_eq!(s.pass_fd(fil, 0).unwrap(), 0, "clean control buffer");
@@ -123,6 +147,9 @@ fn ancillary_data_with_dirty_padding() {
 
 #[test]
 fn sysv_semaphores() {
+    if !glibc() {
+        return;
+    }
     runtime().run(|fil| {
         let s = Sockets::load(fil, fixture("sockets.c")).unwrap();
         assert_eq!(s.sem_roundtrip(fil, 3).unwrap(), 0);

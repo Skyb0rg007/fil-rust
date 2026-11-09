@@ -463,7 +463,7 @@ pub fn result(thread: *mut Thread, count: usize) -> c_int {
     match c_int::try_from(count) {
         Ok(count) => count,
         Err(_) => {
-            unsafe { crate::start::set_errno(thread, libc::EOVERFLOW) };
+            unsafe { crate::glibc::set_errno(thread, libc::EOVERFLOW) };
             -1
         }
     }

@@ -39,7 +39,6 @@ pub mod signal;
 pub mod object;
 pub mod ptrs;
 pub mod shim;
-pub mod start;
 pub mod sys;
 pub mod thread;
 mod view;
@@ -73,8 +72,8 @@ unsafe extern "C" fn missing_data(_: *mut Thread, _: *const Origin, name: *const
 pub struct Installed {
     /// The stub, which has every symbol the runtime defines.
     pub runtime: usize,
-    /// The stand-in that took the place of the Fil-C libc (`libc.so` or
-    /// `libc.so.6666`).
+    /// The libc stand-in: `libc.so.6666`, the runtime's libc, for glibc, and
+    /// an empty `libc.so` for musl.
     pub libc: usize,
 }
 
@@ -98,13 +97,44 @@ fn load_stub(flavor: Flavor) -> Result<Installed, String> {
     unsafe { fill_stub(handle, &runtime_table(), support) }?;
     // musl's stand-in has no slots: it's only a soname.
     if flavor == Flavor::Glibc {
-        let natives: std::collections::HashMap<_, _> = glibc::table().into_iter().collect();
+        glibc::math::prepare();
+        let mut natives: std::collections::HashMap<_, _> = glibc::table().into_iter().collect();
+        // The support library keeps a table of what each descriptor is, so
+        // that an epoll's data can hold a pointer: the calls that make,
+        // copy or close descriptors go through its wrappers, which call the
+        // natives.
+        for (name, wrapper) in SUPPORT_WRAPPERS {
+            let symbol = unsafe { libc::dlsym(support, wrapper.as_ptr().cast()) };
+            if symbol.is_null() {
+                return Err(format!("the support library has no {}", wrapper.trim_end_matches('\0')));
+            }
+            natives.insert(name, symbol.cast_const().cast());
+        }
         for &stand_in in &stand_ins {
             unsafe { fill_stub(stand_in, &natives, std::ptr::null_mut()) }?;
         }
     }
     Ok(Installed { runtime: handle as usize, libc: stand_ins[0] as usize })
 }
+
+/// glibc's functions that are the support library's wrappers, by name.
+const SUPPORT_WRAPPERS: &[(&str, &str)] = &[
+    ("pizlonated_close", "pizlonated_zsys_close\0"),
+    ("pizlonated___close", "pizlonated_zsys_close\0"),
+    ("pizlonated_close_range", "pizlonated_zsys_close_range\0"),
+    ("pizlonated_fcntl", "pizlonated_zsys_fcntl\0"),
+    ("pizlonated_fcntl64", "pizlonated_zsys_fcntl\0"),
+    ("pizlonated___fcntl", "pizlonated_zsys_fcntl\0"),
+    ("pizlonated_dup", "pizlonated_zsys_dup\0"),
+    ("pizlonated_dup2", "pizlonated_zsys_dup2\0"),
+    ("pizlonated___dup2", "pizlonated_zsys_dup2\0"),
+    ("pizlonated_dup3", "pizlonated_zsys_dup3\0"),
+    ("pizlonated_epoll_create1", "pizlonated_zsys_epoll_create1\0"),
+    ("pizlonated_epoll_ctl", "pizlonated_zsys_epoll_ctl\0"),
+    ("pizlonated_epoll_wait", "pizlonated_zsys_epoll_wait\0"),
+    ("pizlonated_epoll_pwait", "pizlonated_zsys_epoll_pwait\0"),
+    ("pizlonated_epoll_pwait2", "pizlonated_zsys_epoll_pwait2\0"),
+];
 
 /// The libc functions and variables the glibc flavor has natives for, by
 /// their C names.

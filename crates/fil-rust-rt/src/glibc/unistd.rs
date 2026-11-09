@@ -8,8 +8,8 @@ use std::ffi::{c_int, c_long, c_uint};
 use std::sync::OnceLock;
 
 use crate::abi::*;
-use crate::natives::natives;
-use crate::start::set_errno;
+use crate::natives::{Rest, natives};
+use crate::glibc::set_errno;
 use crate::sys::{one_out, output, plain, sys, text};
 use crate::{calls, maps, net, process, view};
 
@@ -73,6 +73,7 @@ const RENAMES: &[(&str, &str)] = &[
     ("__sigaction", "sigaction"),
     ("__libc_sigaction", "sigaction"),
     ("gsignal", "raise"),
+    ("__sysconf", "sysconf"),
 ];
 
 fn at_cwd_stat(thread: *mut Thread, path: Ptr, buffer: Ptr, flags: c_int) -> c_int {
@@ -82,6 +83,19 @@ fn at_cwd_stat(thread: *mut Thread, path: Ptr, buffer: Ptr, flags: c_int) -> c_i
 }
 
 natives! {
+    // `CPU_COUNT`: the set bits in the first `size` bytes.
+    fn __sched_cpucount(thread: *mut Thread, size: usize, set: Ptr) -> c_int {
+        let bytes = view::Bytes::exactly(set, size, crate::object::Access::Read);
+        (0..size).map(|index| bytes.get(index).count_ones()).sum::<u32>() as c_int
+    }
+
+    // Variadic in glibc: the new address comes only with `MREMAP_FIXED`.
+    fn mremap(thread: *mut Thread, old: Ptr, old_size: usize, new_size: usize, flags: c_int, rest: Rest) -> Ptr {
+        let mut rest = rest;
+        let new = if flags & libc::MREMAP_FIXED != 0 && rest.has_next() { unsafe { rest.next::<Ptr>(thread) } } else { Ptr::NULL };
+        unsafe { maps::remap(thread, old, old_size, new_size, flags, new) }
+    }
+
     fn stat(thread: *mut Thread, path: Ptr, buffer: Ptr) -> c_int {
         at_cwd_stat(thread, path, buffer, 0)
     }

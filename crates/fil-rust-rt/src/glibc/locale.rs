@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use crate::abi::*;
 use crate::natives::natives;
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::{globals, object, ptrs, thread, view};
 
 /// `sizeof(struct __locale_struct)`: 13 locale data pointers, the three

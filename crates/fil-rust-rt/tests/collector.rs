@@ -12,8 +12,6 @@ use fil_rust_sys::{FilcThread, Flavor};
 /// Live bytes as of the collection the callback started.
 static LIVE_IN_CALLBACK: AtomicUsize = AtomicUsize::new(0);
 
-unsafe extern "C" fn no_main(_: *mut FilcThread, _: std::ffi::c_int) {}
-
 unsafe extern "C" fn collect_then_return(thread: *mut FilcThread, _: u64, _: usize) -> usize {
     unsafe {
         gc::collect(thread.cast());
@@ -26,7 +24,7 @@ unsafe extern "C" fn collect_then_return(thread: *mut FilcThread, _: u64, _: usi
 #[test]
 fn arguments_are_alive_as_a_callback_starts() {
     install(Flavor::Musl).unwrap();
-    unsafe { shim::fr_init(no_main, collect_then_return) };
+    unsafe { shim::fr_init(collect_then_return) };
     gc::set_collection(gc::Collection::Manual);
     let (with_argument, without) = run(|thread| unsafe {
         let closure = shim::fr_closure_new(thread.cast(), 1);

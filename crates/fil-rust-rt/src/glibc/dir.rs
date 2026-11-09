@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use crate::abi::*;
 use crate::natives::natives;
 use crate::object::{self, Access};
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::plain;
 use crate::{thread, view};
 

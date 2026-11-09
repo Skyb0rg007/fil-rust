@@ -15,7 +15,7 @@ struct HandleState {
     free: Vec<usize>,
 }
 
-/// Slots of the shim's root table, which the garbage collector treats as
+/// Slots of the runtime's root table, which the garbage collector treats as
 /// live.
 pub(crate) struct HandleTable {
     state: Mutex<HandleState>,

@@ -5,7 +5,7 @@ use std::ptr::null_mut;
 
 use crate::abi::*;
 use crate::natives::natives;
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::view::Bytes;
 use crate::{natives, object, ptrs};
 

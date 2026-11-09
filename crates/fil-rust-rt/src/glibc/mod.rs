@@ -19,6 +19,7 @@ mod env;
 mod error;
 mod formatting;
 mod locale;
+pub(crate) mod math;
 pub(crate) mod pthread;
 mod scanf;
 mod stdio;
@@ -90,7 +91,7 @@ pub unsafe fn set_errno(me: *mut Thread, value: c_int) {
 
 /// Hands `dlerror` its next message.
 pub unsafe fn set_dlerror(me: *mut Thread, message: &[u8]) {
-    let copy = unsafe { crate::start::c_string(me, message) };
+    let copy = unsafe { crate::object::c_string(me, message) };
     unsafe { thread::extra(me) }.libc.dlerror = copy;
 }
 
@@ -168,6 +169,7 @@ pub fn table() -> Vec<(&'static str, *const ())> {
     table.extend(pthread::aliases());
     table.extend(locale::table());
     table.extend(locale::aliases());
+    table.extend(math::table());
     table.extend(wide::table());
     table.extend(wide::aliases());
     table.extend(scanf::table());

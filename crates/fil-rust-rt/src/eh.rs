@@ -428,9 +428,9 @@ unsafe fn describe_frame(thread: *mut Thread, frame: *mut Frame, origin: *const 
         let fields = description.ptr.cast::<FrameDescription>();
         let field = |place: *mut usize| description.with_ptr(place.cast());
         let text = |name: *const std::ffi::c_char| if name.is_null() { &b""[..] } else { std::ffi::CStr::from_ptr(name).to_bytes() };
-        let function_name = crate::start::c_string(thread, text((*node).function));
+        let function_name = crate::object::c_string(thread, text((*node).function));
         ptrs::store(thread, field(&raw mut (*fields).function_name), function_name);
-        let filename = crate::start::c_string(thread, text((*node).filename));
+        let filename = crate::object::c_string(thread, text((*node).filename));
         ptrs::store(thread, field(&raw mut (*fields).filename), filename);
         (*fields).line = (*origin).line;
         (*fields).column = (*origin).column;

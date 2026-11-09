@@ -15,7 +15,8 @@ use crate::gc;
 use crate::heap::heap;
 use crate::natives::{natives, string_of};
 use crate::object::{self, Access};
-use crate::start::{c_string, set_errno};
+use crate::glibc::set_errno;
+use crate::object::c_string;
 
 const SPECIAL_NAMES: [&str; 13] = [
     "none", "function", "thread", "signal_handler", "ptr_table", "ptr_table_array", "dl_handle", "jmp_buf",

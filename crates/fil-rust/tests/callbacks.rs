@@ -161,7 +161,7 @@ fn callbacks_outlive_the_scope_that_created_them() {
     let rt = runtime();
     let b = basic();
     let cb = rt.run(|fil| Callback::<IntFn>::new(fil, |_, (x,)| x + 1).unwrap());
-    // Use it from different jobs (and executor threads), after collections.
+    // Use it from different jobs, after collections.
     for i in 0..10 {
         rt.run(|fil| {
             fil.collect_garbage().unwrap();

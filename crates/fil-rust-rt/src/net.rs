@@ -1,9 +1,9 @@
 //! Sockets.
 //!
-//! The Fil-C libc's `msghdr` isn't the host's: the musl layout keeps some
-//! lengths in 32 bits with padding after them, and the kernel's are 64 bits.
-//! That goes for `cmsghdr` too, inside control data the program wrote, so what
-//! gets sent is a copy with the padding cleaned, as musl's `sendmsg` does.
+//! A `msghdr` and the `cmsghdr`s in its control data are copied, with any
+//! padding cleaned, as musl's `sendmsg` does: musl's layout keeps some lengths
+//! in 32 bits with padding after them where the kernel's are 64 bits, and the
+//! control data is whatever the program wrote.
 
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::zeroed;
@@ -13,7 +13,7 @@ use crate::abi::*;
 use crate::natives::natives;
 use crate::object::{self, Access};
 use crate::ptrs;
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::{array_size, input, iovecs, maybe_out, one_in, one_out, output, sys};
 use crate::thread;
 

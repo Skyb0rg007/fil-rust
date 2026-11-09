@@ -33,9 +33,9 @@ fn many_rust_threads_share_a_fil_c_mutex() {
 #[test]
 fn spawned_jobs_run_concurrently() {
     let rt = runtime();
-    // More jobs than initial executors, each waiting for all the others:
-    // this only finishes if they all run at once, so the pool must grow.
-    let n = rt.config().worker_count() + 4;
+    // Each job waits for all the others: this only finishes if they all run
+    // at once.
+    let n = 12;
     let barrier = Arc::new(Barrier::new(n));
     let jobs: Vec<_> = (0..n)
         .map(|i| {
@@ -124,7 +124,7 @@ fn panics_propagate_to_the_caller() {
     let r = std::panic::catch_unwind(|| rt.run(|_fil| panic!("boom in a job")));
     let msg = r.unwrap_err();
     assert_eq!(msg.downcast_ref::<&str>(), Some(&"boom in a job"));
-    // The executor survives.
+    // The thread survives.
     let b = basic();
     assert_eq!(rt.run(|fil| b.add(fil, 1, 1).unwrap()), 2);
     let r = std::panic::catch_unwind(|| rt.spawn(|_fil| panic!("boom in a spawned job")).join());

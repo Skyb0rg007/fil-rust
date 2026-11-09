@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use crate::abi::*;
 use crate::natives::{Rest, natives};
 use crate::object::{self, Access};
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::plain;
 use crate::view::{self, Bytes};
 use crate::{ptrs, thread};

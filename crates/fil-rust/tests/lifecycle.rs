@@ -165,7 +165,7 @@ fn child_entry() {
             let job = rt.spawn(|_| 1);
             let pid = unsafe { libc::fork() };
             if pid == 0 {
-                // The child: no executors. Using the runtime panics instead
+                // The child: only this thread. Using the runtime panics instead
                 // of hanging; dropping what came from it leaks.
                 let run = catch_unwind(AssertUnwindSafe(|| rt.run(|_| 0)));
                 let spawn = catch_unwind(AssertUnwindSafe(|| drop(rt.spawn(|_| 0))));
@@ -260,17 +260,17 @@ fn child_entry() {
             collector.join().unwrap();
             assert_eq!(rt.run(|fil| slow.function::<fn() -> i32>(fil, "ctor_slow_started").unwrap().call(fil, ()).unwrap()), 1);
         }
-        "executors-started-while-a-constructor-runs" => {
-            // Busy executors make the pool grow while another thread's
-            // dlopen runs a slow constructor that then creates a thread, and
-            // collections run. Starting executors looks up pthread_create
-            // with dlsym, which waits for the loader's lock; the thread
-            // doing it must not wait entered, or the collection waits for it
-            // while holding the lock that creating a thread needs.
+        "threads-join-while-a-constructor-runs" => {
+            // Threads join the runtime while another thread's dlopen runs a
+            // slow constructor that then creates a thread, and collections
+            // run. Joining takes the thread list, which a collector looping
+            // on it mustn't starve, and no thread may wait for the loader's
+            // lock entered, or the collection waits for it while holding the
+            // lock that creating a thread needs.
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let s = stop.clone();
-            // One job that keeps collecting, so that it holds an executor
-            // and a collection is under way when the pool grows.
+            // One job that keeps collecting, so that a collection is under
+            // way as threads join.
             let collector = rt.spawn(move |fil| {
                 // Resolved once: looking it up each time (as collect_garbage
                 // does) would wait for the loader's lock too, and no
@@ -281,8 +281,8 @@ fn child_entry() {
                 }
             });
             let grower = std::thread::spawn(move || {
-                // Inside the constructor's sleep: enough jobs that block
-                // (outside the runtime) that every executor is busy.
+                // Inside the constructor's sleep: many threads joining, each
+                // blocking outside the runtime.
                 std::thread::sleep(Duration::from_millis(100));
                 let jobs: Vec<_> = (0..24)
                     .map(|_| rt.spawn(|fil| fil.exited(|| std::thread::sleep(Duration::from_millis(400)))))
@@ -405,6 +405,6 @@ fn panic_hooks_run_outside_the_runtime() {
 }
 
 #[test]
-fn starting_executors_while_a_constructor_creates_threads() {
-    child("executors-started-while-a-constructor-runs").assert_clean();
+fn threads_join_while_a_constructor_creates_threads() {
+    child("threads-join-while-a-constructor-runs").assert_clean();
 }

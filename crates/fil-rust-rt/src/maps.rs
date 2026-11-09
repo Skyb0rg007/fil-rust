@@ -14,7 +14,7 @@ use crate::failure::{internal_panic, safety_panic};
 use crate::gc;
 use crate::natives::natives;
 use crate::object::{self, Access};
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::{one_out, plain, sys};
 use crate::thread;
 
@@ -163,6 +163,60 @@ unsafe fn move_mapping(old: *mut u8, old_size: usize, new: *mut u8, new_size: us
     }
 }
 
+/// `mremap`: `new` only counts with `MREMAP_FIXED`.
+pub(crate) unsafe fn remap(thread: *mut Thread, old: Ptr, old_size: usize, new_size: usize, flags: c_int, new: Ptr) -> Ptr {
+    let known = libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED | libc::MREMAP_DONTUNMAP;
+    let moves = flags & libc::MREMAP_MAYMOVE != 0;
+    let fixed = flags & libc::MREMAP_FIXED != 0;
+    if !is_page_aligned(old.ptr as usize) || !is_page_aligned(new.ptr as usize) || flags & !known != 0 {
+        return unsafe { fail(thread, libc::EINVAL) };
+    }
+    if flags & libc::MREMAP_DONTUNMAP != 0 {
+        return unsafe { fail(thread, libc::ENOSYS) };
+    }
+    if (old_size == 0 && !moves) || new_size == 0 {
+        return unsafe { fail(thread, libc::EINVAL) };
+    }
+    let old_size = round_to_page(old_size);
+    let new_size = round_to_page(new_size);
+    // Even a size of zero asks for a page, which has to be a mapping's.
+    object::check_access(old, old_size.max(PAGE_SIZE), Access::Write);
+    check_mapped(old);
+    let new = if fixed {
+        if !moves {
+            return unsafe { fail(thread, libc::EINVAL) };
+        }
+        object::check_access(new, new_size, Access::Write);
+        check_mapped(new);
+        new
+    } else if moves {
+        unsafe { allocate(thread, new_size) }
+    } else if new_size > old.available() {
+        return unsafe { fail(thread, libc::ENOMEM) };
+    } else {
+        old
+    };
+    let result = unsafe {
+        sys(thread, || {
+            if moves {
+                move_mapping(old.ptr, old_size, new.ptr, new_size)
+            } else if new_size > old_size {
+                // This only gets here after shrinking, so ordinary memory
+                // follows and it fails, as it does upstream.
+                libc::mremap(old.ptr.cast(), old_size, new_size, 0)
+            } else {
+                unmap(old.ptr.add(new_size), old_size - new_size);
+                old.ptr.cast()
+            }
+        })
+    };
+    if result == libc::MAP_FAILED {
+        return failed();
+    }
+    object::check_access(new, new_size, Access::Write);
+    new
+}
+
 natives! {
     fn zsys_mmap(thread: *mut Thread, address: Ptr, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) -> Ptr {
         let length = round_to_page(length);
@@ -260,56 +314,7 @@ natives! {
     }
 
     fn zsys_mremap(thread: *mut Thread, old: Ptr, old_size: usize, new_size: usize, flags: c_int, new: Ptr) -> Ptr {
-        let known = libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED | libc::MREMAP_DONTUNMAP;
-        let moves = flags & libc::MREMAP_MAYMOVE != 0;
-        let fixed = flags & libc::MREMAP_FIXED != 0;
-        if !is_page_aligned(old.ptr as usize) || !is_page_aligned(new.ptr as usize) || flags & !known != 0 {
-            return unsafe { fail(thread, libc::EINVAL) };
-        }
-        if flags & libc::MREMAP_DONTUNMAP != 0 {
-            return unsafe { fail(thread, libc::ENOSYS) };
-        }
-        if (old_size == 0 && !moves) || new_size == 0 {
-            return unsafe { fail(thread, libc::EINVAL) };
-        }
-        let old_size = round_to_page(old_size);
-        let new_size = round_to_page(new_size);
-        // Even a size of zero asks for a page, which has to be a mapping's.
-        object::check_access(old, old_size.max(PAGE_SIZE), Access::Write);
-        check_mapped(old);
-        let new = if fixed {
-            if !moves {
-                return unsafe { fail(thread, libc::EINVAL) };
-            }
-            object::check_access(new, new_size, Access::Write);
-            check_mapped(new);
-            new
-        } else if moves {
-            unsafe { allocate(thread, new_size) }
-        } else if new_size > old.available() {
-            return unsafe { fail(thread, libc::ENOMEM) };
-        } else {
-            old
-        };
-        let result = unsafe {
-            sys(thread, || {
-                if moves {
-                    move_mapping(old.ptr, old_size, new.ptr, new_size)
-                } else if new_size > old_size {
-                    // This only gets here after shrinking, so ordinary memory
-                    // follows and it fails, as it does upstream.
-                    libc::mremap(old.ptr.cast(), old_size, new_size, 0)
-                } else {
-                    unmap(old.ptr.add(new_size), old_size - new_size);
-                    old.ptr.cast()
-                }
-            })
-        };
-        if result == libc::MAP_FAILED {
-            return failed();
-        }
-        object::check_access(new, new_size, Access::Write);
-        new
+        unsafe { remap(thread, old, old_size, new_size, flags, new) }
     }
 
     fn zsys_shmget(thread: *mut Thread, key: c_int, size: usize, flags: c_int) -> c_int {

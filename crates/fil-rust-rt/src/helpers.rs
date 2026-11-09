@@ -658,7 +658,7 @@ unsafe extern "C" fn filc_execute_constant_relocations(
 }
 
 unsafe extern "C" fn filc_defer_or_run_global_ctor(p: *mut u8, l: *mut u8) {
-    unsafe { globals::defer_or_run_ctor(flight(p, l)) };
+    unsafe { globals::run_ctor_now(flight(p, l)) };
 }
 
 unsafe extern "C" fn filc_run_global_dtor(p: *mut u8, l: *mut u8) {

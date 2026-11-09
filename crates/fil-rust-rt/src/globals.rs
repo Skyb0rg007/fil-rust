@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering, fence};
+use std::sync::atomic::{AtomicUsize, Ordering, fence};
 
 use crate::abi::*;
 use crate::failure::{internal_panic, safety_panic};
@@ -34,7 +34,7 @@ static ROOTS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 /// Keeps what's here from changing, for `fork`, whose caller has [`lock`].
 pub fn hold() -> impl Sized {
-    (ROOTS.lock().unwrap_or_else(|e| e.into_inner()), DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner()))
+    ROOTS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn with_state<R>(body: impl FnOnce(&mut Initialization) -> R) -> R {
@@ -251,53 +251,10 @@ pub unsafe fn for_each_root(mut visit: impl FnMut(*mut Object)) {
     for &object in roots.iter() {
         visit(object as *mut Object);
     }
-    drop(roots);
-    let ctors = DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner());
-    for &(_, lower) in ctors.iter() {
-        visit(object_for_lower(lower as *mut u8));
-    }
 }
 
-/// Constructors run as they turn up, in a process with no libc.
-const CTORS_BARE: u8 = 0;
-/// They wait for the libc to reach `__libc_start_main`.
-const CTORS_DEFERRED: u8 = 1;
-/// That happened, and any more run as they turn up.
-const CTORS_DONE: u8 = 2;
-
-static CTOR_MODE: AtomicU8 = AtomicU8::new(CTORS_BARE);
-static DEFERRED_CTORS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
-
-/// Holds back constructors until the libc that's about to load is ready.
-/// Constructors from before this have already run.
-pub fn defer_ctors() {
-    CTOR_MODE.store(CTORS_DEFERRED, Ordering::Release);
-}
-
-/// Whether Fil-C code may create threads. Until the libc has set itself up,
-/// it can't.
-pub fn ctors_started() -> bool {
-    CTOR_MODE.load(Ordering::Acquire) != CTORS_DEFERRED
-}
-
-/// `__libc_start_main` got to the point of running constructors. They run in
-/// the order they were deferred, which is what preserves their priorities.
-pub unsafe fn run_deferred_ctors(me: *mut Thread) {
-    if CTOR_MODE.swap(CTORS_DONE, Ordering::AcqRel) != CTORS_DEFERRED {
-        crate::failure::safety_panic(format_args!("cannot run deferred global constructors twice."));
-    }
-    let mut index = 0;
-    loop {
-        let next = DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner()).get(index).copied();
-        let Some((ptr, lower)) = next else { break };
-        unsafe { run_ctor(me, Ptr { ptr: ptr as *mut u8, lower: lower as *mut u8 }) };
-        index += 1;
-    }
-    DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-}
-
-/// Empty, null-terminated argv and environ, for constructors in a process
-/// that has no Fil-C `main`. Both are the same read-only word.
+/// Empty, null-terminated argv and environ, for constructors when nothing set
+/// arguments for them. Both are the same read-only word.
 fn empty_vector(me: *mut Thread) -> Ptr {
     static VECTOR: AtomicUsize = AtomicUsize::new(0);
     let existing = VECTOR.load(Ordering::Acquire);
@@ -321,6 +278,14 @@ static CTOR_ARGS: Mutex<Option<Vec<Vec<u8>>>> = Mutex::new(None);
 /// one runs. Without this, they get nothing.
 pub fn set_ctor_args(args: Vec<Vec<u8>>) {
     *CTOR_ARGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(args);
+}
+
+/// The program's name as Fil-C sees it: the first of [`set_ctor_args`], or
+/// else the host's.
+pub fn program_name() -> Vec<u8> {
+    use std::os::unix::ffi::OsStringExt;
+    let configured = CTOR_ARGS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|args| args.first().cloned());
+    configured.unwrap_or_else(|| std::env::args_os().next().unwrap_or_default().into_vec())
 }
 
 /// A null-terminated array of new strings, all living for good.
@@ -360,22 +325,15 @@ unsafe fn ctor_args(me: *mut Thread) -> Option<[Ptr; 3]> {
 }
 
 unsafe fn run_ctor(me: *mut Thread, ctor: Ptr) {
-    let args = match crate::start::user_environment() {
-        Some(user) => [Ptr { ptr: user.argc as *mut u8, lower: std::ptr::null_mut() }, user.argv, user.environ],
-        None => unsafe { ctor_args(me) }.unwrap_or_else(|| {
-            let vector = empty_vector(me);
-            [Ptr::NULL, vector, vector]
-        }),
-    };
+    let args = unsafe { ctor_args(me) }.unwrap_or_else(|| {
+        let vector = empty_vector(me);
+        [Ptr::NULL, vector, vector]
+    });
     unsafe { crate::call(me, ctor, &args, &mut []) };
 }
 
-pub unsafe fn defer_or_run_ctor(ctor: Ptr) {
-    if CTOR_MODE.load(Ordering::Acquire) == CTORS_DEFERRED {
-        let mut deferred = DEFERRED_CTORS.lock().unwrap_or_else(|e| e.into_inner());
-        deferred.push((ctor.ptr as usize, ctor.lower as usize));
-        return;
-    }
+/// Runs a constructor, as the host loads its library.
+pub unsafe fn run_ctor_now(ctor: Ptr) {
     let me = thread::attach_current();
     unsafe {
         let was_entered = (*me).state.load(Ordering::Relaxed) & STATE_ENTERED != 0;

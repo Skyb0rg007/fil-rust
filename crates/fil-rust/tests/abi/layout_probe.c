@@ -1,8 +1,7 @@
 /* Prints the layout of every libc struct, and the value of every libc
-   constant, that libpizlo hands to the yolo libc. tests/abi_audit.rs builds
-   it once against musl's headers and once against glibc's and compares: in
-   the musl flavor, libpizlo was compiled against musl's headers but calls
-   the host glibc. */
+   constant, that the runtime's natives hand to the host's glibc as they are.
+   tests/abi_audit.rs builds it once with the Fil-C glibc compiler and once
+   for the host, and compares. */
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <dlfcn.h>

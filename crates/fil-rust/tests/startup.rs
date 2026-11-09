@@ -1,5 +1,5 @@
-//! Starting the runtime: configuration, restarts, failed starts, `argv`, the
-//! dependency search path, and the elastic executor pool. The runtime is a
+//! Starting the runtime: configuration, restarts, failed starts, `argv`, and
+//! the dependency search path. The runtime is a
 //! process-wide singleton, so each case runs in a child process (this test
 //! binary re-executed with `FIL_RUST_CHILD` naming the case).
 
@@ -66,10 +66,12 @@ fn child_entry() {
             assert_eq!(rt.run(|_| 7), 7);
         }
         "restart" => {
-            let rt = Runtime::start(config().workers(3)).unwrap();
+            let rt = Runtime::start(config()).unwrap();
             // The same distribution again: the running runtime, unchanged.
-            let again = Runtime::start(config().workers(5)).unwrap();
-            assert_eq!(again.config().worker_count(), 3);
+            let different = config().search_path("/elsewhere");
+            let again = Runtime::start(different.clone()).unwrap();
+            assert_eq!(again.config(), &config());
+            assert_ne!(again.config(), &different);
             assert_eq!(again.run(|_| 1) + rt.run(|_| 1), 2);
             // A different distribution, or flavor: refused.
             let elsewhere = Config::new(flavor(), "/nonexistent/fil-c");
@@ -113,13 +115,6 @@ fn child_entry() {
             }
             assert!(matches!(Runtime::start_from_env(), Err(Error::Load(_))));
         }
-        "from-env-workers" => {
-            let c = Config::from_env_for(flavor()).unwrap();
-            assert_eq!(c.worker_count(), 3);
-            assert_eq!(c.flavor(), flavor());
-            let rt = Runtime::start(c).unwrap();
-            assert_eq!(rt.config().worker_count(), 3);
-        }
         "argv" => {
             let (user, dir) = user_library();
             let rt = Runtime::start(config().args(["custom-name", "--flag"]).search_path(dir)).unwrap();
@@ -150,22 +145,6 @@ fn child_entry() {
             // The runtime is still fine.
             assert_eq!(rt.run(|_| 3), 3);
         }
-        "pool-grows" => {
-            // One executor up front; four jobs that can only finish together.
-            let rt = Runtime::start(config().workers(1).max_workers(4)).unwrap();
-            let barrier = Arc::new(Barrier::new(4));
-            let jobs: Vec<_> = (0..4)
-                .map(|i| {
-                    let barrier = barrier.clone();
-                    rt.spawn(move |fil| {
-                        fil.exited(|| barrier.wait());
-                        i
-                    })
-                })
-                .collect();
-            let sum: i32 = jobs.into_iter().map(|j| j.join()).sum();
-            assert_eq!(sum, 6);
-        }
         "concurrent-start" => {
             // Good and bad configurations race to start the runtime.
             let start = Arc::new(Barrier::new(12));
@@ -192,7 +171,7 @@ fn child_entry() {
                 }
             }
             assert_eq!(started, 8);
-            // Only one runtime came up: one set of executors.
+            // Only one runtime came up.
             assert_eq!(Runtime::get().unwrap().config().root(), config().root());
         }
         other => panic!("unknown case {other}"),
@@ -230,11 +209,6 @@ fn environment_configuration_errors() {
 }
 
 #[test]
-fn environment_sets_the_worker_count() {
-    passes("from-env-workers", &[("FIL_RUST_WORKERS", Some("3"))]);
-}
-
-#[test]
 fn the_fil_c_side_sees_the_configured_argv() {
     passes("argv", &[]);
 }
@@ -243,23 +217,6 @@ fn the_fil_c_side_sees_the_configured_argv() {
 fn dependencies_are_found_on_the_search_path() {
     passes("search-path", &[]);
     passes("no-search-path", &[]);
-}
-
-#[test]
-fn the_executor_pool_grows_when_jobs_wait() {
-    passes("pool-grows", &[]);
-}
-
-#[test]
-fn worker_counts_are_clamped() {
-    let c = config().workers(0);
-    assert_eq!(c.worker_count(), 1);
-    let c = config().workers(6).max_workers(2);
-    assert_eq!((c.worker_count(), c.max_worker_count()), (2, 2));
-    let c = config().max_workers(2).workers(6);
-    assert_eq!((c.worker_count(), c.max_worker_count()), (6, 6));
-    let c = config().max_workers(0);
-    assert_eq!(c.max_worker_count(), 1);
 }
 
 #[test]

@@ -1,4 +1,5 @@
-//! `zsys_*`: the system calls behind the Fil-C libc.
+//! `zsys_*`: Fil-C's system calls, which the glibc flavor's libc serves under
+//! glibc's names.
 //!
 //! Each one checks what it was given, leaves the runtime, makes the call, and
 //! reports failure through the libc's errno. Upstream makes these calls through
@@ -16,7 +17,7 @@ use crate::abi::*;
 use crate::failure::safety_panic;
 use crate::natives::{Rest, natives, string_of};
 use crate::object::{self, Access};
-use crate::start::{set_dlerror, set_errno};
+use crate::glibc::{set_dlerror, set_errno};
 use crate::thread;
 
 const F_SETSIG: c_int = 10;
@@ -691,7 +692,7 @@ natives! {
         object::check_access(info, size_of::<libc::Dl_info>(), Access::Write);
         let name = unsafe { std::ffi::CStr::from_ptr(found.dli_fname) }.to_bytes();
         unsafe {
-            let name = crate::start::c_string(thread, name);
+            let name = crate::object::c_string(thread, name);
             let at = |index: usize| info.with_ptr(info.ptr.add(index * size_of::<Ptr>() / 2));
             crate::ptrs::store(thread, at(0), name);
             // No one can get at the object through this address. The symbol

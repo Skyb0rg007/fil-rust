@@ -87,8 +87,6 @@ impl Default for PtrInfo {
     }
 }
 
-/// Rust entry point for executor threads (`is_main` is 1 for the Fil-C main thread).
-pub type ThreadMainFn = unsafe extern "C" fn(*mut FilcThread, c_int);
 /// Rust entry point for callbacks; returns the size of the return values written.
 pub type CallbackFn = unsafe extern "C" fn(*mut FilcThread, u64, usize) -> usize;
 /// A Fil-C distribution flavor, distinguished by which libc its Fil-C

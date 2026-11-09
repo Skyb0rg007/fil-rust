@@ -10,9 +10,11 @@
 //! want. So the few that do have signals blocked: see [`Blocked`].
 //!
 //! A process-directed signal can land on a Rust thread that has never seen
-//! Fil-C. The main Fil-C thread takes it instead, as it can always run a
-//! handler. Faults aren't in this: Fil-C doesn't let programs handle them, so
-//! Rust's stack overflow handler stays in place.
+//! Fil-C. A thread that has, the "main" one here, takes it instead: the one
+//! that installed a handler or attached after one was, while it lives, and
+//! then another; until there's one, signals queue. Faults aren't in this:
+//! Fil-C doesn't let programs handle them, so Rust's stack overflow handler
+//! stays in place.
 //!
 //! Sending the signal itself on to the main thread would leave it waiting there
 //! whenever that thread has it blocked for a moment, as in a handler for it or
@@ -33,7 +35,7 @@ use crate::abi::*;
 use crate::failure::internal_panic;
 use crate::natives::natives;
 use crate::object::{self, Access};
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::{is_internal_signal, one_in, plain, sys, sys_result, user_sigset};
 use crate::thread::{self, NativeFrame, extra};
 use crate::ptrs;
@@ -61,7 +63,8 @@ static MAIN_THREAD: AtomicPtr<Thread> = AtomicPtr::new(null_mut());
 static MAIN_MASK: AtomicU64 = AtomicU64::new(0);
 
 /// Wakes the main thread for a signal that was forwarded. It's musl's
-/// `SIGSYNCCALL`, which programs can't send, handle or block. The host's glibc
+/// `SIGSYNCCALL`, which programs can't send, handle or block, and above what
+/// the glibc flavor's `SIGRTMIN` says. The host's glibc
 /// doesn't use it, but it's what glibc gives as `SIGRTMIN`, so Rust code in the
 /// same process mustn't use that.
 pub const WAKE: c_int = 34;
@@ -177,9 +180,9 @@ pub fn set_main(thread: *mut Thread) {
 /// Whether a handler has ever been installed.
 static ANY_HANDLER: AtomicBool = AtomicBool::new(false);
 
-/// With no libc main thread, as in the glibc flavor, signals that land on
-/// threads without a `Thread` go to one that has a handler installed or
-/// attaches after one was, while it lives. Until one does, they queue.
+/// Signals that land on threads without a `Thread` go to one that has a
+/// handler installed or attaches after one was, while it lives. Until one
+/// does, they queue.
 pub unsafe fn adopt(thread: *mut Thread) {
     if !ANY_HANDLER.load(Ordering::Acquire) || !MAIN_THREAD.load(Ordering::Acquire).is_null() {
         return;

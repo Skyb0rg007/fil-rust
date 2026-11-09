@@ -40,6 +40,9 @@ fn host_library() -> *mut c_void {
         .args(["-shared", "-fPIC", "-O1", "-fno-builtin", "-w", "-o"])
         .arg(&out)
         .arg(&src)
+        // As a program would link it, so libm's functions bind to their
+        // current versions rather than the oldest.
+        .arg("-lm")
         .status()
         .unwrap();
     assert!(status.success(), "compiling {FIXTURE} for the host failed");

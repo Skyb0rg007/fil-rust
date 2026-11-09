@@ -9,7 +9,7 @@ use std::ffi::{c_char, c_int, c_long, c_longlong, c_ulong, c_ulonglong};
 use crate::abi::*;
 use crate::natives::{LongDouble, Rest, natives};
 use crate::object::{self, Access};
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::view::{self, Bytes};
 use crate::{ptrs, thread};
 

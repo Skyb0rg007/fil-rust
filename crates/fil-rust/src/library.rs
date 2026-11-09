@@ -58,14 +58,9 @@ impl Library {
         // threads, for one, waits for every entered thread). So never wait
         // for it while entered.
         let handle = self.handle as usize;
-        let libc = crate::runtime::loaded_libc_handle() as usize;
         let getter = crate::runtime::outside_runtime(|| unsafe {
             libc::dlerror();
-            let mut getter = libc::dlsym(handle as *mut c_void, symbol.as_ptr());
-            // A library loaded before the libc depends on its stand-in.
-            if getter.is_null() && libc != 0 {
-                getter = libc::dlsym(libc as *mut c_void, symbol.as_ptr());
-            }
+            let getter = libc::dlsym(handle as *mut c_void, symbol.as_ptr());
             if getter.is_null() {
                 let _ = dlerror_string();
             }
@@ -110,9 +105,8 @@ impl Library {
 
 /// Fails if the process has mapped what fil-rust means to stand in for. The
 /// real yolo libc would put two C libraries in one address space, libpizlo a
-/// second runtime, and a Fil-C libc that wasn't loaded through here would have
-/// no thread to run on.
-pub(crate) fn check_no_foreign_runtime(config: &Config, has_libc: bool) -> Result<()> {
+/// second runtime, and the distribution's Fil-C libc a second libc.
+pub(crate) fn check_no_foreign_runtime(config: &Config) -> Result<()> {
     let flavor = config.flavor();
     for name in loaded_objects() {
         if name.starts_with("/proc/self/fd/") {
@@ -125,7 +119,7 @@ pub(crate) fn check_no_foreign_runtime(config: &Config, has_libc: bool) -> Resul
                  Fil-C objects must only be loaded through fil-rust"
             )));
         }
-        let foreign_libc = !has_libc && flavor.libc_stand_ins().iter().any(|lib| lib.soname == base);
+        let foreign_libc = flavor.libc_stand_ins().iter().any(|lib| lib.soname == base);
         if base == "libpizlo.so" || foreign_libc {
             return Err(Error::Load(format!(
                 "{name} was loaded into the process, but fil-rust stands in for it"
@@ -135,11 +129,23 @@ pub(crate) fn check_no_foreign_runtime(config: &Config, has_libc: bool) -> Resul
     Ok(())
 }
 
+/// Fails if `data`, a library called `name`, needs a libc and the flavor has
+/// none.
+fn refuse_libc_import(inner: &Inner, name: &str, data: &[u8]) -> Result<()> {
+    match libc_import(inner, data) {
+        Some(symbol) => Err(Error::Unsupported(format!(
+            "{name} needs {} from the libc, and the musl flavor has none: build it for glibc",
+            symbol.trim_start_matches("pizlonated_")
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The first thing `data`, a library, needs from the Fil-C libc, if anything:
 /// a function nothing else in the process can give it, by name, as that's what
 /// tells. Every Fil-C library is linked against the libc whether it uses it or
 /// not.
-pub(crate) fn libc_import(inner: &Inner, data: &[u8]) -> Option<String> {
+fn libc_import(inner: &Inner, data: &[u8]) -> Option<String> {
     // The glibc flavor's stand-ins have every libc symbol.
     if inner.config.flavor() == Flavor::Glibc {
         return None;
@@ -291,10 +297,12 @@ pub(crate) fn open(inner: &Inner, path: &Path) -> Result<Library> {
         return Err(Error::Load(format!("{} does not exist", path.display())));
     }
     check_library(inner.config.flavor(), path)?;
+    let data = std::fs::read(path).map_err(|e| Error::Load(format!("reading {}: {e}", path.display())))?;
+    refuse_libc_import(inner, &path.display().to_string(), &data)?;
     let mut visited = Vec::new();
     preload_dependencies(&inner.config.search_dirs(), path, &mut visited)?;
     let handle = unsafe { dlopen_path(path, libc::RTLD_NOW | libc::RTLD_LOCAL) }.map_err(Error::Load)?;
-    check_no_foreign_runtime(&inner.config, inner.has_libc())?;
+    check_no_foreign_runtime(&inner.config)?;
     Ok(Library::from_handle(handle, path.to_path_buf()))
 }
 
@@ -369,6 +377,7 @@ pub(crate) fn open_embedded(inner: &Inner, library: &EmbeddedLibrary) -> Result<
              only when it finds that flavor's Fil-C compiler; see its documentation)"
         )));
     };
+    refuse_libc_import(inner, &soname, bytes)?;
     let path = {
         let mut embedded = EMBEDDED.lock().unwrap_or_else(|e| e.into_inner());
         match embedded.iter().find(|(name, ..)| *name == soname) {

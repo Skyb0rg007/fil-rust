@@ -1,7 +1,9 @@
 # A Rust runtime for Fil-C libraries
 
-Status: in progress on `library-runtime`. This is the plan and its running findings. Since
-2026-11-08 the plan is the switch to a Rust libc (below), which replaces libc mode and M6-M8.
+Status: done on `library-runtime`. This is the plan and its running findings. Since 2026-11-08
+the plan was the switch to a Rust libc (below), which replaced libc mode and M6-M8; L6 finished
+it. The M0-M5 sections describe the design as it was then, with libc mode and the libpizlo backend
+beside it; [DESIGN.md](DESIGN.md) describes what's there now.
 
 ## Context
 
@@ -14,19 +16,20 @@ Goal: fil-rust becomes a **library**. A Rust program loads existing Fil-C-compil
 files, unmodified, with no libpizlo, no libpas and no FUGC. The collector is written in Rust
 and runs only when Rust says so, so Fil-C can be added to a Rust system a piece at a time.
 
-Honest scope of "no extra threads": a library that imports nothing from libc runs on the
-caller's own thread with no boot thread or executors (**bare mode**). Most real libraries
-call `strlen` or `printf`, so they use **libc mode**: unmodified `libc.so`, one boot thread,
-and executors, but still no libpizlo, no collector thread, and no GC unless Rust asks.
+Every library runs on the caller's own thread, with no boot thread, executors or collector
+thread. At first only a library that imported nothing from libc could (**bare mode**); the rest
+used **libc mode**: Fil-C's unmodified musl `libc.so`, a boot thread and executors. The switch
+replaced libc mode with a libc written in Rust, for the glibc flavor.
 
 Decisions already made:
 
 - Replace libpizlo with a **Rust runtime**. The Fil-C compiler stays.
 - **Tracing GC in Rust**, stop-the-world and non-moving. A true no-GC mode (zig#36237 style
   P^I reuse) is **future work, after compiler changes**. Not built here.
-- **Fil-C user libc is optional**, loaded on demand and unmodified.
+- **Fil-C user libc is optional**, loaded on demand and unmodified. (Superseded by the switch:
+  the glibc flavor's libc is Rust, and musl has none.)
 - libpizlo stays only as a **differential oracle** during the branch and is **removed at
-  parity**.
+  parity**. (Removed at L1, before parity.)
 
 ## What the research established
 
@@ -74,6 +77,9 @@ marked items need a spike (M0).
   comes from libc's `pthread_create`, so libc mode keeps executors.
 
 ## Architecture
+
+As planned at M1, before the switch. The backend seam, libc mode and `Libc` are gone since L1 and
+L6; the stub, threads, collector, allocation tracking, heap and failures are as described.
 
 ```
 Rust program (host glibc)
@@ -481,7 +487,7 @@ goes, and `fil-rust` calls `fil-rust-rt` directly.
 
 Each ends green in Nix and is committed.
 
-- **L1. One backend.** Delete `csrc/shim.c`, `compat_signals.inc`, `redirect_imports`, libpizlo's
+- **L1. One backend: done.** Delete `csrc/shim.c`, `compat_signals.inc`, `redirect_imports`, libpizlo's
   boot, `Backend` and the `Shim` table; `fil-rust` calls `fil-rust-rt` directly. Delete
   `nix/filc-runtime-src.nix`: the layout cross-check against `filc_runtime.h` moves into
   `abi/update-symbols.sh`, run by hand against a local checkout when the pinned version changes.
@@ -560,41 +566,64 @@ Each ends green in Nix and is committed.
   `pthread_exit` from Rust and a freed mutex trap), `libc_core`'s locale, wide and `sscanf`
   sections, `threads`, `callbacks`, `stress`, `edges`, `lifecycle`, `cxx`, `memory`, `properties`,
   and the examples, `cxx` among them.
-- **L6. Switch over.** Delete libc mode and the `zregister_*` natives; musl becomes libc-free only;
-  port `maps`, `signals`, `sockets`, `system`, `sys`, `process`, `startup`, `ui` and the examples to
-  glibc; delete `rt_libc.rs`; `boot.rs` proves nothing but the stand-ins is mapped; `abi_audit`
-  checks the stand-ins against the distribution and the natives' layouts against the headers. Nix:
-  `glibc`, `glibc-gc-stress`, `musl`, `examples`, `clippy`. Rewrite README and DESIGN.
+- **L6. Switch over: done.** Libc mode is gone: `start.rs` (its `c_string` moved to `object.rs`),
+  the constructor gate (constructors run as their library loads, on the loading thread), the
+  `zregister_*` natives, the boot and worker entries, `Libc` and `workers`. The runtime starts no
+  thread, and `Runtime::spawn` is a `std::thread` that runs. musl is libc-free only: a library that
+  imports a function only a libc could give it is refused with `Error::Unsupported`, naming it.
+  Porting the remaining suites to glibc needed:
+  - `epoll` through the support library's descriptor wrappers, as on musl, so that event data can
+    hold a pointer: glibc's `close`, `dup*`, `fcntl*` and `epoll_*` slots point at them, and they
+    call the natives.
+  - `mremap`, variadic in glibc (the new address comes only with `MREMAP_FIXED`),
+    `__sched_cpucount` and `__sysconf`.
+  - `program_invocation_name` and its short form from `Config::args`, like `argv[0]`.
+  - libm: every function in its plain, `f` and `l` forms, the classification helpers, `j0`-`y1` and
+    the `abs` family, calling the host's libm through `dlsym`, with the host's `errno` carried back.
+    `dlsym` because Rust's compiler-builtins defines a local `fmod` that would shadow libm's. An
+    unversioned reference binds to the oldest version of a symbol at run time, which for
+    `remainder` and others is the pre-2.27 one, so the host build of the differential fixture links
+    `-lm` to get the same functions. `long double` goes through `double`; converting x87 values
+    now scales in two steps, so subnormals survive.
+  `maps`, `signals`, `sockets`, `system`, `sys`, `process`, `startup`, `ui` and every example and
+  `bindgen-demo` pass on glibc; `libc_core` gained a mathematics section. With `run` closures no
+  longer sent to an executor, the `ui` cases for escaping pointers fail on lifetimes, not `Send`.
+  `rt_libc.rs` is deleted. `boot.rs` proves that a glibc library using the libc runs on the
+  caller's thread, starts no thread and maps nothing from the distribution, and that musl turns it
+  down. `abi_audit` builds `layout_probe.c` with the Fil-C and the host compilers and allows only
+  `epoll_event` to differ, checks that the stand-ins export every symbol and version the
+  distribution's libraries do, and keeps the socket cases. Nix: `glibc` (every `fil-rust` test),
+  `glibc-gc-stress`, `musl` (`fil-rust-rt` and the libc-free tests), `examples`, `clippy`.
+  README and DESIGN are rewritten for the new model.
 
 Not in this plan: true no-GC mode, concurrent or parallel marking, the LLVM JIT, the sampling
 profiler.
 
 ## Critical files
 
-- New: `crates/fil-rust-rt/`, `crates/fil-rust/tests/rt_*.rs`, `spikes/rust-rt/`,
-  `docs/RUNTIME.md`
-- Change: `crates/fil-rust-sys/build.rs` (stub, stand-ins, support library),
-  `crates/fil-rust-sys/src/lib.rs` (`Shim`, `Flavor`), `crates/fil-rust/src/runtime.rs` (boot
-  split, modes, `Collection`), `crates/fil-rust/src/library.rs` (import scan, preload),
-  `crates/fil-rust/src/callback.rs` (CC tracking), `nix/tests.nix`, `nix/filc-runtime-src.nix`
-- Reuse: `memfd_path`, `dlopen_bytes`, `loaded_objects`, `compat_musl.c`, `compat_glibc_*`,
-  `compat_glibc_pizlo.c` as the stand-in pattern, test fixtures and `tests/common`
-- Port from, with attribution (libpas license): `filc_runtime.c`, `filc_runtime_inlines.h`,
+- `crates/fil-rust-rt/`: the runtime, with the glibc flavor's libc in `src/glibc/`
+- `crates/fil-rust-sys/build.rs` (stub, stand-ins, support library), `abi/` (symbol lists and
+  `update-symbols.sh`), `csrc/filc/` (vendored `filc/src`), `src/lib.rs` (`Flavor`)
+- `crates/fil-rust/src/runtime.rs` (startup, threads, `Collection`), `library.rs` (checks, import
+  scan, preload), `callback.rs` (CC tracking)
+- `crates/fil-rust/tests/rt_*.rs`, `libc_*.rs`, `boot.rs`, `abi_audit.rs`; `nix/tests.nix`
+- Ported from, with attribution (libpas license): `filc_runtime.c`, `filc_runtime_inlines.h`,
   `filc_native.h`, `fugc.c`, `filc_stack_overflow_failure.S`
 
 ## Verification
 
-- **Differential:** every backend-neutral test runs on both backends with the same results and
-  panics. Backend-specific tests are listed.
-- **Bare proof:** `dl_iterate_phdr` shows no libpizlo, no libpas and no real libc, allowing the
-  name-only stand-ins and `libyoloc` stand-in. Thread count stays at 1 under `Manual`.
+- **Differential:** while both backends existed (to L1), every backend-neutral test ran on both
+  with the same results and panics. Since then, the libc suites build each fixture for Fil-C and
+  for the host and compare transcripts.
+- **Bare proof:** `dl_iterate_phdr` shows no libpizlo, no libpas and no real libc, only the
+  stand-ins, and loading a library starts no thread (`boot.rs`, `rt_bare.rs`).
 - **Collector:** stress mode, heap verifier, `tests/properties.rs` with `PROPTEST_CASES=1000`,
   and the alloca tests from M3, kept running through later milestones (jmp_buf and thread-local
   rows join at M5).
 - **Safety:** ported panic tests fail exactly where libpizlo fails. An audit test asserts the
   stub lists every helper the pass can emit and every native in that flavor's libpizlo.
-- **Nix:** new `passthru.tests` suites (`rust-rt`, `rust-rt-gc-stress`, later `-glibc`),
-  `--cores 4`. `tests.clippy` stays clean. Existing suites stay green until M7.
+- **Nix:** `passthru.tests` suites `glibc`, `glibc-gc-stress`, `musl`, `examples` and `clippy`,
+  run with `--cores 4`.
 
 ## Risks
 

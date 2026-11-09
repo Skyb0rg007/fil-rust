@@ -2,22 +2,20 @@
 //! compiler of the configured flavor and starts the runtime.
 //!
 //! Run the examples from `nix-shell`, which provides the compilers and the
-//! distributions. `FILC_FLAVOR=glibc` selects the glibc flavor (build with
-//! `--features glibc`).
+//! distributions, with `FILC_FLAVOR=glibc` and `--features glibc`: the
+//! examples' libraries use the libc, which only the glibc flavor has.
 
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use fil_rust::{Config, Flavor, Libc, Runtime};
+use fil_rust::{Config, Flavor, Runtime};
 
-/// Starts the runtime from `FILC_FLAVOR` and the distribution root variables,
-/// with the Fil-C libc, since the examples load libraries inside
-/// `Runtime::run`.
+/// Starts the runtime from `FILC_FLAVOR` and the distribution root variables.
 pub fn runtime() -> Runtime {
-    let config = Config::from_env().expect("set FILC_ROOT / FILC_GLIBC_ROOT (run in nix-shell)");
-    Runtime::start(config.libc(Libc::Always)).expect("starting the Fil-C runtime")
+    let config = Config::from_env().expect("set FILC_GLIBC_ROOT and FILC_FLAVOR=glibc (run in nix-shell)");
+    Runtime::start(config).expect("starting the Fil-C runtime")
 }
 
 /// Compiles `examples/c/<file>` into a shared library and returns its path.

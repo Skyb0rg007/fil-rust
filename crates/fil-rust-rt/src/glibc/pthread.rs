@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::abi::*;
 use crate::natives::{Thrown, natives};
 use crate::object::{self, Access};
-use crate::start::set_errno;
+use crate::glibc::set_errno;
 use crate::sys::{one_in, plain};
 use crate::{thread, view, zthread};
 

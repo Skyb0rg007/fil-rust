@@ -7,7 +7,7 @@ use std::ptr::{null, null_mut, read_volatile};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-use fil_rust_sys::{CallbackFn, FilcThread, PtrInfo, RawPtr, ThreadMainFn, status};
+use fil_rust_sys::{CallbackFn, FilcThread, PtrInfo, RawPtr, status};
 
 use crate::abi::*;
 use crate::failure::{internal_panic, safety_panic, user_panic};
@@ -29,8 +29,6 @@ fn to_thread(thread: *mut FilcThread) -> *mut Thread {
 
 /// Rust's entry point for callbacks. Set once, by `fr_init`.
 static CALLBACK: AtomicUsize = AtomicUsize::new(0);
-/// Rust's executor loop, the same way.
-static THREAD_MAIN: AtomicUsize = AtomicUsize::new(0);
 
 /// References Rust holds on to. The collector treats the table as roots.
 static ROOTS: Mutex<Vec<Ptr>> = Mutex::new(Vec::new());
@@ -54,32 +52,8 @@ pub unsafe fn for_each_root(mut visit: impl FnMut(*mut Object)) {
     }
 }
 
-pub unsafe extern "C" fn fr_init(thread_main: ThreadMainFn, callback: CallbackFn) {
-    THREAD_MAIN.store(thread_main as usize, Ordering::Release);
+pub unsafe extern "C" fn fr_init(callback: CallbackFn) {
     CALLBACK.store(callback as usize, Ordering::Release);
-}
-
-/// Runs an executor. `is_main` picks the one that starts the others.
-unsafe fn run_thread_main(thread: *mut Thread, is_main: bool) -> ! {
-    unsafe {
-        let thread_main = std::mem::transmute::<usize, ThreadMainFn>(THREAD_MAIN.load(Ordering::Acquire));
-        thread_main(thread.cast(), is_main as c_int);
-    }
-    internal_panic(format_args!("an executor returned"));
-}
-
-unsafe extern "C" fn main_entry(thread: *mut Thread, _: *mut u8, _: usize) -> ReturnValue {
-    unsafe { run_thread_main(thread, true) }
-}
-
-unsafe extern "C" fn worker_entry(thread: *mut Thread, _: *mut u8, _: usize) -> ReturnValue {
-    unsafe { run_thread_main(thread, false) }
-}
-
-/// The program's `main`, which is the first executor.
-pub unsafe extern "C" fn fr_main_getter(_: *mut FilcThread, _: *const c_void) -> RawPtr {
-    static CELL: AtomicPtr<FunctionObject> = AtomicPtr::new(null_mut());
-    to_raw(function_object(&CELL, main_entry))
 }
 
 pub unsafe extern "C" fn fr_enter(t: *mut FilcThread) {
@@ -105,12 +79,6 @@ pub unsafe extern "C" fn fr_with_native_frame(t: *mut FilcThread, body: unsafe e
         body(arg);
         frame.pop(thread);
     }
-}
-
-/// The executor loop as a `pthread_create` start routine.
-pub unsafe extern "C" fn fr_worker_function() -> RawPtr {
-    static CELL: AtomicPtr<FunctionObject> = AtomicPtr::new(null_mut());
-    to_raw(function_object(&CELL, worker_entry))
 }
 
 pub unsafe extern "C" fn fr_panic(message: *const c_char) {
