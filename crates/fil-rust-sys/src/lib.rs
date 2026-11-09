@@ -1,4 +1,5 @@
-//! Raw, `unsafe` bindings for hosting the Fil-C runtime inside a glibc process.
+//! The native libraries Fil-C libraries bind to by name, built and embedded
+//! for hosting Fil-C inside a glibc process.
 //!
 //! This crate embeds the libraries `build.rs` builds for each enabled Fil-C
 //! flavor: **compat** libraries with the sonames and version nodes of Fil-C's

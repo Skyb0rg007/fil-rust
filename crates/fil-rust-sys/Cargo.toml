@@ -2,7 +2,7 @@
 name = "fil-rust-sys"
 version.workspace = true
 edition.workspace = true
-description = "Raw bindings and C shims for hosting the Fil-C runtime in a glibc process"
+description = "The generated runtime stub, libc stand-ins and support library that Fil-C libraries bind to, embedded for fil-rust-rt"
 links = "filrust"
 
 [features]

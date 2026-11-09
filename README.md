@@ -102,8 +102,8 @@ compiler at run time. Run them from the dev shell:
 
 `crates/bindgen-demo` is a separate crate whose build script compiles its C
 library with `fil-rust-build` and generates the bindings from its header
-with `fil-rust-bindgen`; the program embeds the library, so it needs nothing
-from the Fil-C distribution to run:
+with `fil-rust-bindgen`; the program embeds the library and loads it from
+memory:
 
     cargo run -p bindgen-demo --features glibc
 
