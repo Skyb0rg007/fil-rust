@@ -495,20 +495,28 @@ Each ends green in Nix and is committed.
   data failing by name); `rt_bare` proves nothing of the distribution is mapped. `jumps`, `tables`
   and `stdfil` need string functions, `sigemptyset` and `longjmp`, so they move to L3, and
   `stdfil`'s `snprintf` to L4.
-- **L3. libc core.** Done so far: the race-tolerant view (`view.rs`: one bounds check, relaxed byte
-  loads, scans that stop at the object's end), `double` arguments, strings, memory, ctype tables,
-  `strto*` and `__isoc23_*` over the host's parsers, allocation, `strerror` and its kind (interned,
+- **L3. libc core: done.** The race-tolerant view (`view.rs`: one bounds check, relaxed byte loads,
+  scans that stop at the object's end), `double` arguments, strings, memory, ctype tables, `strto*`
+  and `__isoc23_*` over the host's parsers, allocation, `strerror` and its kind (interned,
   read-only), the environment over `std::env`, time over the host's (a `struct tm` crosses as a
-  copy, its zone name interned), and the system calls: the `zsys_*` natives under glibc's names
-  where they match, and glibc's own wrappers (`stat`, `getcwd(NULL, 0)`, `sleep`, `send`, the `*64`
-  twins). Tests: `tables` on glibc, and `libc_core`, whose fixture must write the same transcript
-  built for Fil-C and for the host, with misuse failing, other threads moving terminators, and the
-  environment seen both ways. A parse that runs into the end of an unterminated buffer fails; one
-  that stops before it doesn't. Compiled code asks for `environ` once and keeps its storage, so its
-  snapshot is made again when Fil-C code changes the environment; Rust's changes reach it then, and
-  `getenv` at once. To do: `signal`, `sigaction` and routing, the `sig*set` functions; `setjmp` and
-  `longjmp`; timers, whose `timer_t` is a pointer here; exit handlers; `qsort`, `bsearch`; `dl*`;
-  constructor arguments. Tests still to come: `jumps` on glibc; signals with no libc main thread.
+  copy, its zone name interned), the system calls (the `zsys_*` natives under glibc's names where
+  they match, and glibc's own wrappers: `stat`, `getcwd(NULL, 0)`, `sleep`, `send`, the `*64` twins,
+  timers with a pointer `timer_t`), signal sets and `signal`, `longjmp` (the compiled `setjmp` keeps
+  a capability for the runtime's buffer at the start of glibc's `jmp_buf`), exit handlers (`atexit`,
+  `__cxa_atexit`, `on_exit`, quick exit, and a host `atexit` hook for a process that exits from
+  Rust), `qsort` and `bsearch` (an in-place heapsort whose swaps keep capabilities; a comparator's
+  exception goes on through), `dlopen`, `dlsym` and a `dlclose` that keeps libraries mapped, and
+  constructors given `Config::args` and the environment. With no libc main thread, a signal that
+  lands on a thread that isn't Fil-C's goes to the thread that installed a handler, or one that
+  attaches after; when that thread goes, to another attached one; and a Fil-C thread coming back
+  from a system call runs any still waiting. Compiled code asks for `environ` once and keeps its
+  storage, so its snapshot is made again when Fil-C code changes the environment; Rust's changes
+  reach it then, and `getenv` at once. A parse that runs into the end of an unterminated buffer
+  fails; one that stops before it doesn't. Tests on glibc: `tables`, `jumps`, `libc_core` (the same
+  fixture built for Fil-C and for the host must write the same transcript; misuse fails; other
+  threads moving terminators; the environment seen both ways) and `libc_signals` (signals with no
+  libc main thread, timers, `dlsym`, exit handlers, constructor arguments). glibc's own
+  `at_quick_exit` traps in Fil-C (docs/upstream-filc-issues.md, 8).
 - **L4. stdio.** The `va_list` decoder, FILE objects, `__uflow` and `__overflow`, the `fopen`
   family, printf, `getline`, `puts`, `DIR *`. Tests: Fil-C `printf` and Rust `println!` in order;
   inline `getc_unlocked` and `feof_unlocked`; corrupted FILE fields stay safe; use after `fclose`

@@ -174,6 +174,57 @@ pub fn set_main(thread: *mut Thread) {
     set_wake_restarts(true);
 }
 
+/// Whether a handler has ever been installed.
+static ANY_HANDLER: AtomicBool = AtomicBool::new(false);
+
+/// With no libc main thread, as in the glibc flavor, signals that land on
+/// threads without a `Thread` go to one that has a handler installed or
+/// attaches after one was, while it lives. Until one does, they queue.
+pub unsafe fn adopt(thread: *mut Thread) {
+    if !ANY_HANDLER.load(Ordering::Acquire) || !MAIN_THREAD.load(Ordering::Acquire).is_null() {
+        return;
+    }
+    if MAIN_THREAD.compare_exchange(null_mut(), thread, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    unsafe {
+        let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+        libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), mask.as_mut_ptr());
+        MAIN_MASK.store(mask_bits(mask.assume_init_ref()), Ordering::Release);
+        MAIN_TID.store(libc::gettid(), Ordering::Release);
+        set_wake_restarts(true);
+        // What queued meanwhile runs at its next safepoint.
+        if ANY_FORWARDED.load(Ordering::Acquire) != 0 {
+            (*thread).state.fetch_or(STATE_DEFERRED_SIGNAL, Ordering::AcqRel);
+        }
+    }
+}
+
+/// `thread` is going: forwarded signals go to another attached thread from
+/// now on, if there is one, which is woken for any waiting. Its mask isn't
+/// known here; it holds back what it blocks itself.
+pub unsafe fn forget(thread: *mut Thread) {
+    if MAIN_THREAD.load(Ordering::Acquire) != thread {
+        return;
+    }
+    let threads = thread::lock_threads();
+    let heir = threads.0.iter().map(|&entry| entry as *mut Thread).find(|&other| other != thread);
+    if MAIN_THREAD.compare_exchange(thread, heir.unwrap_or(null_mut()), Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    match heir {
+        Some(heir) => unsafe {
+            MAIN_MASK.store(0, Ordering::Release);
+            let tid = (*heir).tid as c_int;
+            MAIN_TID.store(tid, Ordering::Release);
+            if ANY_FORWARDED.load(Ordering::Acquire) != 0 {
+                libc::syscall(libc::SYS_tgkill, libc::getpid(), tid, WAKE);
+            }
+        },
+        None => MAIN_TID.store(0, Ordering::Release),
+    }
+}
+
 /// Has [`WAKE`] restart system calls it interrupts, or not. Async-signal-safe.
 fn set_wake_restarts(restarts: bool) {
     if WAKE_RESTARTS.swap(restarts as u32, Ordering::AcqRel) == restarts as u32 {
@@ -421,10 +472,7 @@ pub unsafe fn allow_deferred(thread: *mut Thread) {
 /// its handler: see the top of this file.
 unsafe fn forward(signal: c_int, info: *mut libc::siginfo_t) {
     let target = MAIN_TID.load(Ordering::Acquire);
-    if target == 0 {
-        return;
-    }
-    if MAIN_MASK.load(Ordering::Acquire) & (1 << (signal - 1)) != 0 {
+    if target != 0 && MAIN_MASK.load(Ordering::Acquire) & (1 << (signal - 1)) != 0 {
         unsafe { send_on(target, signal, info) };
         return;
     }
@@ -437,6 +485,10 @@ unsafe fn forward(signal: c_int, info: *mut libc::siginfo_t) {
     slot.count.fetch_add(1, Ordering::AcqRel);
     ANY_FORWARDED.fetch_add(1, Ordering::AcqRel);
     let handler = TABLE[signal as usize].load(Ordering::Acquire);
+    if target == 0 {
+        // Queued for whichever thread adopts them.
+        return;
+    }
     if !handler.is_null() {
         set_wake_restarts(unsafe { (*handler).flags } & libc::SA_RESTART != 0);
     }
@@ -574,42 +626,51 @@ unsafe fn to_user(thread: *mut Thread, signal: c_int, user: Ptr, host: &libc::si
     }
 }
 
-natives! {
-    fn zsys_sigaction(thread: *mut Thread, signal: c_int, act: Ptr, old_act: Ptr) -> c_int {
-        if !(0..=MAX_SIGNAL).contains(&signal) {
-            unsafe { set_errno(thread, libc::EINVAL) };
-            return -1;
-        }
-        unsafe {
-            // Handlers for what's already here have to come first: once this
-            // is done, the table says something else.
-            thread::poll(thread);
-            let wanted = if act.ptr.is_null() {
-                None
-            } else {
-                match from_user(thread, signal, act) {
-                    Ok(wanted) => Some(wanted),
-                    Err(error) => {
-                        set_errno(thread, error);
-                        return -1;
-                    }
-                }
-            };
-            hold_deferred(thread);
-            let mut old = std::mem::zeroed::<libc::sigaction>();
-            let new = wanted.as_ref().map_or(std::ptr::null(), |(host, _)| &raw const *host);
-            let result = sys(thread, || libc::sigaction(signal, new, &mut old));
-            if result == 0 {
-                if !old_act.ptr.is_null() {
-                    to_user(thread, signal, old_act, &old);
-                }
-                if let Some((_, handler)) = wanted {
-                    TABLE[signal as usize].store(handler, Ordering::Release);
+/// `sigaction`, with the program's `struct sigaction`s, which are the host's.
+pub(crate) unsafe fn sigaction(thread: *mut Thread, signal: c_int, act: Ptr, old_act: Ptr) -> c_int {
+    if !(0..=MAX_SIGNAL).contains(&signal) {
+        unsafe { set_errno(thread, libc::EINVAL) };
+        return -1;
+    }
+    unsafe {
+        // Handlers for what's already here have to come first: once this
+        // is done, the table says something else.
+        thread::poll(thread);
+        let wanted = if act.ptr.is_null() {
+            None
+        } else {
+            match from_user(thread, signal, act) {
+                Ok(wanted) => Some(wanted),
+                Err(error) => {
+                    set_errno(thread, error);
+                    return -1;
                 }
             }
-            allow_deferred(thread);
-            result
+        };
+        hold_deferred(thread);
+        let mut old = std::mem::zeroed::<libc::sigaction>();
+        let new = wanted.as_ref().map_or(std::ptr::null(), |(host, _)| &raw const *host);
+        let result = sys(thread, || libc::sigaction(signal, new, &mut old));
+        if result == 0 {
+            if !old_act.ptr.is_null() {
+                to_user(thread, signal, old_act, &old);
+            }
+            if let Some((_, handler)) = wanted {
+                TABLE[signal as usize].store(handler, Ordering::Release);
+                if !handler.is_null() {
+                    ANY_HANDLER.store(true, Ordering::Release);
+                    adopt(thread);
+                }
+            }
         }
+        allow_deferred(thread);
+        result
+    }
+}
+
+natives! {
+    fn zsys_sigaction(thread: *mut Thread, signal: c_int, act: Ptr, old_act: Ptr) -> c_int {
+        unsafe { sigaction(thread, signal, act, old_act) }
     }
 
     fn zsys_sigaltstack(thread: *mut Thread, stack: Ptr, old: Ptr) -> c_int {

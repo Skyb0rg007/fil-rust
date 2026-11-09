@@ -111,32 +111,37 @@ fn is_setjmp_lower(origin: &FunctionOrigin, index: usize) -> bool {
     index >= origin.base.num_lowers_ish as usize - origin.num_setjmps as usize
 }
 
+/// Jumps to where `buffer`, a capability for the runtime's buffer, was set.
+pub(crate) unsafe fn longjmp(thread: *mut Thread, buffer: Ptr, value: c_int) -> ! {
+    object::check_special(buffer, SPECIAL_JMP_BUF, "jmp_buf");
+    unsafe {
+        let buffer = buffer.ptr.cast::<JmpBuf>();
+        if !is_on_stack(thread, buffer) {
+            safety_panic(format_args!("cannot longjmp unless the setjmp destination is on the stack."));
+        }
+        // Nothing here has a destructor: the jump drops this frame too.
+        let frame = (*buffer).saved_top_frame;
+        (*thread).top_frame = frame;
+        extra(thread).tracked.truncate((*buffer).saved_tracked);
+        let origin = &*function_origin((*frame).origin);
+        let saved = (&raw const (*buffer).lowers).cast::<*mut u8>();
+        for index in 0..(*buffer).num_lowers {
+            if !is_setjmp_lower(origin, index) {
+                *frame_lowers(frame).add(index) = *saved.add(index);
+            }
+        }
+        (*thread).signal_deferral_depth = (*buffer).saved_signal_deferral_depth;
+        crate::signal::after_deferral_decrease(thread);
+        if (*buffer).did_save_sigmask {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &(*buffer).sigmask, std::ptr::null_mut());
+        }
+        _longjmp(buffer, value)
+    }
+}
+
 natives! {
     fn zlongjmp(thread: *mut Thread, buffer: Ptr, value: c_int) -> () {
-        object::check_special(buffer, SPECIAL_JMP_BUF, "jmp_buf");
-        unsafe {
-            let buffer = buffer.ptr.cast::<JmpBuf>();
-            if !is_on_stack(thread, buffer) {
-                safety_panic(format_args!("cannot longjmp unless the setjmp destination is on the stack."));
-            }
-            // Nothing here has a destructor: the jump drops this frame too.
-            let frame = (*buffer).saved_top_frame;
-            (*thread).top_frame = frame;
-            extra(thread).tracked.truncate((*buffer).saved_tracked);
-            let origin = &*function_origin((*frame).origin);
-            let saved = (&raw const (*buffer).lowers).cast::<*mut u8>();
-            for index in 0..(*buffer).num_lowers {
-                if !is_setjmp_lower(origin, index) {
-                    *frame_lowers(frame).add(index) = *saved.add(index);
-                }
-            }
-            (*thread).signal_deferral_depth = (*buffer).saved_signal_deferral_depth;
-            crate::signal::after_deferral_decrease(thread);
-            if (*buffer).did_save_sigmask {
-                libc::pthread_sigmask(libc::SIG_SETMASK, &(*buffer).sigmask, std::ptr::null_mut());
-            }
-            _longjmp(buffer, value)
-        }
+        unsafe { longjmp(thread, buffer, value) }
     }
 
     fn zget_jmp_buf_impl_frame(thread: *mut Thread, buffer: Ptr) -> Ptr {

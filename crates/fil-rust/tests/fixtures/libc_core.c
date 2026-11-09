@@ -297,6 +297,63 @@ static void calls(void)
     line("ids"); field(getpid() == getpid()); field(getuid() == geteuid()); field(sched_yield());
 }
 
+static int by_value(const void *a, const void *b)
+{
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+static int by_value_reversed(const void *a, const void *b, void *direction)
+{
+    return *(int *)direction * by_value(a, b);
+}
+
+struct named { const char *name; int rank; };
+
+static int by_name(const void *a, const void *b)
+{
+    return strcmp(((const struct named *)a)->name, ((const struct named *)b)->name);
+}
+
+static void sorting(void)
+{
+    int values[50];
+    for (int i = 0; i < 50; i++) values[i] = (i * 37 + 11) % 101 - 50;
+    qsort(values, 50, sizeof *values, by_value);
+    line("qsort"); for (int i = 0; i < 50; i++) field(values[i]);
+    int direction = -1;
+    qsort_r(values, 50, sizeof *values, by_value_reversed, &direction);
+    line("qsort_r"); for (int i = 0; i < 50; i++) field(values[i]);
+    qsort(values, 0, sizeof *values, by_value);
+    qsort(values, 1, sizeof *values, by_value);
+    line("qsort small"); field(values[0]);
+    /* Pointers keep their capabilities through the swaps. */
+    struct named people[] = { { "mallory", 3 }, { "alice", 1 }, { "eve", 5 }, { "bob", 2 }, { "carol", 4 } };
+    qsort(people, 5, sizeof *people, by_name);
+    line("qsort pointers"); for (int i = 0; i < 5; i++) { str(people[i].name); field(people[i].rank); }
+    int sorted[] = { 1, 3, 5, 7, 9, 11 };
+    for (int key = 0; key < 13; key++) {
+        int *found = bsearch(&key, sorted, 6, sizeof *sorted, by_value);
+        line("bsearch"); field(key); at(found, sorted);
+    }
+}
+
+static void sets(void)
+{
+    sigset_t set, other, result;
+    errno = 0;
+    line("sigemptyset"); field(sigemptyset(&set)); field(sigisemptyset(&set));
+    for (int signal = 0; signal < 70; signal += 3) { field(sigaddset(&set, signal)); error(); }
+    for (int signal = 0; signal < 70; signal++) field(sigismember(&set, signal));
+    error();
+    line("sigdelset"); field(sigdelset(&set, 3)); field(sigismember(&set, 3)); field(sigdelset(&set, 99)); error();
+    line("sigfillset"); field(sigfillset(&other)); for (int signal = 1; signal < 65; signal++) field(sigismember(&other, signal));
+    line("sigandset"); field(sigandset(&result, &set, &other)); for (int signal = 1; signal < 65; signal++) field(sigismember(&result, signal));
+    sigemptyset(&other); sigaddset(&other, SIGUSR1);
+    line("sigorset"); field(sigorset(&result, &set, &other)); for (int signal = 1; signal < 65; signal++) field(sigismember(&result, signal));
+    line("sigisemptyset"); field(sigisemptyset(&result));
+}
+
 size_t transcript_length(void)
 {
     if (!used) {
@@ -308,6 +365,8 @@ size_t transcript_length(void)
         environment();
         times();
         calls();
+        sorting();
+        sets();
     }
     return used;
 }

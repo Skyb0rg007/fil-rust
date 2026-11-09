@@ -189,6 +189,7 @@ thread_local! {
 /// reachable or not, and so does the `Thread`, which may be collected as soon
 /// as the lock is released.
 unsafe fn detach(thread: *mut Thread) {
+    unsafe { crate::signal::forget(thread) };
     // A collection needs the slots to be flushed, or not in the list.
     let mut threads = lock_threads();
     threads.0.retain(|&entry| entry != thread as usize);
@@ -267,6 +268,7 @@ fn attach() -> *mut Thread {
     threads.0.push(thread as usize);
     drop(threads);
     CURRENT.with(|current| current.set(thread));
+    unsafe { crate::signal::adopt(thread) };
     unsafe { crate::gc::rearm_under_stress(thread) };
     thread
 }

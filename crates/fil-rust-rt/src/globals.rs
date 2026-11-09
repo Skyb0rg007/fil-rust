@@ -314,14 +314,59 @@ fn empty_vector(me: *mut Thread) -> Ptr {
     }
 }
 
+/// The arguments constructors get when there's no libc to give them its own.
+static CTOR_ARGS: Mutex<Option<Vec<Vec<u8>>>> = Mutex::new(None);
+
+/// What constructors get: `args`, and the environment as it is when the first
+/// one runs. Without this, they get nothing.
+pub fn set_ctor_args(args: Vec<Vec<u8>>) {
+    *CTOR_ARGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(args);
+}
+
+/// A null-terminated array of new strings, all living for good.
+unsafe fn kept_strings(me: *mut Thread, strings: &[Vec<u8>]) -> Ptr {
+    unsafe {
+        let array = crate::object::allocate(me, (strings.len() + 1) * WORD_SIZE, 0);
+        ROOTS.lock().unwrap_or_else(|e| e.into_inner()).push(array as usize);
+        let array = Ptr::for_object(array);
+        for (index, string) in strings.iter().enumerate() {
+            let copy = crate::object::allocate(me, string.len() + 1, 0);
+            ROOTS.lock().unwrap_or_else(|e| e.into_inner()).push(copy as usize);
+            let copy = Ptr::for_object(copy);
+            std::ptr::copy_nonoverlapping(string.as_ptr(), copy.ptr, string.len());
+            crate::ptrs::store(me, array.with_ptr(array.ptr.add(index * WORD_SIZE)), copy);
+        }
+        array
+    }
+}
+
+/// `argc`, `argv` and `environ` for constructors, from [`set_ctor_args`].
+unsafe fn ctor_args(me: *mut Thread) -> Option<[Ptr; 3]> {
+    static MADE: Mutex<Option<[(usize, usize); 3]>> = Mutex::new(None);
+    let args = CTOR_ARGS.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    let mut made = unsafe { crate::thread::lock_entered(me, &MADE) };
+    let made = made.get_or_insert_with(|| unsafe {
+        let environment: Vec<Vec<u8>> = std::env::vars_os()
+            .map(|(name, value)| {
+                use std::os::unix::ffi::OsStrExt;
+                [name.as_bytes(), b"=", value.as_bytes()].concat()
+            })
+            .collect();
+        let argv = kept_strings(me, &args);
+        let environ = kept_strings(me, &environment);
+        [(args.len(), 0), (argv.ptr as usize, argv.lower as usize), (environ.ptr as usize, environ.lower as usize)]
+    });
+    Some(made.map(|(ptr, lower)| Ptr { ptr: ptr as *mut u8, lower: lower as *mut u8 }))
+}
+
 unsafe fn run_ctor(me: *mut Thread, ctor: Ptr) {
-    let args = crate::start::user_environment().map_or_else(
-        || {
+    let args = match crate::start::user_environment() {
+        Some(user) => [Ptr { ptr: user.argc as *mut u8, lower: std::ptr::null_mut() }, user.argv, user.environ],
+        None => unsafe { ctor_args(me) }.unwrap_or_else(|| {
             let vector = empty_vector(me);
             [Ptr::NULL, vector, vector]
-        },
-        |user| [Ptr { ptr: user.argc as *mut u8, lower: std::ptr::null_mut() }, user.argv, user.environ],
-    );
+        }),
+    };
     unsafe { crate::call(me, ctor, &args, &mut []) };
 }
 

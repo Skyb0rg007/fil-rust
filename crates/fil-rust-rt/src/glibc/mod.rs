@@ -12,10 +12,12 @@ use crate::abi::*;
 use crate::object;
 use crate::thread;
 
+mod callbacks;
 mod ctype;
 mod env;
 mod error;
 mod stdlib;
+mod signal;
 mod string;
 mod time;
 mod unistd;
@@ -105,8 +107,15 @@ pub(crate) unsafe fn interned(me: *mut Thread, bytes: &[u8]) -> Ptr {
 }
 
 /// Calls `visit` on every object the libc's global state holds.
-pub fn for_each_root(visit: impl FnMut(*mut Object)) {
-    env::for_each_root(visit);
+pub fn for_each_root(mut visit: impl FnMut(*mut Object)) {
+    env::for_each_root(&mut visit);
+    callbacks::for_each_root(&mut visit);
+}
+
+/// Flushes what the process buffers for Fil-C code, before it exits.
+pub(crate) unsafe fn flush_all(me: *mut Thread) {
+    use std::io::Write;
+    unsafe { crate::sys::plain(me, || drop(std::io::stdout().flush())) };
 }
 
 /// Stub slots for every native here, keyed by symbol.
@@ -124,6 +133,9 @@ pub fn table() -> Vec<(&'static str, *const ())> {
     table.extend(error::table());
     table.extend(time::table());
     table.extend(time::aliases());
+    table.extend(signal::table());
+    table.extend(signal::aliases());
+    table.extend(callbacks::table());
     table
 }
 

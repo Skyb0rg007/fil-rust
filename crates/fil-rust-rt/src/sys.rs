@@ -51,6 +51,8 @@ pub(crate) unsafe fn sys<R>(thread: *mut Thread, call: impl FnOnce() -> R) -> R 
         if error != 0 {
             set_errno(thread, error);
         }
+        // A forwarded signal whose wake-up went astray runs here.
+        crate::signal::deliver_unblocked_soon(thread);
         result
     }
 }
@@ -69,6 +71,7 @@ pub(crate) unsafe fn plain<R>(thread: *mut Thread, call: impl FnOnce() -> R) -> 
         thread::exit(thread);
         let result = call();
         thread::enter(thread);
+        crate::signal::deliver_unblocked_soon(thread);
         result
     }
 }

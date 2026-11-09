@@ -897,6 +897,9 @@ fn boot(config: Config) -> Result<&'static Inner> {
             marker.display()
         )));
     }
+    if flavor == Flavor::Glibc {
+        fil_rust_rt::globals::set_ctor_args(config.args.iter().map(|arg| arg.clone().into_bytes()).collect());
+    }
     let installed = fil_rust_rt::install(flavor).map_err(Error::Load)?;
     fil_rust_rt::gc::set_collection(config.collection);
     crate::library::check_no_foreign_runtime(&config, false)?;

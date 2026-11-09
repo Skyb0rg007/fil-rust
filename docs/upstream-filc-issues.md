@@ -244,3 +244,39 @@ level.
 Suggested fix: size the object for `__cpu_features2` from compiler-rt's, copy
 all of it, and fill both in when the runtime starts (or on first use).
 fil-rust's runtime does the latter, with compiler-rt's own code.
+
+## 8. glibc's `at_quick_exit` always fails its access check
+
+In the glibc distribution (optfil 0.687), `libc_nonshared.a`'s `at_quick_exit`
+is glibc's
+
+```c
+int at_quick_exit (void (*func) (void))
+{
+  return __cxa_at_quick_exit ((void (*) (void *)) func, __dso_handle);
+}
+```
+
+which reads `__dso_handle`. That's crtbegin's plain `D __dso_handle`, not a
+Fil-C global, so the compiler sees a load through a pointer with no object and
+folds the whole function into `filc_optimized_access_check_fail`
+(`at_quick_exit.oS`, `pizlonatedFI1066_at_quick_exit`). Every program or
+library that registers a quick-exit handler traps:
+
+```c
+#include <stdlib.h>
+static void quick(void) { }
+int main(void) { return at_quick_exit(quick); }
+```
+
+```
+filc safety error: cannot read pointer with null object.
+    pointer: 0x0,<null>
+    expected 8 bytes with ptr aligned to 8 bytes.
+    at_quick_exit.c:45:57: at_quick_exit
+```
+
+`atexit.oS` doesn't have the problem: glibc's `atexit` passes a null DSO. The
+fix is the same there: pass `NULL`, or have crtbegin give Fil-C code its own
+`__dso_handle`. Seen through fil-rust's `libc_signals` test, which calls
+`__cxa_at_quick_exit` directly instead.
