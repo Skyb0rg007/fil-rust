@@ -1,6 +1,7 @@
 # A Rust runtime for Fil-C libraries
 
-Status: in progress on `library-runtime`. This is the plan and its running findings.
+Status: in progress on `library-runtime`. This is the plan and its running findings. Since
+2026-11-08 the plan is the switch to a Rust libc (below), which replaces libc mode and M6-M8.
 
 ## Context
 
@@ -362,113 +363,157 @@ where FUGC's mutators never wait: one of its tests takes about seven minutes alo
 also hadn't been setting `FIL_RUST_RUNTIME=rust`, so its backend-neutral tests ran on libpizlo. The
 runtime crate builds with `opt-level = 2` in the dev profile, which halves the stress runs.
 
-**M6. glibc flavor and aarch64**
-- The larger `zsys_*` set, per-flavor struct layouts for Rust natives (musl layouts on a glibc
-  host), support library compiled from `filc/src` with the glibc compiler (widen
-  `nix/filc-runtime-src.nix`).
-- `tests.glibc` and the aarch64 cross suite.
+## The switch to a Rust libc (2026-11-08)
 
-**M7. Remove libpizlo**
-- Flip the default; delete `csrc/shim.c` and the oracle backend; replace `abi_audit` with an
-  audit of the stub and natives; rewrite README and DESIGN; drop handshake-era rules.
-- The pinned Fil-C source stays, for `filc/src` and layout cross-checks.
+M6-M8 as first planned (glibc flavor and aarch64 on Fil-C's libc, then removing libpizlo, then a
+native libc beside Fil-C's) are replaced by one switch. **Trust the host libc, do all checks in Rust,
+avoid libpizlo**:
 
-**M8. A native libc that shares the host's state** (after M7, or alongside it)
+- libc imports are Rust natives over the host libc (the `libc` crate) and Rust std, so Rust and
+  Fil-C share one environment, one set of standard streams, one time zone. Every library runs on
+  the calling thread.
+- Libc mode is deleted: no Fil-C libc, boot thread, executors, job queue, constructor deferral, or
+  errno and dlerror handlers registered by a libc.
+- The libpizlo backend is deleted now, without waiting for parity.
+- `libfilrust_support.so` stays. It's Fil-C code with no libc or libpizlo dependency.
+- Not every libc function has to exist. A missing function fails by name when it's called, not when
+  its library loads.
+- The first cut is the glibc flavor (optfil, x86-64), C and C++. The musl flavor keeps working for
+  libraries that import nothing from libc; musl layouts for the natives may come later. The aarch64
+  suite shrinks to those libraries.
+- No Fil-C sources are pinned through Nix: the store is often strained. The small parts needed are
+  vendored.
 
-Goal: one libc state for Rust and Fil-C. Today a library that imports from libc gets Fil-C's user
-libc, with its own environment, stdio buffers and time zone, a boot thread and executors. M8
-replaces that, for the functions it covers, with natives in fil-rust-rt over the host libc (the
-`libc` crate) and Rust std. Whichever libc the host links supplies them, so a host running on
-glibc-rs needs no change. Every library whose libc imports are covered runs in bare mode, on the
-caller's thread.
+### Design
 
-Most libc state is kernel state (fds, cwd, umask, signal mask, rlimits, credentials) and is
-already shared, since system calls are native. Signal handlers are the runtime's already. The heap
-stays separate, because Fil-C memory has to be GC memory. What needs an owner:
+**Delivery.** `abi/update-symbols.sh` records every `pizlonated_*` export of the glibc
+distribution's `libc.so.6666`, `libm.so.6666`, `libpthread.so.6660` and `libdl.so.6662`, with
+versions and kinds. `build.rs` makes a stand-in per soname in the libpizlo stub's pattern: every
+export a `jmp *table[i]`, `.symver` aliases for each version, and a version script with every node.
+`fill_stub` binds them all by name. A missing function's getter returns a function object that
+fails by name when called; a missing datum fails when its getter runs. The `compat_glibc_*`
+stand-ins keep their sonames and version nodes and lose what only libpizlo used.
+
+**Per-thread libc state** (errno, dlerror, the `strtok` save pointer, the locale, pthread key
+values) lives in `ThreadExtra`, allocated at attach and marked with the thread. Never in a
+`thread_local!` with a destructor: registering one takes the loader lock, which a constructor may
+hold while it waits for a collection.
+
+**Race-tolerant access.** Rust reads Fil-C memory through a view whose scalar reads are single
+volatile loads, with bulk methods bounded by their arguments (the rule in `spikes/rseq-pin`). Host
+functions get Fil-C pointers only when their accesses are bounded by explicit lengths. Short inputs
+scanned for a terminator (paths, modes, names, formats) are copied, bounded by the object's end.
+Long scans (`strlen`, `strchr`, `strto*`) are Rust over the view. Pointers the host returns into its
+own memory (`getenv`, `strerror`) are copied into GC objects or interned.
+
+**State owners.**
 
 | State | Owner |
 |---|---|
-| Environment | Rust `std::env`, which takes Rust's environment lock, so Fil-C code can't race Rust threads changing it |
-| stdin, stdout, stderr | `std::io::stdin()` and friends, so output stays in order with `println!` (Rust never uses glibc's `stdout`) |
-| Time zone | the host's `localtime_r` and its `tzset` cache |
-| Locale | C locale only at first; `setlocale` may later forward to the host |
-| errno, `pthread` keys, `rand` | the Fil-C side; nothing to share |
+| Environment | `std::env`. `getenv` returns an interned GC copy; the `environ` getter rebuilds its snapshot when the host's array changes |
+| stdin, stdout, stderr | Rust `std::io`, so Fil-C output stays in order with `println!`. Rust's stdout is line-buffered, so `setvbuf` can only add flushes |
+| Other streams | host `FILE *` |
+| Time zone | the host's `localtime_r` |
+| Locale | C only |
+| Kernel state | already shared, since system calls are native |
 
-Scope, from the 1,633 exports of Fil-C's musl `libc.so`:
+**FILE.** glibc's headers inline `getc_unlocked`, `putc_unlocked`, `feof_unlocked` and
+`ferror_unlocked` into reads of `FILE`'s fields, so a `FILE *` is a real 216-byte GC object with
+glibc's layout. Its buffer pointers stay NULL, so the inline paths always call `__uflow` or
+`__overflow`, and the Rust side writes the EOF and error bits into `_flags`. A stream is found by
+the object's identity in a locked weak table, never by its fields. `fclose` frees the object, so a
+later use traps as a use-after-free. An unreachable stream is dropped without flushing: its
+destructor runs with the world stopped and does no I/O. Natives format while entered, then exit,
+then take the stream's lock and write; taking Rust's stdout lock while entered could deadlock a
+collection. `gc::fork` holds every stream lock.
 
-- **In:**
-  - math;
-  - string and memory;
-  - ctype, wctype, multibyte, `strto*`;
-  - the system-call wrappers (each matches a `zsys_*` native that exists);
-  - the environment;
-  - stdio without scanf: `FILE`, `fopen` and friends, the printf family;
-  - time;
-  - `DIR *`;
-  - mutexes and condition variables (atomics on user memory).
-- **Out for now:** anything that calls back into Fil-C code or keeps Fil-C pointers inside
-  libc: `qsort`, `bsearch`, `tsearch`, `atexit`, `pthread_create`/`once`/keys, `getopt`,
-  regex, glob, `fopencookie`. Also networking and user-database lookups, whose results are
-  pointer graphs; scanf; and locales other than C.
-- **A library importing anything out of scope** keeps today's libc mode, with Fil-C's libc and
-  unshared state, or is refused, depending on `Config::libc`. The import scan decides before
-  anything loads.
+**printf.** Rust parses the format. Arguments come from the call buffer or a `va_list`. Host
+`snprintf` formats one conversion at a time. `%s` needs a NUL within the object, and its precision
+is capped at what's left of the object. `%n` writes through a checked pointer.
 
-How a host function may see Fil-C memory. The host libc is trusted, but it was written for
-race-free callers, and other Fil-C threads may write any buffer during a call. So a host function
-gets a Fil-C pointer only if its reads and writes are bounded by its arguments:
+**Threads and callbacks.** `pthread_create`, `join`, `detach`, `self` and `exit` go over
+`zthread.rs`. Mutexes, condition variables, `once` and rwlocks are Rust futex code on glibc's
+layouts. Key destructors run on threads Fil-C created; on attached Rust threads they leak.
+`pthread_exit` on an attached thread fails by name. Natives that call Fil-C (`qsort`, `bsearch`,
+`pthread_once`, exit handlers) pass exceptions on and survive `longjmp`.
 
-| Kind | Examples | How |
-|---|---|---|
-| Explicit lengths, no retained pointers | `memchr`, `memcmp`, `fwrite`, `fread` | Pass the checked pointer and length to the host directly. |
-| Scans for a terminator, short strings | paths, `fopen` modes, environment names, format strings | Copy into a private buffer, stopping at the NUL or the object's end; with no NUL, fail as Fil-C would. |
-| Scans for a terminator, possibly long input | `strlen`, `strchr`, `strstr`, `strtol`, `strtod`, `atoi` | Rust over a race-tolerant view, bounded by the object's end. Copying first would make repeated `strtol(p, &end)` over a big buffer quadratic. |
-| Returns pointers into native memory | `getenv`, `strerror`, `ctime`, `tm_zone` | Copy into a GC object, or intern if static. |
-| Holds a host resource | `FILE *`, `DIR *` | An opaque special object owning the host pointer; close serialized against use; closed by its destructor when unreachable. |
-| Copies memory that may hold pointers | `memcpy`, `memmove` | The runtime's capability-copying helpers (`memops.rs`). |
+**Constructors and exit.** ELF constructors get argv from `Config::args` (the host's by default) and
+a fresh environ, rooted. `__cxa_atexit` (which `atexit` and C++ static destructors use) records
+handlers; Fil-C `exit()` runs them, flushes Fil-C's streams and Rust's stdout, and calls the host's
+`exit`. A host `atexit` hook, registered with the first handler, runs whatever is left.
 
-Rust code over Fil-C memory reads it only through a view type whose scalar reads are single
-volatile loads, so a value checked once can't be fetched again for its use. Bulk operations are
-methods with plain loads and bounds from their arguments. `spikes/rseq-pin` measured this
-discipline at about no cost. The reasoning is in the glibc-rs note (`filc-rust-idea.md`,
-"What race tolerance requires" and "Enforcing it with a view type").
+**Signals.** One that lands on a thread that isn't Fil-C's goes to the thread that installed the
+handler, if it's alive and doesn't block it; otherwise to any attached thread; otherwise it waits
+for the next entry. `__libc_current_sigrtmin` returns 35, keeping Fil-C code off signal 34.
 
-The printf family:
-- Rust parses the format string.
-- Arguments are decoded from Fil-C's varargs.
-- Host `snprintf` formats one conversion at a time.
-- `%s` becomes `%.*s`, with the precision capped at what's left of the object, so the host reads
-  at most that much whatever the contents.
-- `%n` writes through a checked pointer.
-- Output goes to the stream's buffer, or to `std::io::stdout()`.
+**dlopen from Fil-C** runs `check_library` on the target; `dlsym` calls the `pizlonated_` getter;
+`dlclose` never unmaps, since collected objects may still point into the mapping.
 
-Blocking calls such as `fread` on a pipe leave the thread at a safepoint, with their handle rooted
-from the native frame. Otherwise a collection could run the handle's destructor, whose `fclose`
-would wait on the lock the blocked call holds.
+**API.** `Backend`, `Config::runtime`, `Libc`, `Config::libc`, `workers`, `max_workers`,
+`FIL_RUST_RUNTIME` and `FIL_RUST_WORKERS` go. `Runtime::libc` returns the libc stand-in. `flush`
+flushes Fil-C's streams. `spawn` is `std::thread` plus `run`. `Config::args` stays. The `Shim` table
+goes, and `fil-rust` calls `fil-rust-rt` directly.
 
-Delivery: a generated `libc.so` stand-in in the libpizlo stub's pattern. Each export jumps through
-a table Rust fills, and imported data (`stdin`, `stdout`, `stderr`, `environ`) goes through the
-getters the pass emits for globals. That replaces the name-only stand-in.
+### L0. Spikes: done, go
 
-Verification:
-- **Differential:** each covered function, on the musl flavor, against Fil-C's musl libc, for
-  results, errno and safety failures.
-- **Shared state:** a Fil-C `printf` and a Rust `println!` come out in program order. A Rust
-  `set_var` is visible to Fil-C `getenv`, and the reverse.
-- **Races:** Fil-C threads rewrite strings and lengths during native calls (moving NULs, growing
-  a `%s` argument). Nothing reads past an object, in the style of the spike's verify mode.
-- **Bare proof:** a library using only covered functions starts no thread and maps no Fil-C libc.
+- **Versioned stand-ins work.** A generated `libc.so.6666` exports all 3,024 `pizlonated_*` entries
+  of the distribution's (2,788 names, 93 of them data), and `libm.so.6666` all 1,183. glibc fixtures
+  and the distribution's `libc++.so.1` and `libc++abi.so.1` bind against them with `RTLD_NOW`. Each
+  export needs a global alias per version, `.symver alias, name@@V` or `name@V`, with default names
+  also listed under their node in the version script. A plain `local: *` hides the non-default
+  versions, so the script makes only the aliases local.
+- **Kinds.** The distribution's getters tell functions (11 bytes, or a 5-byte jump to another getter)
+  from data (53 or 57 bytes) and thread-local data (34) by size.
+- **The support library builds for glibc** from `filc/src` at v0.687 with the glibc `filcc -O3`,
+  against the headers optfil ships. Its imports are helpers, `z*` natives and `memset`, as on musl.
+  `filc/src` is unchanged from v0.687 to the current upstream.
+- **Call buffer layout.** Arguments, varargs included, sit at their natural alignment: a `double`
+  takes 8 bytes, a `long double` 16 bytes at a 16-byte boundary (the gap is zeroed), and each
+  pointer's lower sits in the aux word at the same offset. A `va_list` is a pointer to a snapshot
+  with this layout. The natives' argument cursor must align, not just count words.
+- **Static destructors.** `atexit` is compiled into each library (from `libc_nonshared`) and calls
+  `pizlonated___cxa_atexit(fn, arg, __dso_handle)`, as C++ static destructors do. The host
+  `__cxa_finalize` that crt's `.fini_array` calls never sees them, so the runtime runs them.
+- **No goldens needed.** The suites that compared backends (`sys.rs` and others) assert in C and
+  report the failing line, so they don't need libpizlo's outputs.
 
-Open questions:
-- Fil-C's glibc-flavor headers may inline accesses into `FILE`'s fields (glibc's
-  `getc_unlocked`), which opaque handles would break. Check before supporting that flavor.
-- Where the host glibc and musl behave differently and client code was compiled against musl
-  (`strerror` text, `%m`, `printf` of `long double`), decide whose behavior wins.
-- Whether a library may mix: covered functions shared and native, the rest from Fil-C's libc with
-  its own state. That's convenient, but it splits stdio between two buffers.
+### Milestones
 
-Not in this plan: true no-GC mode, adopting Rust threads in libc mode, concurrent or parallel
-marking, the LLVM JIT, the sampling profiler.
+Each ends green in Nix and is committed.
+
+- **L1. One backend.** Delete `csrc/shim.c`, `compat_signals.inc`, `redirect_imports`, libpizlo's
+  boot, `Backend` and the `Shim` table; `fil-rust` calls `fil-rust-rt` directly. Delete
+  `nix/filc-runtime-src.nix`: the layout cross-check against `filc_runtime.h` moves into
+  `abi/update-symbols.sh`, run by hand against a local checkout when the pinned version changes.
+  musl libc mode stays until L6, as the only coverage for the system-call suites. Nix: `musl` takes
+  over `rust-rt` and `rust-rt-gc-stress`; `glibc` is build and clippy only; aarch64 runs the
+  libc-free musl tests.
+- **L2. glibc on the Rust runtime, bare.** Generated stand-ins, missing natives failing when called,
+  runtime-owned errno and dlerror (the registered handlers win until L6), the glibc support library
+  from vendored `filc/src`, flavor-aware loading. Tests on glibc: `rt_bare`, `rt_gc`, `layout`,
+  `jumps`, `tables`, `stdfil`, `cpu`; missing functions and data failing by name; no real
+  `libc.so.6666` or libpizlo mapped.
+- **L3. libc core.** The view, `double` arguments, the `va_list` decoder; strings, memory, ctype,
+  `strto*` and `__isoc23_*`; allocation; environment; time; `strerror`; system-call wrappers sharing
+  the `zsys_*` bodies; `epoll` with Fil-C's 16-byte event; `signal`, `sigaction` and routing;
+  `setjmp` and `longjmp`; exit handlers; `qsort`, `bsearch`; `dl*`; constructor arguments. Tests:
+  differential against host glibc for results, errno and safety failures; Fil-C threads moving NULs
+  during calls; environment changes seen both ways; signals with no libc main thread.
+- **L4. stdio.** FILE objects, `__uflow` and `__overflow`, the `fopen` family, printf, `getline`,
+  `puts`, `DIR *`. Tests: Fil-C `printf` and Rust `println!` in order; inline `getc_unlocked` and
+  `feof_unlocked`; corrupted FILE fields stay safe; use after `fclose` traps; capped `%s`; `%n`; fork
+  with buffered output; `smoke`, `calls`, `misuse`, `bindgen` on glibc.
+- **L5. pthreads and C++.** pthreads; the C locale's `newlocale`, `uselocale` and `*_l`; wide
+  characters; `__isoc23_sscanf`; what else libc++ calls on tested paths. Tests on glibc: `threads`,
+  `callbacks`, `stress`, `edges`, `lifecycle`, `cxx`, `std::thread`, key destructors.
+- **L6. Switch over.** Delete libc mode and the `zregister_*` natives; musl becomes libc-free only;
+  port `maps`, `signals`, `sockets`, `system`, `sys`, `process`, `startup`, `ui` and the examples to
+  glibc; delete `rt_libc.rs`; `boot.rs` proves nothing but the stand-ins is mapped; `abi_audit`
+  checks the stand-ins against the distribution and the natives' layouts against the headers. Nix:
+  `glibc`, `glibc-gc-stress`, `musl`, `examples`, `clippy`. Rewrite README and DESIGN.
+
+Not in this plan: true no-GC mode, concurrent or parallel marking, the LLVM JIT, the sampling
+profiler.
 
 ## Critical files
 
