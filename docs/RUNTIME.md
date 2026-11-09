@@ -373,8 +373,102 @@ runtime crate builds with `opt-level = 2` in the dev profile, which halves the s
   audit of the stub and natives; rewrite README and DESIGN; drop handshake-era rules.
 - The pinned Fil-C source stays, for `filc/src` and layout cross-checks.
 
-Not in this plan: true no-GC mode, a Rust mini libc to widen bare mode, adopting Rust threads
-in libc mode, concurrent or parallel marking, the LLVM JIT, the sampling profiler.
+**M8. A native libc that shares the host's state** (after M7, or alongside it)
+
+Goal: one libc state for Rust and Fil-C. Today a library that imports from libc gets Fil-C's user
+libc, with its own environment, stdio buffers and time zone, a boot thread and executors. M8
+replaces that, for the functions it covers, with natives in fil-rust-rt over the host libc (the
+`libc` crate) and Rust std. Whichever libc the host links supplies them, so a host running on
+glibc-rs needs no change. Every library whose libc imports are covered runs in bare mode, on the
+caller's thread.
+
+Most libc state is kernel state (fds, cwd, umask, signal mask, rlimits, credentials) and is
+already shared, since system calls are native. Signal handlers are the runtime's already. The heap
+stays separate, because Fil-C memory has to be GC memory. What needs an owner:
+
+| State | Owner |
+|---|---|
+| Environment | Rust `std::env`, which takes Rust's environment lock, so Fil-C code can't race Rust threads changing it |
+| stdin, stdout, stderr | `std::io::stdin()` and friends, so output stays in order with `println!` (Rust never uses glibc's `stdout`) |
+| Time zone | the host's `localtime_r` and its `tzset` cache |
+| Locale | C locale only at first; `setlocale` may later forward to the host |
+| errno, `pthread` keys, `rand` | the Fil-C side; nothing to share |
+
+Scope, from the 1,633 exports of Fil-C's musl `libc.so`:
+
+- **In:**
+  - math;
+  - string and memory;
+  - ctype, wctype, multibyte, `strto*`;
+  - the system-call wrappers (each matches a `zsys_*` native that exists);
+  - the environment;
+  - stdio without scanf: `FILE`, `fopen` and friends, the printf family;
+  - time;
+  - `DIR *`;
+  - mutexes and condition variables (atomics on user memory).
+- **Out for now:** anything that calls back into Fil-C code or keeps Fil-C pointers inside
+  libc: `qsort`, `bsearch`, `tsearch`, `atexit`, `pthread_create`/`once`/keys, `getopt`,
+  regex, glob, `fopencookie`. Also networking and user-database lookups, whose results are
+  pointer graphs; scanf; and locales other than C.
+- **A library importing anything out of scope** keeps today's libc mode, with Fil-C's libc and
+  unshared state, or is refused, depending on `Config::libc`. The import scan decides before
+  anything loads.
+
+How a host function may see Fil-C memory. The host libc is trusted, but it was written for
+race-free callers, and other Fil-C threads may write any buffer during a call. So a host function
+gets a Fil-C pointer only if its reads and writes are bounded by its arguments:
+
+| Kind | Examples | How |
+|---|---|---|
+| Explicit lengths, no retained pointers | `memchr`, `memcmp`, `fwrite`, `fread` | Pass the checked pointer and length to the host directly. |
+| Scans for a terminator, short strings | paths, `fopen` modes, environment names, format strings | Copy into a private buffer, stopping at the NUL or the object's end; with no NUL, fail as Fil-C would. |
+| Scans for a terminator, possibly long input | `strlen`, `strchr`, `strstr`, `strtol`, `strtod`, `atoi` | Rust over a race-tolerant view, bounded by the object's end. Copying first would make repeated `strtol(p, &end)` over a big buffer quadratic. |
+| Returns pointers into native memory | `getenv`, `strerror`, `ctime`, `tm_zone` | Copy into a GC object, or intern if static. |
+| Holds a host resource | `FILE *`, `DIR *` | An opaque special object owning the host pointer; close serialized against use; closed by its destructor when unreachable. |
+| Copies memory that may hold pointers | `memcpy`, `memmove` | The runtime's capability-copying helpers (`memops.rs`). |
+
+Rust code over Fil-C memory reads it only through a view type whose scalar reads are single
+volatile loads, so a value checked once can't be fetched again for its use. Bulk operations are
+methods with plain loads and bounds from their arguments. `spikes/rseq-pin` measured this
+discipline at about no cost. The reasoning is in the glibc-rs note (`filc-rust-idea.md`,
+"What race tolerance requires" and "Enforcing it with a view type").
+
+The printf family:
+- Rust parses the format string.
+- Arguments are decoded from Fil-C's varargs.
+- Host `snprintf` formats one conversion at a time.
+- `%s` becomes `%.*s`, with the precision capped at what's left of the object, so the host reads
+  at most that much whatever the contents.
+- `%n` writes through a checked pointer.
+- Output goes to the stream's buffer, or to `std::io::stdout()`.
+
+Blocking calls such as `fread` on a pipe leave the thread at a safepoint, with their handle rooted
+from the native frame. Otherwise a collection could run the handle's destructor, whose `fclose`
+would wait on the lock the blocked call holds.
+
+Delivery: a generated `libc.so` stand-in in the libpizlo stub's pattern. Each export jumps through
+a table Rust fills, and imported data (`stdin`, `stdout`, `stderr`, `environ`) goes through the
+getters the pass emits for globals. That replaces the name-only stand-in.
+
+Verification:
+- **Differential:** each covered function, on the musl flavor, against Fil-C's musl libc, for
+  results, errno and safety failures.
+- **Shared state:** a Fil-C `printf` and a Rust `println!` come out in program order. A Rust
+  `set_var` is visible to Fil-C `getenv`, and the reverse.
+- **Races:** Fil-C threads rewrite strings and lengths during native calls (moving NULs, growing
+  a `%s` argument). Nothing reads past an object, in the style of the spike's verify mode.
+- **Bare proof:** a library using only covered functions starts no thread and maps no Fil-C libc.
+
+Open questions:
+- Fil-C's glibc-flavor headers may inline accesses into `FILE`'s fields (glibc's
+  `getc_unlocked`), which opaque handles would break. Check before supporting that flavor.
+- Where the host glibc and musl behave differently and client code was compiled against musl
+  (`strerror` text, `%m`, `printf` of `long double`), decide whose behavior wins.
+- Whether a library may mix: covered functions shared and native, the rest from Fil-C's libc with
+  its own state. That's convenient, but it splits stdio between two buffers.
+
+Not in this plan: true no-GC mode, adopting Rust threads in libc mode, concurrent or parallel
+marking, the LLVM JIT, the sampling profiler.
 
 ## Critical files
 
